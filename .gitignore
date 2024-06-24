@@ -1,0 +1,5 @@
+.DS_Store
+.vscode
+/target
+/8088-tests-v2/*.json.gz
+/8088-tests-v2/metadata.json
