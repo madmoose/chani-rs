@@ -57,12 +57,36 @@ impl Cpu {
         self.register_file.set(CX, v);
     }
 
+    pub fn set_cl(&mut self, v: u8) {
+        self.register_file.set_lo(CX, v);
+    }
+
+    pub fn set_ch(&mut self, v: u8) {
+        self.register_file.set_hi(CX, v);
+    }
+
     pub fn set_dx(&mut self, v: u16) {
         self.register_file.set(DX, v);
     }
 
+    pub fn set_dl(&mut self, v: u8) {
+        self.register_file.set_lo(DX, v);
+    }
+
+    pub fn set_dh(&mut self, v: u8) {
+        self.register_file.set_hi(DX, v);
+    }
+
     pub fn set_bx(&mut self, v: u16) {
         self.register_file.set(BX, v);
+    }
+
+    pub fn set_bl(&mut self, v: u8) {
+        self.register_file.set_lo(BX, v);
+    }
+
+    pub fn set_bh(&mut self, v: u8) {
+        self.register_file.set_hi(BX, v);
     }
 
     pub fn set_sp(&mut self, v: u16) {
@@ -126,12 +150,36 @@ impl Cpu {
         self.register_file.get(CX)
     }
 
+    pub fn get_cl(&self) -> u8 {
+        self.register_file.get_lo(CX)
+    }
+
+    pub fn get_ch(&self) -> u8 {
+        self.register_file.get_hi(CX)
+    }
+
     pub fn get_dx(&self) -> u16 {
         self.register_file.get(DX)
     }
 
+    pub fn get_dl(&self) -> u8 {
+        self.register_file.get_lo(DX)
+    }
+
+    pub fn get_dh(&self) -> u8 {
+        self.register_file.get_hi(DX)
+    }
+
     pub fn get_bx(&self) -> u16 {
         self.register_file.get(BX)
+    }
+
+    pub fn get_bl(&self) -> u8 {
+        self.register_file.get_lo(BX)
+    }
+
+    pub fn get_bh(&self) -> u8 {
+        self.register_file.get_hi(BX)
     }
 
     pub fn get_sp(&self) -> u16 {
@@ -280,29 +328,29 @@ impl Cpu {
 
     fn reg_readw_ax(&self, w: Width) -> u16 {
         match w {
-            W8 => self.register_file.get_lo(AX) as u16,
+            W8 => self.get_al() as u16,
             W16 => self.get_ax(),
         }
     }
 
     fn reg_writew_ax(&mut self, w: Width, v: u16) {
         match w {
-            W8 => self.register_file.set_lo(AX, v as u8),
-            W16 => self.register_file.set(AX, v),
+            W8 => self.set_al(v as u8),
+            W16 => self.set_ax(v),
         }
     }
 
     fn reg_read8(&self, reg_idx: u8) -> u8 {
         assert!(reg_idx < 0b1000);
         match reg_idx {
-            0b000 => self.register_file.get_lo(AX),
-            0b001 => self.register_file.get_lo(CX),
-            0b010 => self.register_file.get_lo(DX),
-            0b011 => self.register_file.get_lo(BX),
-            0b100 => self.register_file.get_hi(AX),
-            0b101 => self.register_file.get_hi(CX),
-            0b110 => self.register_file.get_hi(DX),
-            0b111 => self.register_file.get_hi(BX),
+            0b000 => self.get_al(),
+            0b001 => self.get_cl(),
+            0b010 => self.get_dl(),
+            0b011 => self.get_bl(),
+            0b100 => self.get_ah(),
+            0b101 => self.get_ch(),
+            0b110 => self.get_dh(),
+            0b111 => self.get_bh(),
             _ => panic!(),
         }
     }
@@ -311,13 +359,13 @@ impl Cpu {
         assert!(reg_idx < 0b1000);
         match reg_idx {
             0b000 => self.get_ax(),
-            0b001 => self.register_file.get(CX),
-            0b010 => self.register_file.get(DX),
-            0b011 => self.register_file.get(BX),
-            0b100 => self.register_file.get(SP),
-            0b101 => self.register_file.get(BP),
-            0b110 => self.register_file.get(SI),
-            0b111 => self.register_file.get(DI),
+            0b001 => self.get_cx(),
+            0b010 => self.get_dx(),
+            0b011 => self.get_bx(),
+            0b100 => self.get_sp(),
+            0b101 => self.get_bp(),
+            0b110 => self.get_si(),
+            0b111 => self.get_di(),
             _ => panic!(),
         }
     }
@@ -333,14 +381,14 @@ impl Cpu {
     fn reg_write8(&mut self, reg_idx: u8, v: u8) {
         assert!(reg_idx < 0b1000);
         match reg_idx {
-            0b000 => self.register_file.set_lo(AX, v),
-            0b001 => self.register_file.set_lo(CX, v),
-            0b010 => self.register_file.set_lo(DX, v),
-            0b011 => self.register_file.set_lo(BX, v),
-            0b100 => self.register_file.set_hi(AX, v),
-            0b101 => self.register_file.set_hi(CX, v),
-            0b110 => self.register_file.set_hi(DX, v),
-            0b111 => self.register_file.set_hi(BX, v),
+            0b000 => self.set_al(v),
+            0b001 => self.set_cl(v),
+            0b010 => self.set_dl(v),
+            0b011 => self.set_bl(v),
+            0b100 => self.set_ah(v),
+            0b101 => self.set_ch(v),
+            0b110 => self.set_dh(v),
+            0b111 => self.set_bh(v),
             _ => panic!(),
         }
     }
@@ -348,14 +396,14 @@ impl Cpu {
     fn reg_write16(&mut self, reg_idx: u8, v: u16) {
         assert!(reg_idx < 0b1000);
         match reg_idx {
-            0b000 => self.register_file.set(AX, v),
-            0b001 => self.register_file.set(CX, v),
-            0b010 => self.register_file.set(DX, v),
-            0b011 => self.register_file.set(BX, v),
-            0b100 => self.register_file.set(SP, v),
-            0b101 => self.register_file.set(BP, v),
-            0b110 => self.register_file.set(SI, v),
-            0b111 => self.register_file.set(DI, v),
+            0b000 => self.set_ax(v),
+            0b001 => self.set_cx(v),
+            0b010 => self.set_dx(v),
+            0b011 => self.set_bx(v),
+            0b100 => self.set_sp(v),
+            0b101 => self.set_bp(v),
+            0b110 => self.set_si(v),
+            0b111 => self.set_di(v),
             _ => panic!(),
         }
     }
@@ -395,16 +443,18 @@ impl Cpu {
     }
 
     fn fetch8(&mut self, bus: &mut impl Bus) -> u8 {
-        let csip = self.register_file.get_csip();
-        let v = self.mem_read8(bus, csip.0, csip.1);
-        self.set_ip(csip.1.wrapping_add(1));
+        let cs = self.get_cs();
+        let ip = self.get_ip();
+        let v = self.mem_read8(bus, cs, ip);
+        self.set_ip(ip.wrapping_add(1));
         v
     }
 
     fn fetch16(&mut self, bus: &mut impl Bus) -> u16 {
-        let csip = self.register_file.get_csip();
-        let v = self.mem_read16(bus, csip.0, csip.1);
-        self.set_ip(csip.1.wrapping_add(2));
+        let cs = self.get_cs();
+        let ip = self.get_ip();
+        let v = self.mem_read16(bus, cs, ip);
+        self.set_ip(ip.wrapping_add(2));
         v
     }
 
@@ -438,10 +488,10 @@ impl Cpu {
                 _ => unreachable!(),
             };
             let mut ofs = match rm {
-                0b000 => self.register_file.get(BX).wrapping_add(self.get_si()),
-                0b001 => self.register_file.get(BX).wrapping_add(self.get_di()),
-                0b010 => self.register_file.get(BP).wrapping_add(self.get_si()),
-                0b011 => self.register_file.get(BP).wrapping_add(self.get_di()),
+                0b000 => self.get_bx().wrapping_add(self.get_si()),
+                0b001 => self.get_bx().wrapping_add(self.get_di()),
+                0b010 => self.get_bp().wrapping_add(self.get_si()),
+                0b011 => self.get_bp().wrapping_add(self.get_di()),
                 0b100 => self.get_si(),
                 0b101 => self.get_di(),
                 0b110 if r#mod == 0 => self.fetch16(bus),
@@ -704,7 +754,7 @@ impl Cpu {
             cf = false;
         }
 
-        self.register_file.set_lo(AX, al);
+        self.set_al(al);
         self.set_cf(cf);
         self.set_pf(pf8(al as u16));
         self.set_af(af);
@@ -736,7 +786,7 @@ impl Cpu {
             new_cf = true;
         }
 
-        self.register_file.set_lo(AX, new_al);
+        self.set_al(new_al);
         self.set_cf(new_cf);
         self.set_pf(pf8(new_al as u16));
         self.set_af(new_af);
@@ -763,7 +813,7 @@ impl Cpu {
         }
         new_ax &= 0xff0f;
 
-        self.register_file.set(AX, new_ax);
+        self.set_ax(new_ax);
         self.set_cf(new_cf);
         self.set_pf(pf8(new_ax));
         self.set_af(new_af);
@@ -775,7 +825,7 @@ impl Cpu {
 
     fn op_aas(&mut self) {
         let old_ax = self.get_ax();
-        let old_af = self.register_file.get_af();
+        let old_af = self.get_af();
 
         let mut new_ax = old_ax;
         let mut new_cf = false;
@@ -790,7 +840,7 @@ impl Cpu {
         }
         new_ax &= 0xff0f;
 
-        self.register_file.set(AX, new_ax);
+        self.set_ax(new_ax);
         self.set_cf(new_cf);
         self.set_pf(pf8(new_ax));
         self.set_af(new_af);
@@ -834,9 +884,9 @@ impl Cpu {
         let reg_idx = op & 0b111;
 
         // On 8086 'push ss' pushes the updated value of ss
-        let ss = self.register_file.get(SS);
-        let sp = self.register_file.get(SP).wrapping_sub(2);
-        self.register_file.set(SP, sp);
+        let ss = self.get_ss();
+        let sp = self.get_sp().wrapping_sub(2);
+        self.set_sp(sp);
 
         let v = self.reg_read16(reg_idx);
 
@@ -877,9 +927,9 @@ impl Cpu {
         }
 
         if r {
-            let ip = self.register_file.get(IP);
+            let ip = self.get_ip();
             let ip = ip.wrapping_add_signed(inc as i16);
-            self.register_file.set(IP, ip);
+            self.set_ip(ip);
         }
 
         self.cycles += 4;
@@ -1974,9 +2024,9 @@ impl Cpu {
     }
 
     fn op_grp5_push_rm16(&mut self, bus: &mut impl Bus, modrm: u8) {
-        let ss = self.register_file.get(SS);
-        let sp = self.register_file.get(SP).wrapping_sub(2);
-        self.register_file.set(SP, sp);
+        let ss = self.get_ss();
+        let sp = self.get_sp().wrapping_sub(2);
+        self.set_sp(sp);
 
         let mem = self.modrm_mem_sw(bus, modrm, W16);
         let v = self.read_modrm(bus, mem);
