@@ -1,14 +1,4 @@
 /*
- * ######## ##          ###     ######    ######
- * ##       ##         ## ##   ##    ##  ##    ##
- * ##       ##        ##   ##  ##        ##
- * ######   ##       ##     ## ##   ####  ######
- * ##       ##       ######### ##    ##        ##
- * ##       ##       ##     ## ##    ##  ##    ##
- * ##       ######## ##     ##  ######    ######
- */
-
-/*
  * Sign
  */
 
@@ -112,11 +102,7 @@ pub fn zf16(res: u16) -> bool {
 
 #[inline]
 pub fn _zfw(res: u16, w: bool) -> bool {
-    if !w {
-        zf8(res)
-    } else {
-        zf16(res)
-    }
+    if !w { zf8(res) } else { zf16(res) }
 }
 
 /*
@@ -135,11 +121,7 @@ pub fn sf16(res: u16) -> bool {
 
 #[inline]
 pub fn _sfw(res: u16, w: bool) -> bool {
-    if !w {
-        sf8(res)
-    } else {
-        sf16(res)
-    }
+    if !w { sf8(res) } else { sf16(res) }
 }
 
 /*

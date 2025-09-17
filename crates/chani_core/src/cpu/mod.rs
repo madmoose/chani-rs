@@ -1,9 +1,30 @@
 mod bitops;
-mod cpu;
+mod cpu_impl;
 mod flags;
 mod register_file;
 
-pub use cpu::Cpu;
+pub use cpu_impl::Cpu;
+
+use crate::{address::Address, device::vga::Vga, machine::Machine, memory::Memory};
+use Width::*;
+
+pub trait CpuContext {
+    fn memory(&mut self) -> &mut Memory;
+    fn io_read_u8(&mut self, port: u16) -> u8;
+    fn io_write_u8(&mut self, port: u16, v: u8);
+    fn io_read_u16(&mut self, port: u16) -> u16;
+    fn io_write_u16(&mut self, port: u16, v: u16);
+    fn vga(&self) -> &Vga;
+}
+
+pub type Callback = fn(&mut Machine, Address);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum State {
+    #[default]
+    Running,
+    Callback((Callback, Address)),
+}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Register {
@@ -22,7 +43,36 @@ enum Register {
     IP,
 }
 
-#[derive(Debug, Clone, Copy)]
+impl From<disasm::SReg> for Register {
+    fn from(v: disasm::SReg) -> Self {
+        match v {
+            disasm::SReg::ES => Register::ES,
+            disasm::SReg::CS => Register::CS,
+            disasm::SReg::SS => Register::SS,
+            disasm::SReg::DS => Register::DS,
+        }
+    }
+}
+
+impl From<disasm::BaseReg> for Register {
+    fn from(v: disasm::BaseReg) -> Self {
+        match v {
+            disasm::BaseReg::BX => Register::BX,
+            disasm::BaseReg::BP => Register::BP,
+        }
+    }
+}
+
+impl From<disasm::IndexReg> for Register {
+    fn from(v: disasm::IndexReg) -> Self {
+        match v {
+            disasm::IndexReg::SI => Register::SI,
+            disasm::IndexReg::DI => Register::DI,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum SReg {
     ES,
     CS,
@@ -112,16 +162,10 @@ enum Width {
     W16,
 }
 
-use Width::*;
-
 impl Width {
     #[inline]
     fn from_op(op: u8) -> Width {
-        if op & 1 == 0 {
-            W8
-        } else {
-            W16
-        }
+        if op & 1 == 0 { W8 } else { W16 }
     }
 }
 

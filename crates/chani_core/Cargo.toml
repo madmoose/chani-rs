@@ -1,0 +1,11 @@
+[package]
+name = "chani_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes_ext.workspace = true
+disasm.workspace = true
+egui.workspace = true
+serde.workspace = true
+serde_json.workspace = true

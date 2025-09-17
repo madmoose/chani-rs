@@ -1,11 +1,24 @@
+use std::fmt::Display;
+
+use crate::address::{Address, addr};
+
 use super::{
-    Register, FLAG_AF, FLAG_CF, FLAG_DF, FLAG_IF, FLAG_OF, FLAG_PF, FLAG_SF, FLAG_TF, FLAG_ZF,
+    FLAG_AF, FLAG_CF, FLAG_DF, FLAG_IF, FLAG_OF, FLAG_PF, FLAG_SF, FLAG_TF, FLAG_ZF, Register,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RegisterFile {
     reg: [u16; 13],
     flags: u16,
+}
+
+impl Default for RegisterFile {
+    fn default() -> Self {
+        Self {
+            reg: Default::default(),
+            flags: filter_flags(0),
+        }
+    }
 }
 
 fn reg_index(reg: Register) -> usize {
@@ -23,6 +36,29 @@ fn reg_index(reg: Register) -> usize {
         Register::SS => 10,
         Register::DS => 11,
         Register::IP => 12,
+    }
+}
+
+impl Display for RegisterFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AX={:04x} CX={:04x} DX={:04x} BX={:04x} SP={:04x} BP={:04x} SI={:04x} DI={:04x} ES={:04x} CS={:04x} SS={:04x} DS={:04x} IP={:04x} FLAGS={:04x}",
+            self.get(Register::AX),
+            self.get(Register::CX),
+            self.get(Register::DX),
+            self.get(Register::BX),
+            self.get(Register::SP),
+            self.get(Register::BP),
+            self.get(Register::SI),
+            self.get(Register::DI),
+            self.get(Register::ES),
+            self.get(Register::CS),
+            self.get(Register::SS),
+            self.get(Register::DS),
+            self.get(Register::IP),
+            self.flags & 0x0fff,
+        )
     }
 }
 
@@ -64,10 +100,10 @@ impl RegisterFile {
     }
 
     #[inline]
-    pub fn get_csip(&self) -> (u16, u16) {
+    pub fn get_csip(&self) -> Address {
         let cs = self.get(Register::CS);
         let ip = self.get(Register::IP);
-        (cs, ip)
+        addr(cs, ip)
     }
 
     #[inline]
@@ -77,7 +113,7 @@ impl RegisterFile {
 
     #[inline]
     pub fn set_flags(&mut self, v: u16) {
-        self.flags = v;
+        self.flags = filter_flags(v);
     }
 
     #[inline]
@@ -177,4 +213,12 @@ impl RegisterFile {
     pub fn set_of(&mut self, cond: bool) {
         self.set_flags_cond(FLAG_OF, cond);
     }
+}
+
+#[inline]
+fn filter_flags(flags: u16) -> u16 {
+    const RESERVED_ON: u16 = 0b1111_0000_0000_0010;
+    const RESERVED_OFF: u16 = 0b1111_1111_1101_0111;
+
+    (flags | RESERVED_ON) & RESERVED_OFF
 }

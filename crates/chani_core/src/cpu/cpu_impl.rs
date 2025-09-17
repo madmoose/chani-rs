@@ -1,27 +1,40 @@
-use std::mem::swap;
-
-use crate::bus::Bus;
-use crate::i8088::StrOp;
-
 use super::bitops::BitOps;
 use super::register_file::RegisterFile;
 use super::{
-    ea, flags::*, sext16, AluOp, Dir, RepMode, FLAG_AF, FLAG_CF, FLAG_PF, FLAG_SF, FLAG_ZF,
+    AluOp, Callback, Dir, FLAG_AF, FLAG_CF, FLAG_PF, FLAG_SF, FLAG_ZF, RepMode, flags::*, sext16,
 };
 use super::{
-    read_hi, read_lo, sext, ModRM, RegMem,
+    ModRM, RegMem,
     Register::*,
     SReg,
     Width::{self, *},
+    read_hi, read_lo, sext,
 };
+use super::{State, StrOp};
+use crate::address::{Address, addr};
+use crate::cpu::CpuContext;
+use crate::memory::Memory;
+use std::collections::HashMap;
+use std::fmt::LowerHex;
+use std::mem::swap;
 
 #[derive(Debug, Default)]
 pub struct Cpu {
+    state: State,
+    instruction_address: Address,
     register_file: RegisterFile,
     sreg_ovr: Option<SReg>,
     int_delay: bool,
+    int_nmi: bool,
+    int_intr: bool,
+    int_number: u8,
+
     rep_mode: RepMode,
     cycles: u64,
+    instruction_count: u64,
+
+    pub callback_base_address: Address,
+    pub callbacks: HashMap<Address, Callback>,
 }
 
 impl SReg {
@@ -36,9 +49,336 @@ impl SReg {
     }
 }
 
+enum Dd {
+    Byte(u8),
+    Word(u16),
+    Dword(u32),
+}
+
+impl Dd {
+    pub fn as_u32(&self) -> u32 {
+        match self {
+            Dd::Byte(v) => *v as u32,
+            Dd::Word(v) => *v as u32,
+            Dd::Dword(v) => *v,
+        }
+    }
+}
+
+impl LowerHex for Dd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Dd::Byte(v) => {
+                write!(f, "{:02x}", v)
+            }
+            Dd::Word(v) => {
+                write!(f, "{:04x}", v)
+            }
+            Dd::Dword(v) => {
+                write!(f, "{:08x}", v)
+            }
+        }
+    }
+}
+
 impl Cpu {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            callback_base_address: addr(0xfe00, 0),
+            ..Self::default()
+        }
+    }
+
+    pub fn frequency(&self) -> f64 {
+        5.0
+    }
+
+    pub fn run_cycles<Context: CpuContext>(
+        &mut self,
+        ctx: &mut Context,
+        cycles: u64,
+    ) -> (u64, Option<(Callback, Address)>) {
+        self.state = State::Running;
+        let start_cycles = self.cycles;
+
+        while self.cycles - start_cycles < cycles {
+            self.step(ctx);
+            self.instruction_count += 1;
+
+            if !matches!(self.state, State::Running) {
+                break;
+            }
+        }
+
+        let callback = match self.state {
+            State::Running => None,
+            State::Callback(callback) => Some(callback),
+        };
+
+        (self.cycles - start_cycles, callback)
+    }
+
+    fn resolve_memory_reference<Context: CpuContext>(
+        &self,
+        ctx: &mut Context,
+        mem_ref: disasm::MemRef,
+    ) -> (Address, Dd) {
+        let (addr, width) = match mem_ref {
+            disasm::MemRef::Direct { seg, ofs, width } => (addr(seg, ofs), width),
+            disasm::MemRef::Indirect {
+                seg,
+                base,
+                index,
+                disp,
+                width,
+            } => {
+                let seg = self.register_file.get(seg.into());
+                let base = base.map(|b| self.register_file.get(b.into())).unwrap_or(0);
+                let index = index.map(|i| self.register_file.get(i.into())).unwrap_or(0);
+
+                let ofs = base.wrapping_add(index).wrapping_add(disp);
+
+                (addr(seg, ofs), width)
+            }
+        };
+
+        let v = match width {
+            disasm::DataWidth::Byte => Dd::Byte(ctx.memory().read_u8(addr)),
+            disasm::DataWidth::Word => Dd::Word(ctx.memory().read_u16(addr)),
+            disasm::DataWidth::Dword => {
+                let lo = ctx.memory().read_u16(addr);
+                let hi = ctx.memory().read_u16(addr + 2);
+                Dd::Dword(((hi as u32) << 16) + (lo as u32))
+            }
+        };
+
+        (addr, v)
+    }
+
+    pub fn step<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let mut op: u8;
+
+        let csip = self.register_file.get_csip();
+
+        self.instruction_address = csip;
+
+        if !self.int_delay && self.register_file.get_if() {
+            if self.int_nmi {
+                self.int_nmi = false;
+                self.call_int(ctx, 2);
+                return;
+            }
+            if self.int_intr {
+                self.int_intr = false;
+                self.call_int(ctx, self.int_number);
+                return;
+            }
+        }
+        self.int_delay = false;
+
+        self.sreg_ovr = None;
+        self.rep_mode = RepMode::None;
+
+        loop {
+            op = self.fetch8(ctx);
+
+            match op {
+                0x26 => self.sreg_ovr = Some(SReg::ES),
+                0x2e => self.sreg_ovr = Some(SReg::CS),
+                0x36 => self.sreg_ovr = Some(SReg::SS),
+                0x3e => self.sreg_ovr = Some(SReg::DS),
+                0xf2 => self.rep_mode = RepMode::Repne,
+                0xf3 => self.rep_mode = RepMode::Rep,
+                _ => break,
+            }
+        }
+
+        match op {
+            0x00..=0x03 => self.op_alu_r_rm(ctx, op),
+            0x04..=0x05 => self.op_alu_a_imm(ctx, op),
+            0x06..=0x06 => self.op_push_sreg(ctx, op),
+            0x07..=0x07 => self.op_pop_sreg(ctx, op),
+            0x08..=0x0b => self.op_alu_r_rm(ctx, op),
+            0x0c..=0x0d => self.op_alu_a_imm(ctx, op),
+            0x0e..=0x0e => self.op_push_sreg(ctx, op),
+            0x0f..=0x0f => self.op_pop_sreg(ctx, op),
+            0x10..=0x13 => self.op_alu_r_rm(ctx, op),
+            0x14..=0x15 => self.op_alu_a_imm(ctx, op),
+            0x16..=0x16 => self.op_push_sreg(ctx, op),
+            0x17..=0x17 => self.op_pop_sreg(ctx, op),
+            0x18..=0x1b => self.op_alu_r_rm(ctx, op),
+            0x1c..=0x1d => self.op_alu_a_imm(ctx, op),
+            0x1e..=0x1e => self.op_push_sreg(ctx, op),
+            0x1f..=0x1f => self.op_pop_sreg(ctx, op),
+            0x20..=0x23 => self.op_alu_r_rm(ctx, op),
+            0x24..=0x25 => self.op_alu_a_imm(ctx, op),
+            0x26..=0x26 => unreachable!(),
+            0x27..=0x27 => self.op_daa(),
+            0x28..=0x2b => self.op_alu_r_rm(ctx, op),
+            0x2c..=0x2d => self.op_alu_a_imm(ctx, op),
+            0x2e..=0x2e => unreachable!(),
+            0x2f..=0x2f => self.op_das(),
+            0x30..=0x33 => self.op_alu_r_rm(ctx, op),
+            0x34..=0x35 => self.op_alu_a_imm(ctx, op),
+            0x36..=0x36 => unreachable!(),
+            0x37..=0x37 => self.op_aaa(),
+            0x38..=0x3b => self.op_alu_r_rm(ctx, op),
+            0x3c..=0x3d => self.op_alu_a_imm(ctx, op),
+            0x3e..=0x3e => unreachable!(),
+            0x3f..=0x3f => self.op_aas(),
+            0x40..=0x47 => self.op_inc_reg(op),
+            0x48..=0x4f => self.op_dec_reg(op),
+            0x50..=0x57 => self.op_push_reg(ctx, op),
+            0x58..=0x5f => self.op_pop_reg(ctx, op),
+            0x60..=0x7f => self.op_jcc(ctx, op),
+            0x80..=0x83 => self.op_grp1_rmw_imm(ctx, op),
+            0x84..=0x85 => self.op_test_rm_r(ctx, op),
+            0x86..=0x87 => self.op_xchg_rm_r(ctx, op),
+            0x88..=0x8b => self.op_mov_rm_r(ctx, op),
+            0x8c => self.op_mov_rm16_sreg(ctx, op),
+            0x8d => self.op_lea_r16_m16(ctx),
+            0x8e => self.op_mov_rm16_sreg(ctx, op),
+            0x8f => self.op_pop_rm16(ctx),
+            0x90..=0x97 => self.op_xchg_ax_r(op),
+            0x98 => self.op_cbw(),
+            0x99 => self.op_cwd(),
+            0x9a => self.op_call_far(ctx),
+            0x9b => self.op_wait(),
+            0x9c => self.op_pushf(ctx),
+            0x9d => self.op_popf(ctx),
+            0x9e => self.op_sahf(),
+            0x9f => self.op_lahf(),
+            0xa0..=0xa3 => self.op_mov_a_m(ctx, op),
+            0xa4..=0xa5 => self.op_movs(ctx, op),
+            0xa6..=0xa7 => self.op_cmps(ctx, op),
+            0xa8..=0xa9 => self.op_test_a_imm(ctx, op),
+            0xaa..=0xab => self.op_stos(ctx, op),
+            0xac..=0xad => self.op_lods(ctx, op),
+            0xae..=0xaf => self.op_scas(ctx, op),
+            0xb0..=0xbf => self.op_mov_reg_imm(ctx, op),
+            0xc0 => self.op_ret_imm16_intraseg(ctx),
+            0xc1 => self.op_ret_intraseg(ctx),
+            0xc2 => self.op_ret_imm16_intraseg(ctx),
+            0xc3 => self.op_ret_intraseg(ctx),
+            0xc4 => self.op_les_r16_m16(ctx),
+            0xc5 => self.op_lds_r16_m16(ctx),
+            0xc6..=0xc7 => self.op_mov_m_imm(ctx, op),
+            0xc8 => self.op_ret_imm16_interseg(ctx),
+            0xc9 => self.op_ret_interseg(ctx),
+            0xca => self.op_ret_imm16_interseg(ctx),
+            0xcb => self.op_ret_interseg(ctx),
+            0xcc => self.op_int_3(ctx),
+            0xcd => self.op_int_imm8(ctx),
+            0xce => self.op_into(ctx),
+            0xcf => self.op_iret(ctx),
+            0xd0..=0xd3 => self.op_grp2_rmw(ctx, op),
+            0xd4 => self.op_aam(ctx),
+            0xd5 => self.op_aad(ctx),
+            0xd6 => self.op_salc(),
+            0xd7 => self.op_xlat(ctx),
+            0xd8 => self.op_esc(ctx),
+            0xd9 => self.op_esc(ctx),
+            0xda => self.op_esc(ctx),
+            0xdb => self.op_esc(ctx),
+            0xdc => self.op_esc(ctx),
+            0xdd => self.op_esc(ctx),
+            0xde => self.op_esc(ctx),
+            0xdf => self.op_esc(ctx),
+            0xe0 => self.op_loopnz(ctx),
+            0xe1 => self.op_loopz(ctx),
+            0xe2 => self.op_loop(ctx),
+            0xe3 => self.op_jcxz(ctx),
+            0xe4 => self.op_in_al_imm8(ctx),
+            0xe5 => self.op_in_ax_imm8(ctx),
+            0xe6 => self.op_out_al_imm8(ctx),
+            0xe7 => self.op_out_ax_imm8(ctx),
+            0xe8 => self.op_call_near(ctx),
+            0xe9 => self.op_jmp_near(ctx),
+            0xea => self.op_jmp_far(ctx),
+            0xeb => self.op_jmp_short(ctx),
+            0xec => self.op_in_al_dx(ctx),
+            0xed => self.op_in_ax_dx(ctx),
+            0xee => self.op_out_al_dx(ctx),
+            0xef => self.op_out_ax_dx(ctx),
+            0xf0 => self.op_lock_prefix(),
+            0xf1 => self.op_unused(),
+            0xf2 => self.op_repne(),
+            0xf3 => self.op_rep(),
+            0xf4 => self.op_hlt(),
+            0xf5 => self.op_cmc(),
+            0xf6..=0xf7 => self.op_grp3_rmw(ctx, op),
+            0xf8 => self.op_clc(),
+            0xf9 => self.op_stc(),
+            0xfa => self.op_cli(),
+            0xfb => self.op_sti(),
+            0xfc => self.op_cld(),
+            0xfd => self.op_std(),
+            0xfe => self.op_grp4_rm8(ctx),
+            0xff => self.op_grp5(ctx),
+        };
+    }
+
+    pub fn dump_single_line(&self) {
+        println!("{}", self.register_file);
+    }
+
+    pub fn dump(&self) {
+        println!();
+        println!(
+            "\tax={:04x} es={:04x} sp={:04x} ip={:04x}",
+            self.get_ax(),
+            self.get_es(),
+            self.get_sp(),
+            self.get_ip()
+        );
+        println!(
+            "\tcx={:04x} cs={:04x} bp={:04x} flags={:04x}",
+            self.get_cx(),
+            self.get_cs(),
+            self.get_bp(),
+            self.get_flags()
+        );
+        println!(
+            "\tdx={:04x} ss={:04x} di={:04x}\tO{} D{} I{} T{} S{} Z{} A{} P{} C{}",
+            self.get_dx(),
+            self.get_ss(),
+            self.get_di(),
+            self.register_file.get_of() as u8,
+            self.register_file.get_df() as u8,
+            self.register_file.get_if() as u8,
+            self.register_file.get_tf() as u8,
+            self.register_file.get_sf() as u8,
+            self.register_file.get_zf() as u8,
+            self.register_file.get_af() as u8,
+            self.register_file.get_pf() as u8,
+            self.register_file.get_cf() as u8,
+        );
+        println!(
+            "\tbx={:04x} ds={:04x} si={:04x}",
+            self.get_bx(),
+            self.get_ds(),
+            self.get_si(),
+        );
+
+        println!()
+    }
+
+    pub fn register_callback(&mut self, memory: &mut Memory, callback: Callback) -> Address {
+        let address = self.callback_base_address;
+        self.callback_base_address += 2;
+
+        self.callbacks.insert(address, callback);
+        memory.write_u16(address, 0x38fe);
+
+        address
+    }
+
+    pub fn get_instruction_address(&self) -> Address {
+        self.instruction_address
+    }
+
+    pub fn get_state(&self) -> State {
+        self.state
     }
 
     pub fn set_ax(&mut self, v: u16) {
@@ -57,24 +397,8 @@ impl Cpu {
         self.register_file.set(CX, v);
     }
 
-    pub fn set_cl(&mut self, v: u8) {
-        self.register_file.set_lo(CX, v);
-    }
-
-    pub fn set_ch(&mut self, v: u8) {
-        self.register_file.set_hi(CX, v);
-    }
-
     pub fn set_dx(&mut self, v: u16) {
         self.register_file.set(DX, v);
-    }
-
-    pub fn set_dl(&mut self, v: u8) {
-        self.register_file.set_lo(DX, v);
-    }
-
-    pub fn set_dh(&mut self, v: u8) {
-        self.register_file.set_hi(DX, v);
     }
 
     pub fn set_bx(&mut self, v: u16) {
@@ -125,13 +449,42 @@ impl Cpu {
         self.register_file.set(IP, v);
     }
 
-    pub fn set_flags(&mut self, v: u16) {
-        const RESERVED_ON: u16 = 0b1111_0000_0000_0010;
-        const RESERVED_OFF: u16 = 0b1111_1111_1101_0111;
-
-        let flags = (v | RESERVED_ON) & RESERVED_OFF;
+    pub fn set_flags(&mut self, flags: u16) {
+        let int_was_set = self.register_file.get_if();
 
         self.register_file.set_flags(flags);
+
+        let int_is_set = self.register_file.get_if();
+
+        if !int_was_set && int_is_set {
+            self.int_delay = true;
+        }
+    }
+
+    pub fn clc(&mut self) {
+        self.set_cf(false);
+    }
+
+    pub fn stc(&mut self) {
+        self.set_cf(true);
+    }
+
+    pub fn cli(&mut self) {
+        self.set_if(false);
+    }
+
+    pub fn sti(&mut self) {
+        self.set_if(true);
+    }
+
+    pub fn iret(&mut self, memory: &Memory) {
+        let ip = self.pop(memory);
+        let cs = self.pop(memory);
+        let flags = self.pop(memory);
+
+        self.set_ip(ip);
+        self.set_cs(cs);
+        self.set_flags(flags);
     }
 
     pub fn get_ax(&self) -> u16 {
@@ -150,14 +503,6 @@ impl Cpu {
         self.register_file.get(CX)
     }
 
-    pub fn get_cl(&self) -> u8 {
-        self.register_file.get_lo(CX)
-    }
-
-    pub fn get_ch(&self) -> u8 {
-        self.register_file.get_hi(CX)
-    }
-
     pub fn get_dx(&self) -> u16 {
         self.register_file.get(DX)
     }
@@ -174,12 +519,10 @@ impl Cpu {
         self.register_file.get(BX)
     }
 
-    pub fn get_bl(&self) -> u8 {
-        self.register_file.get_lo(BX)
-    }
-
-    pub fn get_bh(&self) -> u8 {
-        self.register_file.get_hi(BX)
+    pub fn get_cxdx(&self) -> u32 {
+        let cx = self.get_cx() as u32;
+        let dx = self.get_dx() as u32;
+        (cx << 16) + dx
     }
 
     pub fn get_sp(&self) -> u16 {
@@ -212,6 +555,12 @@ impl Cpu {
 
     pub fn get_ds(&self) -> u16 {
         self.register_file.get(DS)
+    }
+
+    pub fn get_dssi(&self) -> Address {
+        let ds = self.get_ds();
+        let si = self.get_si();
+        addr(ds, si)
     }
 
     pub fn get_ip(&self) -> u16 {
@@ -254,7 +603,7 @@ impl Cpu {
         self.register_file.set_cf(cond);
     }
 
-    fn set_pf(&mut self, cond: bool) {
+    pub fn set_pf(&mut self, cond: bool) {
         self.register_file.set_pf(cond);
     }
 
@@ -270,7 +619,7 @@ impl Cpu {
         self.register_file.set_sf(cond);
     }
 
-    fn set_if(&mut self, cond: bool) {
+    pub fn set_if(&mut self, cond: bool) {
         self.register_file.set_if(cond);
     }
 
@@ -286,71 +635,64 @@ impl Cpu {
         self.register_file.set_of(cond);
     }
 
-    fn mem_read8(&self, bus: &impl Bus, seg: u16, ofs: u16) -> u8 {
-        let ea = ea(seg, ofs);
-        bus.mem_read_u8(ea)
+    fn mem_read8(&self, memory: &Memory, seg: u16, ofs: u16) -> u8 {
+        memory.read_u8(addr(seg, ofs))
     }
 
-    fn mem_read16(&self, bus: &impl Bus, seg: u16, ofs: u16) -> u16 {
-        let ea_lo = ea(seg, ofs);
-        let ea_hi = ea(seg, ofs.wrapping_add(1));
-
-        let lo = bus.mem_read_u8(ea_lo) as u16;
-        let hi = bus.mem_read_u8(ea_hi) as u16;
-        (hi << 8) + lo
+    fn mem_read16(&self, memory: &Memory, seg: u16, ofs: u16) -> u16 {
+        memory.read_u16(addr(seg, ofs))
+        // let lo = memory.read_u8(addr(seg, ofs)) as u16;
+        // let hi = memory.read_u8(addr(seg, ofs.wrapping_add(1))) as u16;
+        // (hi << 8) + lo
     }
 
-    fn mem_readw(&self, bus: &impl Bus, seg: u16, ofs: u16, w: Width) -> u16 {
+    fn mem_readw(&self, memory: &Memory, seg: u16, ofs: u16, w: Width) -> u16 {
         match w {
-            W8 => self.mem_read8(bus, seg, ofs) as u16,
-            W16 => self.mem_read16(bus, seg, ofs),
+            W8 => self.mem_read8(memory, seg, ofs) as u16,
+            W16 => self.mem_read16(memory, seg, ofs),
         }
     }
 
-    fn mem_write8(&self, bus: &mut impl Bus, seg: u16, ofs: u16, v: u8) {
-        let ea = ea(seg, ofs);
-        bus.mem_write_u8(ea, v);
+    fn mem_write8(&self, memory: &mut Memory, seg: u16, ofs: u16, v: u8) {
+        memory.write_u8(addr(seg, ofs), v);
     }
 
-    fn mem_write16(&self, bus: &mut impl Bus, seg: u16, ofs: u16, v: u16) {
-        let ea_lo = ea(seg, ofs);
-        let ea_hi = ea(seg, ofs.wrapping_add(1));
-        bus.mem_write_u8(ea_lo, read_lo(v));
-        bus.mem_write_u8(ea_hi, read_hi(v));
+    fn mem_write16(&self, memory: &mut Memory, seg: u16, ofs: u16, v: u16) {
+        memory.write_u16(addr(seg, ofs), v);
     }
 
-    fn mem_writew(&self, bus: &mut impl Bus, seg: u16, ofs: u16, v: u16, w: Width) {
+    fn mem_writew(&self, memory: &mut Memory, seg: u16, ofs: u16, v: u16, w: Width) {
         match w {
-            W8 => self.mem_write8(bus, seg, ofs, read_lo(v)),
-            W16 => self.mem_write16(bus, seg, ofs, v),
+            W8 => self.mem_write8(memory, seg, ofs, read_lo(v)),
+            W16 => self.mem_write16(memory, seg, ofs, v),
         }
     }
 
     fn reg_readw_ax(&self, w: Width) -> u16 {
         match w {
-            W8 => self.get_al() as u16,
+            W8 => self.register_file.get_lo(AX) as u16,
             W16 => self.get_ax(),
         }
     }
 
     fn reg_writew_ax(&mut self, w: Width, v: u16) {
         match w {
-            W8 => self.set_al(v as u8),
-            W16 => self.set_ax(v),
+            W8 => self.register_file.set_lo(AX, v as u8),
+            W16 => self.register_file.set(AX, v),
         }
     }
 
     fn reg_read8(&self, reg_idx: u8) -> u8 {
         assert!(reg_idx < 0b1000);
         match reg_idx {
-            0b000 => self.get_al(),
-            0b001 => self.get_cl(),
-            0b010 => self.get_dl(),
-            0b011 => self.get_bl(),
-            0b100 => self.get_ah(),
-            0b101 => self.get_ch(),
-            0b110 => self.get_dh(),
-            0b111 => self.get_bh(),
+            0b000 => self.register_file.get_lo(AX),
+            0b001 => self.register_file.get_lo(CX),
+            0b010 => self.register_file.get_lo(DX),
+            0b011 => self.register_file.get_lo(BX),
+            0b100 => self.register_file.get_hi(AX),
+            0b101 => self.register_file.get_hi(CX),
+            0b110 => self.register_file.get_hi(DX),
+            0b111 => self.register_file.get_hi(BX),
             _ => panic!(),
         }
     }
@@ -359,13 +701,13 @@ impl Cpu {
         assert!(reg_idx < 0b1000);
         match reg_idx {
             0b000 => self.get_ax(),
-            0b001 => self.get_cx(),
-            0b010 => self.get_dx(),
-            0b011 => self.get_bx(),
-            0b100 => self.get_sp(),
-            0b101 => self.get_bp(),
-            0b110 => self.get_si(),
-            0b111 => self.get_di(),
+            0b001 => self.register_file.get(CX),
+            0b010 => self.register_file.get(DX),
+            0b011 => self.register_file.get(BX),
+            0b100 => self.register_file.get(SP),
+            0b101 => self.register_file.get(BP),
+            0b110 => self.register_file.get(SI),
+            0b111 => self.register_file.get(DI),
             _ => panic!(),
         }
     }
@@ -381,14 +723,14 @@ impl Cpu {
     fn reg_write8(&mut self, reg_idx: u8, v: u8) {
         assert!(reg_idx < 0b1000);
         match reg_idx {
-            0b000 => self.set_al(v),
-            0b001 => self.set_cl(v),
-            0b010 => self.set_dl(v),
-            0b011 => self.set_bl(v),
-            0b100 => self.set_ah(v),
-            0b101 => self.set_ch(v),
-            0b110 => self.set_dh(v),
-            0b111 => self.set_bh(v),
+            0b000 => self.register_file.set_lo(AX, v),
+            0b001 => self.register_file.set_lo(CX, v),
+            0b010 => self.register_file.set_lo(DX, v),
+            0b011 => self.register_file.set_lo(BX, v),
+            0b100 => self.register_file.set_hi(AX, v),
+            0b101 => self.register_file.set_hi(CX, v),
+            0b110 => self.register_file.set_hi(DX, v),
+            0b111 => self.register_file.set_hi(BX, v),
             _ => panic!(),
         }
     }
@@ -396,14 +738,14 @@ impl Cpu {
     fn reg_write16(&mut self, reg_idx: u8, v: u16) {
         assert!(reg_idx < 0b1000);
         match reg_idx {
-            0b000 => self.set_ax(v),
-            0b001 => self.set_cx(v),
-            0b010 => self.set_dx(v),
-            0b011 => self.set_bx(v),
-            0b100 => self.set_sp(v),
-            0b101 => self.set_bp(v),
-            0b110 => self.set_si(v),
-            0b111 => self.set_di(v),
+            0b000 => self.register_file.set(AX, v),
+            0b001 => self.register_file.set(CX, v),
+            0b010 => self.register_file.set(DX, v),
+            0b011 => self.register_file.set(BX, v),
+            0b100 => self.register_file.set(SP, v),
+            0b101 => self.register_file.set(BP, v),
+            0b110 => self.register_file.set(SI, v),
+            0b111 => self.register_file.set(DI, v),
             _ => panic!(),
         }
     }
@@ -442,34 +784,66 @@ impl Cpu {
         self.read_sreg(sreg)
     }
 
-    fn fetch8(&mut self, bus: &mut impl Bus) -> u8 {
-        let cs = self.get_cs();
-        let ip = self.get_ip();
-        let v = self.mem_read8(bus, cs, ip);
-        self.set_ip(ip.wrapping_add(1));
+    pub fn raise_nmi(&mut self) {
+        self.int_nmi = true;
+    }
+
+    pub fn raise_intr(&mut self, num: u8) {
+        self.int_intr = true;
+        self.int_number = num;
+    }
+
+    pub fn perform_iret(&mut self, memory: &mut Memory) {
+        let ip = self.pop(memory);
+        let cs = self.pop(memory);
+        let flags = self.pop(memory);
+
+        self.set_ip(ip);
+        self.set_cs(cs);
+        self.set_flags(flags);
+    }
+
+    fn fetch8<Context: CpuContext>(&mut self, ctx: &mut Context) -> u8 {
+        ctx.memory().disable_logging();
+
+        let csip = self.register_file.get_csip();
+        let v = self.mem_read8(ctx.memory(), csip.seg, csip.ofs);
+
+        ctx.memory().enable_logging();
+
+        self.set_ip(csip.ofs.wrapping_add(1));
         v
     }
 
-    fn fetch16(&mut self, bus: &mut impl Bus) -> u16 {
-        let cs = self.get_cs();
-        let ip = self.get_ip();
-        let v = self.mem_read16(bus, cs, ip);
-        self.set_ip(ip.wrapping_add(2));
+    fn fetch16<Context: CpuContext>(&mut self, ctx: &mut Context) -> u16 {
+        ctx.memory().disable_logging();
+
+        let csip = self.register_file.get_csip();
+        let v = self.mem_read16(ctx.memory(), csip.seg, csip.ofs);
+
+        ctx.memory().enable_logging();
+
+        self.set_ip(csip.ofs.wrapping_add(2));
         v
     }
 
-    fn fetchw(&mut self, bus: &mut impl Bus, w: Width) -> u16 {
+    fn fetchw<Context: CpuContext>(&mut self, ctx: &mut Context, w: Width) -> u16 {
         match w {
-            W8 => self.fetch8(bus) as u16,
-            W16 => self.fetch16(bus),
+            W8 => self.fetch8(ctx) as u16,
+            W16 => self.fetch16(ctx),
         }
     }
 
-    fn modrm_mem_sw(&mut self, bus: &mut impl Bus, modrm: u8, w: Width) -> ModRM {
-        let r#mod = modrm >> 6;
+    fn modrm_mem_sw<Context: CpuContext>(
+        &mut self,
+        ctx: &mut Context,
+        modrm: u8,
+        w: Width,
+    ) -> ModRM {
+        let mod_bits = modrm >> 6;
         let rm = modrm & 0b111;
 
-        if r#mod == 0b11 {
+        if mod_bits == 0b11 {
             ModRM {
                 w,
                 rm: RegMem::Reg(rm),
@@ -482,11 +856,12 @@ impl Cpu {
                 0b011 => SReg::SS,
                 0b100 => SReg::DS,
                 0b101 => SReg::DS,
-                0b110 if r#mod == 0 => SReg::DS,
+                0b110 if mod_bits == 0 => SReg::DS,
                 0b110 => SReg::SS,
                 0b111 => SReg::DS,
                 _ => unreachable!(),
             };
+
             let mut ofs = match rm {
                 0b000 => self.get_bx().wrapping_add(self.get_si()),
                 0b001 => self.get_bx().wrapping_add(self.get_di()),
@@ -494,14 +869,14 @@ impl Cpu {
                 0b011 => self.get_bp().wrapping_add(self.get_di()),
                 0b100 => self.get_si(),
                 0b101 => self.get_di(),
-                0b110 if r#mod == 0 => self.fetch16(bus),
+                0b110 if mod_bits == 0 => self.fetch16(ctx),
                 0b110 => self.get_bp(),
                 0b111 => self.get_bx(),
                 _ => unreachable!(),
             };
-            ofs = ofs.wrapping_add(match r#mod {
-                0b01 => sext(self.fetch8(bus)),
-                0b10 => self.fetch16(bus),
+            ofs = ofs.wrapping_add(match mod_bits {
+                0b01 => sext(self.fetch8(ctx)),
+                0b10 => self.fetch16(ctx),
                 _ => 0,
             });
 
@@ -521,39 +896,39 @@ impl Cpu {
         }
     }
 
-    fn read_modrm(&self, bus: &impl Bus, src: ModRM) -> u16 {
+    fn read_modrm<Context: CpuContext>(&self, ctx: &mut Context, src: ModRM) -> u16 {
         match src.rm {
             RegMem::Reg(reg) => self.reg_readw(reg, src.w),
             RegMem::Mem { sreg, ofs } => {
                 let seg = self.read_sreg_ovr(sreg);
-                self.mem_readw(bus, seg, ofs, src.w)
+                self.mem_readw(ctx.memory(), seg, ofs, src.w)
             }
         }
     }
 
-    fn write_modrm(&mut self, bus: &mut impl Bus, dst: ModRM, v: u16) {
+    fn write_modrm<Context: CpuContext>(&mut self, ctx: &mut Context, dst: ModRM, v: u16) {
         match dst.rm {
             RegMem::Reg(reg) => {
                 self.reg_writew(reg, v, dst.w);
             }
             RegMem::Mem { sreg, ofs } => {
-                self.mem_writew(bus, self.read_sreg_ovr(sreg), ofs, v, dst.w);
+                self.mem_writew(ctx.memory(), self.read_sreg_ovr(sreg), ofs, v, dst.w);
             }
         }
     }
 
-    fn push(&mut self, bus: &mut impl Bus, v: u16) {
+    fn push(&mut self, memory: &mut Memory, v: u16) {
         let ss = self.get_ss();
         let sp = self.get_sp().wrapping_sub(2);
 
         self.set_sp(sp);
-        self.mem_write16(bus, ss, sp, v);
+        self.mem_write16(memory, ss, sp, v);
     }
 
-    fn pop(&mut self, bus: &mut impl Bus) -> u16 {
+    fn pop(&mut self, memory: &Memory) -> u16 {
         let ss = self.get_ss();
         let sp = self.get_sp();
-        let r = self.mem_read16(bus, ss, sp);
+        let r = self.mem_read16(memory, ss, sp);
         self.set_sp(sp.wrapping_add(2));
         r
     }
@@ -657,17 +1032,17 @@ impl Cpu {
         res
     }
 
-    fn op_alu_r_rm(&mut self, bus: &mut impl Bus, op: u8) {
-        let modrm = self.fetch8(bus);
+    fn op_alu_r_rm<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
+        let modrm = self.fetch8(ctx);
         let w = Width::from_op(op);
         let d = Dir::from_op(op);
         let func = AluOp::from((op >> 3) & 0b111);
 
-        let mem = self.modrm_mem_sw(bus, modrm, w);
+        let mem = self.modrm_mem_sw(ctx, modrm, w);
         let reg: ModRM = self.modrm_reg_sw(modrm, w);
 
-        let mut a = self.read_modrm(bus, reg);
-        let mut b = self.read_modrm(bus, mem);
+        let mut a = self.read_modrm(ctx, reg);
+        let mut b = self.read_modrm(ctx, mem);
         if matches!(d, Dir::RegToRM) {
             swap(&mut a, &mut b);
         }
@@ -675,8 +1050,8 @@ impl Cpu {
 
         if func != AluOp::Cmp {
             match d {
-                Dir::RegToRM => self.write_modrm(bus, mem, r),
-                Dir::RMToReg => self.write_modrm(bus, reg, r),
+                Dir::RegToRM => self.write_modrm(ctx, mem, r),
+                Dir::RMToReg => self.write_modrm(ctx, reg, r),
             }
         }
 
@@ -696,12 +1071,12 @@ impl Cpu {
         }
     }
 
-    fn op_alu_a_imm(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_alu_a_imm<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
         let func = AluOp::from((op >> 3) & 0b111);
 
         let a = self.reg_readw_ax(w);
-        let b = self.fetchw(bus, w);
+        let b = self.fetchw(ctx, w);
         let r = self.alu_w(func, a, b, w);
 
         if func != AluOp::Cmp {
@@ -711,20 +1086,22 @@ impl Cpu {
         self.cycles += 4;
     }
 
-    fn op_push_sreg(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_push_sreg<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let sreg = (op >> 3) & 0b111;
         let v = self.read_sreg(SReg::from_u8(sreg));
-        self.push(bus, v);
+        self.push(ctx.memory(), v);
 
         self.cycles += 10;
     }
 
-    fn op_pop_sreg(&mut self, bus: &mut impl Bus, op: u8) {
-        let sreg = (op >> 3) & 0b111;
-        let v = self.pop(bus);
-        self.write_sreg(SReg::from_u8(sreg), v);
+    fn op_pop_sreg<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
+        let sreg = SReg::from_u8((op >> 3) & 0b111);
+        let v = self.pop(ctx.memory());
+        self.write_sreg(sreg, v);
 
-        self.int_delay = true;
+        if sreg == SReg::SS {
+            self.int_delay = true;
+        }
 
         self.cycles += 8;
     }
@@ -754,7 +1131,7 @@ impl Cpu {
             cf = false;
         }
 
-        self.set_al(al);
+        self.register_file.set_lo(AX, al);
         self.set_cf(cf);
         self.set_pf(pf8(al as u16));
         self.set_af(af);
@@ -786,7 +1163,7 @@ impl Cpu {
             new_cf = true;
         }
 
-        self.set_al(new_al);
+        self.register_file.set_lo(AX, new_al);
         self.set_cf(new_cf);
         self.set_pf(pf8(new_al as u16));
         self.set_af(new_af);
@@ -813,7 +1190,7 @@ impl Cpu {
         }
         new_ax &= 0xff0f;
 
-        self.set_ax(new_ax);
+        self.register_file.set(AX, new_ax);
         self.set_cf(new_cf);
         self.set_pf(pf8(new_ax));
         self.set_af(new_af);
@@ -825,7 +1202,7 @@ impl Cpu {
 
     fn op_aas(&mut self) {
         let old_ax = self.get_ax();
-        let old_af = self.get_af();
+        let old_af = self.register_file.get_af();
 
         let mut new_ax = old_ax;
         let mut new_cf = false;
@@ -840,7 +1217,7 @@ impl Cpu {
         }
         new_ax &= 0xff0f;
 
-        self.set_ax(new_ax);
+        self.register_file.set(AX, new_ax);
         self.set_cf(new_cf);
         self.set_pf(pf8(new_ax));
         self.set_af(new_af);
@@ -880,35 +1257,35 @@ impl Cpu {
         self.set_of(of16_sub(res, dst, src))
     }
 
-    fn op_push_reg(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_push_reg<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let reg_idx = op & 0b111;
 
         // On 8086 'push ss' pushes the updated value of ss
-        let ss = self.get_ss();
-        let sp = self.get_sp().wrapping_sub(2);
-        self.set_sp(sp);
+        let ss = self.register_file.get(SS);
+        let sp = self.register_file.get(SP).wrapping_sub(2);
+        self.register_file.set(SP, sp);
 
         let v = self.reg_read16(reg_idx);
 
-        self.mem_write16(bus, ss, sp, v);
+        self.mem_write16(ctx.memory(), ss, sp, v);
 
         self.cycles += 11;
     }
 
-    fn op_pop_reg(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_pop_reg<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let reg_idx = op & 0b111;
-        let v = self.pop(bus);
+        let v = self.pop(ctx.memory());
 
         self.reg_write16(reg_idx, v);
 
         self.cycles += 8;
     }
 
-    fn op_jcc(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_jcc<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let cond = (op >> 1) & 0b111;
         let neg = (op & 1) != 0;
 
-        let inc = self.fetch8(bus) as i8;
+        let inc = self.fetch8(ctx) as i8;
 
         let mut r = match cond {
             0b000 => self.get_of(),
@@ -927,9 +1304,9 @@ impl Cpu {
         }
 
         if r {
-            let ip = self.get_ip();
+            let ip = self.register_file.get(IP);
             let ip = ip.wrapping_add_signed(inc as i16);
-            self.set_ip(ip);
+            self.register_file.set(IP, ip);
         }
 
         self.cycles += 4;
@@ -938,24 +1315,24 @@ impl Cpu {
         }
     }
 
-    fn op_grp1_rmw_imm(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_grp1_rmw_imm<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
-        let modrm = self.fetch8(bus);
+        let modrm = self.fetch8(ctx);
         let func = AluOp::from((modrm >> 3) & 0b111);
-        let mem = self.modrm_mem_sw(bus, modrm, w);
+        let mem = self.modrm_mem_sw(ctx, modrm, w);
 
         let imm = match op & 0b11 {
-            0b00 => self.fetch8(bus) as u16,
-            0b01 => self.fetch16(bus),
-            _ => sext(self.fetch8(bus)),
+            0b00 => self.fetch8(ctx) as u16,
+            0b01 => self.fetch16(ctx),
+            _ => sext(self.fetch8(ctx)),
         };
 
-        let a = self.read_modrm(bus, mem);
+        let a = self.read_modrm(ctx, mem);
         let b = imm;
         let r = self.alu_w(func, a, b, w);
 
         if func != AluOp::Cmp {
-            self.write_modrm(bus, mem, r);
+            self.write_modrm(ctx, mem, r);
         }
 
         self.cycles += 4;
@@ -969,44 +1346,50 @@ impl Cpu {
         }
     }
 
-    fn op_test_rm_r(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_test_rm_r<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
-        let modrm = self.fetch8(bus);
+        let modrm = self.fetch8(ctx);
 
-        let mem = self.modrm_mem_sw(bus, modrm, w);
+        let mem = self.modrm_mem_sw(ctx, modrm, w);
         let reg = self.modrm_reg_sw(modrm, w);
 
-        let a = self.read_modrm(bus, mem);
-        let b = self.read_modrm(bus, reg);
+        let a = self.read_modrm(ctx, mem);
+        let b = self.read_modrm(ctx, reg);
 
         self.alu_w(AluOp::And, a, b, w);
     }
 
-    fn op_xchg_rm_r(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_xchg_rm_r<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
-        let modrm = self.fetch8(bus);
+        let modrm = self.fetch8(ctx);
 
-        let mem = self.modrm_mem_sw(bus, modrm, w);
+        let mem = self.modrm_mem_sw(ctx, modrm, w);
         let reg = self.modrm_reg_sw(modrm, w);
 
-        let a = self.read_modrm(bus, mem);
-        let b = self.read_modrm(bus, reg);
+        let a = self.read_modrm(ctx, mem);
+        let b = self.read_modrm(ctx, reg);
 
-        self.write_modrm(bus, reg, a);
-        self.write_modrm(bus, mem, b);
+        self.write_modrm(ctx, reg, a);
+        self.write_modrm(ctx, mem, b);
     }
 
-    fn op_mov_rm_r(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_mov_rm_r<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
         let d = Dir::from_op(op);
-        let modrm = self.fetch8(bus);
+        let modrm = self.fetch8(ctx);
 
-        let mem = self.modrm_mem_sw(bus, modrm, w);
+        let mem = self.modrm_mem_sw(ctx, modrm, w);
         let reg = self.modrm_reg_sw(modrm, w);
 
         match d {
-            Dir::RegToRM => self.write_modrm(bus, mem, self.read_modrm(bus, reg)),
-            Dir::RMToReg => self.write_modrm(bus, reg, self.read_modrm(bus, mem)),
+            Dir::RegToRM => {
+                let v = self.read_modrm(ctx, reg);
+                self.write_modrm(ctx, mem, v);
+            }
+            Dir::RMToReg => {
+                let v = self.read_modrm(ctx, mem);
+                self.write_modrm(ctx, reg, v);
+            }
         }
 
         self.cycles += 2;
@@ -1020,40 +1403,40 @@ impl Cpu {
         }
     }
 
-    fn op_mov_rm16_sreg(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_mov_rm16_sreg<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let d = Dir::from_op(op);
-        let modrm = self.fetch8(bus);
+        let modrm = self.fetch8(ctx);
         let sreg_idx = (modrm >> 3) & 0b11;
         let sreg = SReg::from_u8(sreg_idx);
 
         match d {
             Dir::RegToRM => {
                 let v = self.read_sreg(sreg);
-                let dst = self.modrm_mem_sw(bus, modrm, W16);
-                self.write_modrm(bus, dst, v);
+                let dst = self.modrm_mem_sw(ctx, modrm, W16);
+                self.write_modrm(ctx, dst, v);
             }
             Dir::RMToReg => {
-                let src = self.modrm_mem_sw(bus, modrm, W16);
-                let v = self.read_modrm(bus, src);
+                let src = self.modrm_mem_sw(ctx, modrm, W16);
+                let v = self.read_modrm(ctx, src);
                 self.write_sreg(sreg, v);
             }
         }
     }
 
-    fn op_lea_r16_m16(&mut self, bus: &mut impl Bus) {
-        let modrm = self.fetch8(bus);
-        let src = self.modrm_mem_sw(bus, modrm, W16);
+    fn op_lea_r16_m16<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let modrm = self.fetch8(ctx);
+        let src = self.modrm_mem_sw(ctx, modrm, W16);
         let dst = self.modrm_reg_sw(modrm, W16);
-        self.write_modrm(bus, dst, src.ofs());
+        self.write_modrm(ctx, dst, src.ofs());
 
         self.cycles += 2;
     }
 
-    fn op_pop_rm16(&mut self, bus: &mut impl Bus) {
-        let modrm = self.fetch8(bus);
-        let dst = self.modrm_mem_sw(bus, modrm, W16);
-        let v = self.pop(bus);
-        self.write_modrm(bus, dst, v);
+    fn op_pop_rm16<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let modrm = self.fetch8(ctx);
+        let dst = self.modrm_mem_sw(ctx, modrm, W16);
+        let v = self.pop(ctx.memory());
+        self.write_modrm(ctx, dst, v);
 
         self.cycles += 8;
         if dst.is_mem() {
@@ -1081,12 +1464,12 @@ impl Cpu {
         self.set_dx(dx);
     }
 
-    fn op_call_far(&mut self, bus: &mut impl Bus) {
-        let ofs = self.fetch16(bus);
-        let seg = self.fetch16(bus);
+    fn op_call_far<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let ofs = self.fetch16(ctx);
+        let seg = self.fetch16(ctx);
 
-        self.push(bus, self.get_cs());
-        self.push(bus, self.get_ip());
+        self.push(ctx.memory(), self.get_cs());
+        self.push(ctx.memory(), self.get_ip());
 
         self.set_cs(seg);
         self.set_ip(ofs);
@@ -1098,13 +1481,13 @@ impl Cpu {
         unimplemented!();
     }
 
-    fn op_pushf(&mut self, bus: &mut impl Bus) {
+    fn op_pushf<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let flags = self.get_flags();
-        self.push(bus, flags);
+        self.push(ctx.memory(), flags);
     }
 
-    fn op_popf(&mut self, bus: &mut impl Bus) {
-        let flags = self.pop(bus);
+    fn op_popf<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let flags = self.pop(ctx.memory());
 
         self.set_flags(flags);
     }
@@ -1124,18 +1507,18 @@ impl Cpu {
         self.set_ax(ax);
     }
 
-    fn op_mov_a_m(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_mov_a_m<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
 
         let seg = self.read_sreg_ovr(SReg::DS);
-        let ofs = self.fetch16(bus);
+        let ofs = self.fetch16(ctx);
 
         if op & 2 == 0 {
-            let v = self.mem_readw(bus, seg, ofs, w);
+            let v = self.mem_readw(ctx.memory(), seg, ofs, w);
             self.reg_writew_ax(w, v);
         } else {
             let v = self.reg_readw_ax(w);
-            self.mem_writew(bus, seg, ofs, v, w);
+            self.mem_writew(ctx.memory(), seg, ofs, v, w);
         }
 
         self.cycles += 10;
@@ -1152,7 +1535,7 @@ impl Cpu {
     }
 
     #[inline]
-    fn op_strop(&mut self, bus: &mut impl Bus, strop: StrOp, op: u8) {
+    fn op_strop<Context: CpuContext>(&mut self, ctx: &mut Context, strop: StrOp, op: u8) {
         let w = Width::from_op(op);
         let delta = self.strop_delta(w);
         let src_sreg = self.get_sreg_ovr(SReg::DS);
@@ -1178,32 +1561,42 @@ impl Cpu {
 
             match strop {
                 StrOp::Movs => {
-                    let v = self.mem_readw(bus, src_seg, src_ofs, w);
-                    self.mem_writew(bus, dst_seg, dst_ofs, v, w);
+                    let v = self.mem_readw(ctx.memory(), src_seg, src_ofs, w);
+                    self.mem_writew(ctx.memory(), dst_seg, dst_ofs, v, w);
+
+                    self.set_si(src_ofs.wrapping_add_signed(delta));
+                    self.set_di(dst_ofs.wrapping_add_signed(delta));
                 }
                 StrOp::Cmps => {
-                    let a = self.mem_readw(bus, dst_seg, dst_ofs, w);
-                    let b = self.mem_readw(bus, src_seg, src_ofs, w);
+                    let a = self.mem_readw(ctx.memory(), dst_seg, dst_ofs, w);
+                    let b = self.mem_readw(ctx.memory(), src_seg, src_ofs, w);
 
                     self.alu_w(AluOp::Cmp, b, a, w);
+
+                    self.set_si(src_ofs.wrapping_add_signed(delta));
+                    self.set_di(dst_ofs.wrapping_add_signed(delta));
                 }
                 StrOp::Scas => {
                     let a = self.reg_readw_ax(w);
-                    let b = self.mem_readw(bus, dst_seg, dst_ofs, w);
+                    let b = self.mem_readw(ctx.memory(), dst_seg, dst_ofs, w);
+
                     self.alu_w(AluOp::Cmp, a, b, w);
+
+                    self.set_di(dst_ofs.wrapping_add_signed(delta));
                 }
                 StrOp::Lods => {
-                    let v = self.mem_readw(bus, src_seg, src_ofs, w);
+                    let v = self.mem_readw(ctx.memory(), src_seg, src_ofs, w);
                     self.reg_writew_ax(w, v);
+
+                    self.set_si(src_ofs.wrapping_add_signed(delta));
                 }
                 StrOp::Stos => {
                     let v = self.reg_readw_ax(w);
-                    self.mem_writew(bus, dst_seg, dst_ofs, v, w);
+                    self.mem_writew(ctx.memory(), dst_seg, dst_ofs, v, w);
+
+                    self.set_di(dst_ofs.wrapping_add_signed(delta));
                 }
             }
-
-            self.set_si(src_ofs.wrapping_add_signed(delta));
-            self.set_di(dst_ofs.wrapping_add_signed(delta));
 
             if strop == StrOp::Cmps || strop == StrOp::Scas {
                 if self.rep_mode == RepMode::Rep && !self.get_zf() {
@@ -1219,103 +1612,103 @@ impl Cpu {
         }
     }
 
-    fn op_movs(&mut self, bus: &mut impl Bus, op: u8) {
-        self.op_strop(bus, StrOp::Movs, op);
+    fn op_movs<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
+        self.op_strop(ctx, StrOp::Movs, op);
     }
 
-    fn op_cmps(&mut self, bus: &mut impl Bus, op: u8) {
-        self.op_strop(bus, StrOp::Cmps, op);
+    fn op_cmps<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
+        self.op_strop(ctx, StrOp::Cmps, op);
     }
 
-    fn op_test_a_imm(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_test_a_imm<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
-        let imm = self.fetchw(bus, w);
+        let imm = self.fetchw(ctx, w);
         let a = self.reg_readw_ax(w);
 
         self.alu_w(AluOp::And, a, imm, w);
     }
 
-    fn op_stos(&mut self, bus: &mut impl Bus, op: u8) {
-        self.op_strop(bus, StrOp::Stos, op);
+    fn op_stos<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
+        self.op_strop(ctx, StrOp::Stos, op);
     }
 
-    fn op_lods(&mut self, bus: &mut impl Bus, op: u8) {
-        self.op_strop(bus, StrOp::Lods, op);
+    fn op_lods<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
+        self.op_strop(ctx, StrOp::Lods, op);
     }
 
-    fn op_scas(&mut self, bus: &mut impl Bus, op: u8) {
-        self.op_strop(bus, StrOp::Scas, op);
+    fn op_scas<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
+        self.op_strop(ctx, StrOp::Scas, op);
     }
 
-    fn op_mov_reg_imm(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_mov_reg_imm<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let reg_idx = op & 0b111;
         let w = if (op & 0b1000) == 0 { W8 } else { W16 };
-        let imm = self.fetchw(bus, w);
+        let imm = self.fetchw(ctx, w);
         self.reg_writew(reg_idx, imm, w);
     }
 
-    fn op_ret_imm16_intraseg(&mut self, bus: &mut impl Bus) {
-        let imm = self.fetch16(bus);
+    fn op_ret_imm16_intraseg<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let imm = self.fetch16(ctx);
 
-        let ip = self.pop(bus);
+        let ip = self.pop(ctx.memory());
         self.set_ip(ip);
 
         let sp = self.get_sp().wrapping_add(imm);
         self.set_sp(sp);
     }
 
-    fn op_ret_intraseg(&mut self, bus: &mut impl Bus) {
-        let ip = self.pop(bus);
+    fn op_ret_intraseg<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let ip = self.pop(ctx.memory());
         self.set_ip(ip);
     }
 
-    fn op_les_r16_m16(&mut self, bus: &mut impl Bus) {
-        let modrm = self.fetch8(bus);
-        let src = self.modrm_mem_sw(bus, modrm, W16);
+    fn op_les_r16_m16<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let modrm = self.fetch8(ctx);
+        let src = self.modrm_mem_sw(ctx, modrm, W16);
         let dst = self.modrm_reg_sw(modrm, W16);
 
         assert!(src.is_mem());
 
-        let ofs = self.read_modrm(bus, src);
-        let seg = self.read_modrm(bus, src.wrapping_add(2));
+        let ofs = self.read_modrm(ctx, src);
+        let seg = self.read_modrm(ctx, src.wrapping_add(2));
 
-        self.write_modrm(bus, dst, ofs);
+        self.write_modrm(ctx, dst, ofs);
         self.set_es(seg);
 
         self.cycles += 16;
     }
 
-    fn op_lds_r16_m16(&mut self, bus: &mut impl Bus) {
-        let modrm = self.fetch8(bus);
-        let src = self.modrm_mem_sw(bus, modrm, W16);
+    fn op_lds_r16_m16<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let modrm = self.fetch8(ctx);
+        let src = self.modrm_mem_sw(ctx, modrm, W16);
         let dst = self.modrm_reg_sw(modrm, W16);
 
         assert!(src.is_mem());
 
-        let ofs = self.read_modrm(bus, src);
-        let seg = self.read_modrm(bus, src.wrapping_add(2));
+        let ofs = self.read_modrm(ctx, src);
+        let seg = self.read_modrm(ctx, src.wrapping_add(2));
 
-        self.write_modrm(bus, dst, ofs);
+        self.write_modrm(ctx, dst, ofs);
         self.set_ds(seg);
 
         self.cycles += 16;
     }
 
-    fn op_mov_m_imm(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_mov_m_imm<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
-        let modrm = self.fetch8(bus);
-        let dst = self.modrm_mem_sw(bus, modrm, w);
-        let imm = self.fetchw(bus, w);
+        let modrm = self.fetch8(ctx);
+        let dst = self.modrm_mem_sw(ctx, modrm, w);
+        let imm = self.fetchw(ctx, w);
 
-        self.write_modrm(bus, dst, imm);
+        self.write_modrm(ctx, dst, imm);
 
         self.cycles += 10;
     }
 
-    fn op_ret_imm16_interseg(&mut self, bus: &mut impl Bus) {
-        let ip = self.pop(bus);
-        let cs = self.pop(bus);
-        let sp_delta = self.fetch16(bus);
+    fn op_ret_imm16_interseg<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let ip = self.pop(ctx.memory());
+        let cs = self.pop(ctx.memory());
+        let sp_delta = self.fetch16(ctx);
         let sp = self.get_sp();
 
         self.set_cs(cs);
@@ -1323,26 +1716,33 @@ impl Cpu {
         self.set_sp(sp.wrapping_add(sp_delta));
     }
 
-    fn op_ret_interseg(&mut self, bus: &mut impl Bus) {
-        let ip = self.pop(bus);
-        let cs = self.pop(bus);
+    fn op_ret_interseg<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let ip = self.pop(ctx.memory());
+        let cs = self.pop(ctx.memory());
 
         self.set_cs(cs);
         self.set_ip(ip);
     }
 
-    fn call_int(&mut self, bus: &mut impl Bus, num: u8) {
+    fn call_int<Context: CpuContext>(&mut self, ctx: &mut Context, num: u8) {
         let num = num as u16;
-        let int_ip = self.mem_read16(bus, 0, 4 * num);
-        let int_cs = self.mem_read16(bus, 0, 4 * num + 2);
+        let int_ip = self.mem_read16(ctx.memory(), 0, 4 * num);
+        let int_cs = self.mem_read16(ctx.memory(), 0, 4 * num + 2);
+
+        // println!("call_int {num} {}", addr(int_cs, int_ip));
+
+        if addr(int_cs, int_ip).ea() == 0 {
+            println!("No handler for interrupt {num}");
+            todo!();
+        }
 
         let flags = self.get_flags();
         let cs = self.get_cs();
         let ip = self.get_ip();
 
-        self.push(bus, flags);
-        self.push(bus, cs);
-        self.push(bus, ip);
+        self.push(ctx.memory(), flags);
+        self.push(ctx.memory(), cs);
+        self.push(ctx.memory(), ip);
 
         self.set_if(false);
         self.set_tf(false);
@@ -1351,43 +1751,36 @@ impl Cpu {
         self.set_ip(int_ip);
     }
 
-    fn op_int_3(&mut self, bus: &mut impl Bus) {
-        self.call_int(bus, 3);
+    fn op_int_3<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        self.call_int(ctx, 3);
 
         self.cycles += 52;
     }
 
-    fn op_int_imm8(&mut self, bus: &mut impl Bus) {
-        let imm = self.fetch8(bus);
-        self.call_int(bus, imm);
+    fn op_int_imm8<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let imm = self.fetch8(ctx);
+        self.call_int(ctx, imm);
 
         self.cycles += 51;
     }
 
-    fn op_into(&mut self, bus: &mut impl Bus) {
+    fn op_into<Context: CpuContext>(&mut self, ctx: &mut Context) {
         self.cycles += 4;
         if self.get_of() {
             self.cycles += 49;
-            self.call_int(bus, 4);
+            self.call_int(ctx, 4);
         }
     }
 
-    fn op_iret(&mut self, bus: &mut impl Bus) {
-        let ip = self.pop(bus);
-        let cs = self.pop(bus);
-        let flags = self.pop(bus);
-
-        self.int_delay = true;
-        self.set_ip(ip);
-        self.set_cs(cs);
-        self.set_flags(flags);
+    fn op_iret<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        self.perform_iret(ctx.memory());
     }
 
-    fn op_grp2_rmw(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_grp2_rmw<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
-        let modrm = self.fetch8(bus);
+        let modrm = self.fetch8(ctx);
         let func = (modrm >> 3) & 0b111;
-        let dst = self.modrm_mem_sw(bus, modrm, w);
+        let dst = self.modrm_mem_sw(ctx, modrm, w);
 
         let count = if op & 2 == 0 {
             1
@@ -1399,7 +1792,7 @@ impl Cpu {
             return;
         }
 
-        let src = self.read_modrm(bus, dst);
+        let src = self.read_modrm(ctx, dst);
         let mut cf = self.get_cf();
 
         match w {
@@ -1425,7 +1818,7 @@ impl Cpu {
                 };
                 let res = res as u16;
 
-                self.write_modrm(bus, dst, res);
+                self.write_modrm(ctx, dst, res);
                 self.set_of(of);
                 self.set_cf(cf);
                 if func >= 0b100 {
@@ -1454,7 +1847,7 @@ impl Cpu {
                     res.msb() != src.msb()
                 };
 
-                self.write_modrm(bus, dst, res);
+                self.write_modrm(ctx, dst, res);
                 self.set_of(of);
                 self.set_cf(cf);
                 if func >= 0b100 {
@@ -1466,11 +1859,11 @@ impl Cpu {
         }
     }
 
-    fn op_aam(&mut self, bus: &mut impl Bus) {
-        let imm = self.fetch8(bus);
+    fn op_aam<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let imm = self.fetch8(ctx);
 
         if imm == 0 {
-            self.call_int(bus, 0);
+            self.call_int(ctx, 0);
             self.set_pf(pf8(0));
             self.set_zf(zf8(0));
             self.set_sf(sf8(0));
@@ -1489,8 +1882,8 @@ impl Cpu {
         self.cycles += 83;
     }
 
-    fn op_aad(&mut self, bus: &mut impl Bus) {
-        let imm = self.fetch8(bus);
+    fn op_aad<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let imm = self.fetch8(ctx);
 
         let al = self.get_al();
         let ah = self.get_ah();
@@ -1513,21 +1906,21 @@ impl Cpu {
         }
     }
 
-    fn op_xlat(&mut self, bus: &mut impl Bus) {
+    fn op_xlat<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let seg = self.read_sreg_ovr(SReg::DS);
         let ofs = self.get_bx().wrapping_add(self.get_al() as u16);
-        let al = self.mem_read8(bus, seg, ofs);
+        let al = self.mem_read8(ctx.memory(), seg, ofs);
         self.set_al(al);
     }
 
-    fn op_esc(&mut self, bus: &mut impl Bus) {
-        let modrm = self.fetch8(bus);
-        let mem = self.modrm_mem_sw(bus, modrm, W16);
-        _ = self.read_modrm(bus, mem);
+    fn op_esc<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let modrm = self.fetch8(ctx);
+        let mem = self.modrm_mem_sw(ctx, modrm, W16);
+        _ = self.read_modrm(ctx, mem);
     }
 
-    fn op_loopnz(&mut self, bus: &mut impl Bus) {
-        let inc = self.fetch8(bus) as i8;
+    fn op_loopnz<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let inc = self.fetch8(ctx) as i8;
         let cx = self.get_cx().wrapping_sub(1);
         self.set_cx(cx);
 
@@ -1537,8 +1930,8 @@ impl Cpu {
         }
     }
 
-    fn op_loopz(&mut self, bus: &mut impl Bus) {
-        let inc = self.fetch8(bus) as i8;
+    fn op_loopz<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let inc = self.fetch8(ctx) as i8;
         let cx = self.get_cx().wrapping_sub(1);
         self.set_cx(cx);
 
@@ -1548,8 +1941,8 @@ impl Cpu {
         }
     }
 
-    fn op_loop(&mut self, bus: &mut impl Bus) {
-        let inc = self.fetch8(bus) as i8;
+    fn op_loop<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let inc = self.fetch8(ctx) as i8;
         let cx = self.get_cx().wrapping_sub(1);
         self.set_cx(cx);
 
@@ -1559,8 +1952,8 @@ impl Cpu {
         }
     }
 
-    fn op_jcxz(&mut self, bus: &mut impl Bus) {
-        let inc = self.fetch8(bus) as i8;
+    fn op_jcxz<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let inc = self.fetch8(ctx) as i8;
         let cx = self.get_cx();
 
         if cx == 0 {
@@ -1569,83 +1962,83 @@ impl Cpu {
         }
     }
 
-    fn op_in_al_imm8(&mut self, bus: &mut impl Bus) {
-        let port = self.fetch8(bus) as u16;
-        let v = bus.io_read_u8(port);
+    fn op_in_al_imm8<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let port = self.fetch8(ctx) as u16;
+        let v = ctx.io_read_u8(port);
         self.set_al(v);
     }
 
-    fn op_in_ax_imm8(&mut self, bus: &mut impl Bus) {
-        let port = self.fetch8(bus) as u16;
-        let v = bus.io_read_u16(port);
+    fn op_in_ax_imm8<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let port = self.fetch8(ctx) as u16;
+        let v = ctx.io_read_u16(port);
         self.set_ax(v);
     }
 
-    fn op_out_al_imm8(&mut self, bus: &mut impl Bus) {
-        let port = self.fetch8(bus) as u16;
+    fn op_out_al_imm8<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let port = self.fetch8(ctx) as u16;
         let v = self.get_al();
-        bus.io_write_u8(port, v);
+        ctx.io_write_u8(port, v);
     }
 
-    fn op_out_ax_imm8(&mut self, bus: &mut impl Bus) {
-        let port = self.fetch8(bus) as u16;
+    fn op_out_ax_imm8<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let port = self.fetch8(ctx) as u16;
         let v = self.get_ax();
-        bus.io_write_u16(port, v);
+        ctx.io_write_u16(port, v);
     }
 
-    fn op_call_near(&mut self, bus: &mut impl Bus) {
-        let inc = self.fetch16(bus);
+    fn op_call_near<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let inc = self.fetch16(ctx);
         let ip = self.get_ip();
-        self.push(bus, ip);
+        self.push(ctx.memory(), ip);
 
         let ip = ip.wrapping_add(inc);
         self.set_ip(ip);
     }
 
-    fn op_jmp_near(&mut self, bus: &mut impl Bus) {
-        let inc = self.fetch16(bus);
+    fn op_jmp_near<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let inc = self.fetch16(ctx);
         let ip = self.get_ip();
         let ip = ip.wrapping_add(inc);
         self.set_ip(ip);
     }
 
-    fn op_jmp_far(&mut self, bus: &mut impl Bus) {
-        let ofs = self.fetch16(bus);
-        let seg = self.fetch16(bus);
+    fn op_jmp_far<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let ofs = self.fetch16(ctx);
+        let seg = self.fetch16(ctx);
 
         self.set_cs(seg);
         self.set_ip(ofs);
     }
 
-    fn op_jmp_short(&mut self, bus: &mut impl Bus) {
-        let inc = sext(self.fetch8(bus));
+    fn op_jmp_short<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let inc = sext(self.fetch8(ctx));
         let ip = self.get_ip();
         let ip = ip.wrapping_add(inc);
         self.set_ip(ip);
     }
 
-    fn op_in_al_dx(&mut self, bus: &mut impl Bus) {
+    fn op_in_al_dx<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let port = self.get_dx();
-        let v = bus.io_read_u8(port);
+        let v = ctx.io_read_u8(port);
         self.set_al(v);
     }
 
-    fn op_in_ax_dx(&mut self, bus: &mut impl Bus) {
+    fn op_in_ax_dx<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let port = self.get_dx();
-        let v = bus.io_read_u16(port);
+        let v = ctx.io_read_u16(port);
         self.set_ax(v);
     }
 
-    fn op_out_al_dx(&mut self, bus: &mut impl Bus) {
+    fn op_out_al_dx<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let port = self.get_dx();
         let v = self.get_al();
-        bus.io_write_u8(port, v);
+        ctx.io_write_u8(port, v);
     }
 
-    fn op_out_ax_dx(&mut self, bus: &mut impl Bus) {
+    fn op_out_ax_dx<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let port = self.get_dx();
         let v = self.get_ax();
-        bus.io_write_u16(port, v);
+        ctx.io_write_u16(port, v);
     }
 
     fn op_lock_prefix(&self) {
@@ -1675,33 +2068,33 @@ impl Cpu {
         self.set_cf(!cf);
     }
 
-    fn op_grp3_rmw(&mut self, bus: &mut impl Bus, op: u8) {
+    fn op_grp3_rmw<Context: CpuContext>(&mut self, ctx: &mut Context, op: u8) {
         let w = Width::from_op(op);
-        let modrm = self.fetch8(bus);
+        let modrm = self.fetch8(ctx);
         let func = (modrm >> 3) & 0b111;
-        let mem = self.modrm_mem_sw(bus, modrm, w);
+        let mem = self.modrm_mem_sw(ctx, modrm, w);
 
         match func {
             0b000 | 0b001 => {
                 // test
-                let a = self.read_modrm(bus, mem);
-                let b = self.fetchw(bus, w);
+                let a = self.read_modrm(ctx, mem);
+                let b = self.fetchw(ctx, w);
                 self.alu_w(AluOp::And, a, b, w);
             }
             0b010 => {
                 // not
-                let v = self.read_modrm(bus, mem);
-                self.write_modrm(bus, mem, !v);
+                let v = self.read_modrm(ctx, mem);
+                self.write_modrm(ctx, mem, !v);
             }
             0b011 => {
                 // neg
-                let v = self.read_modrm(bus, mem);
+                let v = self.read_modrm(ctx, mem);
                 let res = self.alu_w(AluOp::Sub, 0, v, w);
-                self.write_modrm(bus, mem, res);
+                self.write_modrm(ctx, mem, res);
             }
             0b100 => {
                 // mul
-                let b = self.read_modrm(bus, mem);
+                let b = self.read_modrm(ctx, mem);
                 match w {
                     W8 => {
                         let ax = (self.get_al() as u16) * b;
@@ -1724,7 +2117,7 @@ impl Cpu {
             }
             0b101 => {
                 // imul
-                let b = self.read_modrm(bus, mem);
+                let b = self.read_modrm(ctx, mem);
                 match w {
                     W8 => {
                         let a = (self.get_al() as i8) as i16;
@@ -1756,7 +2149,7 @@ impl Cpu {
             }
             0b110 => {
                 // div
-                let src = self.read_modrm(bus, mem);
+                let src = self.read_modrm(ctx, mem);
                 match w {
                     W8 => {
                         let ax = self.get_ax();
@@ -1770,7 +2163,7 @@ impl Cpu {
                             self.set_cf(false);
                             self.set_af(false);
                             self.set_of(false);
-                            self.call_int(bus, 0);
+                            self.call_int(ctx, 0);
                             return;
                         }
 
@@ -1791,7 +2184,7 @@ impl Cpu {
                             self.set_cf(false);
                             self.set_af(false);
                             self.set_of(false);
-                            self.call_int(bus, 0);
+                            self.call_int(ctx, 0);
                             return;
                         }
 
@@ -1806,10 +2199,10 @@ impl Cpu {
                 match w {
                     W8 => {
                         let tmp_ac = self.get_ax() as i16;
-                        let tmp_b = self.read_modrm(bus, mem) as i8;
+                        let tmp_b = self.read_modrm(ctx, mem) as i8;
 
                         if tmp_b == 0 {
-                            self.call_int(bus, 0);
+                            self.call_int(ctx, 0);
                             return;
                         }
 
@@ -1821,7 +2214,7 @@ impl Cpu {
                         }
 
                         if quot <= (i8::MIN as i16) || quot > (i8::MAX as i16) {
-                            self.call_int(bus, 0);
+                            self.call_int(ctx, 0);
                             return;
                         }
 
@@ -1834,10 +2227,10 @@ impl Cpu {
                         let dxax = ((dx as u32) << 16) + (ax as u32);
 
                         let tmp_ac = dxax as i32;
-                        let tmp_b = self.read_modrm(bus, mem) as i16 as i32;
+                        let tmp_b = self.read_modrm(ctx, mem) as i16 as i32;
 
                         if tmp_b == 0 {
-                            self.call_int(bus, 0);
+                            self.call_int(ctx, 0);
                             return;
                         }
 
@@ -1849,7 +2242,7 @@ impl Cpu {
                         }
 
                         if quot <= (i16::MIN as i32) || quot > (i16::MAX as i32) {
-                            self.call_int(bus, 0);
+                            self.call_int(ctx, 0);
                             return;
                         }
 
@@ -1879,6 +2272,7 @@ impl Cpu {
 
     fn op_sti(&mut self) {
         self.set_if(true);
+        self.int_delay = true;
         self.cycles += 2;
     }
 
@@ -1892,17 +2286,25 @@ impl Cpu {
         self.cycles += 2;
     }
 
-    fn op_grp4_rm8(&mut self, bus: &mut impl Bus) {
-        let modrm = self.fetch8(bus);
+    fn op_grp4_rm8<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let modrm = self.fetch8(ctx);
         let subop = (modrm >> 3) & 0b111;
+
+        if modrm == 0x38 {
+            if let Some(&callback) = self.callbacks.get(&self.instruction_address) {
+                self.state = State::Callback((callback, self.instruction_address));
+                return;
+            }
+        }
+
         match subop {
             0b000 => {
-                let mem = self.modrm_mem_sw(bus, modrm, W8);
-                let dst = self.read_modrm(bus, mem);
+                let mem = self.modrm_mem_sw(ctx, modrm, W8);
+                let dst = self.read_modrm(ctx, mem);
                 let src = 1;
                 let res = dst.wrapping_add(src);
 
-                self.write_modrm(bus, mem, res);
+                self.write_modrm(ctx, mem, res);
                 self.set_pf(pf8(res));
                 self.set_af(af8(res, dst, src));
                 self.set_zf(zf8(res));
@@ -1915,12 +2317,12 @@ impl Cpu {
                 }
             }
             0b001 => {
-                let mem = self.modrm_mem_sw(bus, modrm, W8);
-                let dst = self.read_modrm(bus, mem);
+                let mem = self.modrm_mem_sw(ctx, modrm, W8);
+                let dst = self.read_modrm(ctx, mem);
                 let src = 1;
                 let res = dst.wrapping_sub(src);
 
-                self.write_modrm(bus, mem, res);
+                self.write_modrm(ctx, mem, res);
                 self.set_pf(pf8(res));
                 self.set_af(af8(res, dst, src));
                 self.set_zf(zf8(res));
@@ -1936,28 +2338,28 @@ impl Cpu {
         }
     }
 
-    fn op_grp5(&mut self, bus: &mut impl Bus) {
-        let modrm = self.fetch8(bus);
+    fn op_grp5<Context: CpuContext>(&mut self, ctx: &mut Context) {
+        let modrm = self.fetch8(ctx);
         let subop = (modrm >> 3) & 0b111;
         match subop {
-            0b000 => self.op_grp5_inc_rm16(bus, modrm),
-            0b001 => self.op_grp5_dec_rm16(bus, modrm),
-            0b010 => self.op_grp5_call_rm16(bus, modrm),
-            0b011 => self.op_grp5_call_far(bus, modrm),
-            0b100 => self.op_grp5_jmp_rm16(bus, modrm),
-            0b101 => self.op_grp5_jmp_far(bus, modrm),
-            0b110 | 0b111 => self.op_grp5_push_rm16(bus, modrm),
+            0b000 => self.op_grp5_inc_rm16(ctx, modrm),
+            0b001 => self.op_grp5_dec_rm16(ctx, modrm),
+            0b010 => self.op_grp5_call_rm16(ctx, modrm),
+            0b011 => self.op_grp5_call_far(ctx, modrm),
+            0b100 => self.op_grp5_jmp_rm16(ctx, modrm),
+            0b101 => self.op_grp5_jmp_far(ctx, modrm),
+            0b110 | 0b111 => self.op_grp5_push_rm16(ctx, modrm),
             _ => unreachable!(),
         }
     }
 
-    fn op_grp5_inc_rm16(&mut self, bus: &mut impl Bus, modrm: u8) {
-        let mem = self.modrm_mem_sw(bus, modrm, W16);
-        let dst = self.read_modrm(bus, mem);
+    fn op_grp5_inc_rm16<Context: CpuContext>(&mut self, ctx: &mut Context, modrm: u8) {
+        let mem = self.modrm_mem_sw(ctx, modrm, W16);
+        let dst = self.read_modrm(ctx, mem);
         let src = 1;
         let res = dst.wrapping_add(src);
 
-        self.write_modrm(bus, mem, res);
+        self.write_modrm(ctx, mem, res);
 
         self.set_pf(pf16(res));
         self.set_af(af16(res, dst, src));
@@ -1966,13 +2368,13 @@ impl Cpu {
         self.set_of(of16_add(res, dst, src));
     }
 
-    fn op_grp5_dec_rm16(&mut self, bus: &mut impl Bus, modrm: u8) {
-        let mem = self.modrm_mem_sw(bus, modrm, W16);
-        let dst = self.read_modrm(bus, mem);
+    fn op_grp5_dec_rm16<Context: CpuContext>(&mut self, ctx: &mut Context, modrm: u8) {
+        let mem = self.modrm_mem_sw(ctx, modrm, W16);
+        let dst = self.read_modrm(ctx, mem);
         let src = 1;
         let res = dst.wrapping_sub(src);
 
-        self.write_modrm(bus, mem, res);
+        self.write_modrm(ctx, mem, res);
 
         self.set_pf(pf16(res));
         self.set_af(af16(res, dst, src));
@@ -1981,11 +2383,11 @@ impl Cpu {
         self.set_of(of16_sub(res, dst, src));
     }
 
-    fn op_grp5_call_rm16(&mut self, bus: &mut impl Bus, modrm: u8) {
-        let mem = self.modrm_mem_sw(bus, modrm, W16);
-        let ofs = self.read_modrm(bus, mem);
+    fn op_grp5_call_rm16<Context: CpuContext>(&mut self, ctx: &mut Context, modrm: u8) {
+        let mem = self.modrm_mem_sw(ctx, modrm, W16);
+        let ofs = self.read_modrm(ctx, mem);
 
-        self.push(bus, self.get_ip());
+        self.push(ctx.memory(), self.get_ip());
         self.set_ip(ofs);
         self.cycles += 16;
         if mem.is_mem() {
@@ -1993,13 +2395,13 @@ impl Cpu {
         }
     }
 
-    fn op_grp5_call_far(&mut self, bus: &mut impl Bus, modrm: u8) {
-        let mem = self.modrm_mem_sw(bus, modrm, W16);
-        let ofs = self.read_modrm(bus, mem);
-        let seg = self.read_modrm(bus, mem.wrapping_add(2));
+    fn op_grp5_call_far<Context: CpuContext>(&mut self, ctx: &mut Context, modrm: u8) {
+        let mem = self.modrm_mem_sw(ctx, modrm, W16);
+        let ofs = self.read_modrm(ctx, mem);
+        let seg = self.read_modrm(ctx, mem.wrapping_add(2));
 
-        self.push(bus, self.get_cs());
-        self.push(bus, self.get_ip());
+        self.push(ctx.memory(), self.get_cs());
+        self.push(ctx.memory(), self.get_ip());
 
         self.set_cs(seg);
         self.set_ip(ofs);
@@ -2007,178 +2409,35 @@ impl Cpu {
         self.cycles += 37;
     }
 
-    fn op_grp5_jmp_rm16(&mut self, bus: &mut impl Bus, modrm: u8) {
-        let mem = self.modrm_mem_sw(bus, modrm, W16);
-        let ofs = self.read_modrm(bus, mem);
+    fn op_grp5_jmp_rm16<Context: CpuContext>(&mut self, ctx: &mut Context, modrm: u8) {
+        let mem = self.modrm_mem_sw(ctx, modrm, W16);
+        let ofs = self.read_modrm(ctx, mem);
 
         self.set_ip(ofs);
     }
 
-    fn op_grp5_jmp_far(&mut self, bus: &mut impl Bus, modrm: u8) {
-        let mem = self.modrm_mem_sw(bus, modrm, W16);
-        let ofs = self.read_modrm(bus, mem);
-        let seg = self.read_modrm(bus, mem.wrapping_add(2));
+    fn op_grp5_jmp_far<Context: CpuContext>(&mut self, ctx: &mut Context, modrm: u8) {
+        let mem = self.modrm_mem_sw(ctx, modrm, W16);
+        let ofs = self.read_modrm(ctx, mem);
+        let seg = self.read_modrm(ctx, mem.wrapping_add(2));
 
         self.set_cs(seg);
         self.set_ip(ofs);
     }
 
-    fn op_grp5_push_rm16(&mut self, bus: &mut impl Bus, modrm: u8) {
-        let ss = self.get_ss();
-        let sp = self.get_sp().wrapping_sub(2);
-        self.set_sp(sp);
+    fn op_grp5_push_rm16<Context: CpuContext>(&mut self, ctx: &mut Context, modrm: u8) {
+        let ss = self.register_file.get(SS);
+        let sp = self.register_file.get(SP).wrapping_sub(2);
+        self.register_file.set(SP, sp);
 
-        let mem = self.modrm_mem_sw(bus, modrm, W16);
-        let v = self.read_modrm(bus, mem);
+        let mem = self.modrm_mem_sw(ctx, modrm, W16);
+        let v = self.read_modrm(ctx, mem);
 
-        self.mem_write16(bus, ss, sp, v);
+        self.mem_write16(ctx.memory(), ss, sp, v);
 
         self.cycles += 11;
         if mem.is_mem() {
             self.cycles += 7;
         }
-    }
-
-    pub fn step(&mut self, bus: &mut impl Bus) {
-        let mut op: u8;
-
-        loop {
-            op = self.fetch8(bus);
-
-            match op {
-                0x26 => self.sreg_ovr = Some(SReg::ES),
-                0x2e => self.sreg_ovr = Some(SReg::CS),
-                0x36 => self.sreg_ovr = Some(SReg::SS),
-                0x3e => self.sreg_ovr = Some(SReg::DS),
-
-                0xf2 => self.rep_mode = RepMode::Repne,
-                0xf3 => self.rep_mode = RepMode::Rep,
-                _ => break,
-            }
-        }
-
-        match op {
-            0x00..=0x03 => self.op_alu_r_rm(bus, op),
-            0x04..=0x05 => self.op_alu_a_imm(bus, op),
-            0x06..=0x06 => self.op_push_sreg(bus, op),
-            0x07..=0x07 => self.op_pop_sreg(bus, op),
-            0x08..=0x0b => self.op_alu_r_rm(bus, op),
-            0x0c..=0x0d => self.op_alu_a_imm(bus, op),
-            0x0e..=0x0e => self.op_push_sreg(bus, op),
-            0x0f..=0x0f => self.op_pop_sreg(bus, op),
-            0x10..=0x13 => self.op_alu_r_rm(bus, op),
-            0x14..=0x15 => self.op_alu_a_imm(bus, op),
-            0x16..=0x16 => self.op_push_sreg(bus, op),
-            0x17..=0x17 => self.op_pop_sreg(bus, op),
-            0x18..=0x1b => self.op_alu_r_rm(bus, op),
-            0x1c..=0x1d => self.op_alu_a_imm(bus, op),
-            0x1e..=0x1e => self.op_push_sreg(bus, op),
-            0x1f..=0x1f => self.op_pop_sreg(bus, op),
-            0x20..=0x23 => self.op_alu_r_rm(bus, op),
-            0x24..=0x25 => self.op_alu_a_imm(bus, op),
-            0x26..=0x26 => unreachable!(),
-            0x27..=0x27 => self.op_daa(),
-            0x28..=0x2b => self.op_alu_r_rm(bus, op),
-            0x2c..=0x2d => self.op_alu_a_imm(bus, op),
-            0x2e..=0x2e => unreachable!(),
-            0x2f..=0x2f => self.op_das(),
-            0x30..=0x33 => self.op_alu_r_rm(bus, op),
-            0x34..=0x35 => self.op_alu_a_imm(bus, op),
-            0x36..=0x36 => unreachable!(),
-            0x37..=0x37 => self.op_aaa(),
-            0x38..=0x3b => self.op_alu_r_rm(bus, op),
-            0x3c..=0x3d => self.op_alu_a_imm(bus, op),
-            0x3e..=0x3e => unreachable!(),
-            0x3f..=0x3f => self.op_aas(),
-            0x40..=0x47 => self.op_inc_reg(op),
-            0x48..=0x4f => self.op_dec_reg(op),
-            0x50..=0x57 => self.op_push_reg(bus, op),
-            0x58..=0x5f => self.op_pop_reg(bus, op),
-            0x60..=0x7f => self.op_jcc(bus, op),
-            0x80..=0x83 => self.op_grp1_rmw_imm(bus, op),
-            0x84..=0x85 => self.op_test_rm_r(bus, op),
-            0x86..=0x87 => self.op_xchg_rm_r(bus, op),
-            0x88..=0x8b => self.op_mov_rm_r(bus, op),
-            0x8c => self.op_mov_rm16_sreg(bus, op),
-            0x8d => self.op_lea_r16_m16(bus),
-            0x8e => self.op_mov_rm16_sreg(bus, op),
-            0x8f => self.op_pop_rm16(bus),
-            0x90..=0x97 => self.op_xchg_ax_r(op),
-            0x98 => self.op_cbw(),
-            0x99 => self.op_cwd(),
-            0x9a => self.op_call_far(bus),
-            0x9b => self.op_wait(),
-            0x9c => self.op_pushf(bus),
-            0x9d => self.op_popf(bus),
-            0x9e => self.op_sahf(),
-            0x9f => self.op_lahf(),
-            0xa0..=0xa3 => self.op_mov_a_m(bus, op),
-            0xa4..=0xa5 => self.op_movs(bus, op),
-            0xa6..=0xa7 => self.op_cmps(bus, op),
-            0xa8..=0xa9 => self.op_test_a_imm(bus, op),
-            0xaa..=0xab => self.op_stos(bus, op),
-            0xac..=0xad => self.op_lods(bus, op),
-            0xae..=0xaf => self.op_scas(bus, op),
-            0xb0..=0xbf => self.op_mov_reg_imm(bus, op),
-            0xc0 => self.op_ret_imm16_intraseg(bus),
-            0xc1 => self.op_ret_intraseg(bus),
-            0xc2 => self.op_ret_imm16_intraseg(bus),
-            0xc3 => self.op_ret_intraseg(bus),
-            0xc4 => self.op_les_r16_m16(bus),
-            0xc5 => self.op_lds_r16_m16(bus),
-            0xc6..=0xc7 => self.op_mov_m_imm(bus, op),
-            0xc8 => self.op_ret_imm16_interseg(bus),
-            0xc9 => self.op_ret_interseg(bus),
-            0xca => self.op_ret_imm16_interseg(bus),
-            0xcb => self.op_ret_interseg(bus),
-            0xcc => self.op_int_3(bus),
-            0xcd => self.op_int_imm8(bus),
-            0xce => self.op_into(bus),
-            0xcf => self.op_iret(bus),
-            0xd0..=0xd3 => self.op_grp2_rmw(bus, op),
-            0xd4 => self.op_aam(bus),
-            0xd5 => self.op_aad(bus),
-            0xd6 => self.op_salc(),
-            0xd7 => self.op_xlat(bus),
-            0xd8 => self.op_esc(bus),
-            0xd9 => self.op_esc(bus),
-            0xda => self.op_esc(bus),
-            0xdb => self.op_esc(bus),
-            0xdc => self.op_esc(bus),
-            0xdd => self.op_esc(bus),
-            0xde => self.op_esc(bus),
-            0xdf => self.op_esc(bus),
-            0xe0 => self.op_loopnz(bus),
-            0xe1 => self.op_loopz(bus),
-            0xe2 => self.op_loop(bus),
-            0xe3 => self.op_jcxz(bus),
-            0xe4 => self.op_in_al_imm8(bus),
-            0xe5 => self.op_in_ax_imm8(bus),
-            0xe6 => self.op_out_al_imm8(bus),
-            0xe7 => self.op_out_ax_imm8(bus),
-            0xe8 => self.op_call_near(bus),
-            0xe9 => self.op_jmp_near(bus),
-            0xea => self.op_jmp_far(bus),
-            0xeb => self.op_jmp_short(bus),
-            0xec => self.op_in_al_dx(bus),
-            0xed => self.op_in_ax_dx(bus),
-            0xee => self.op_out_al_dx(bus),
-            0xef => self.op_out_ax_dx(bus),
-            0xf0 => self.op_lock_prefix(),
-            0xf1 => self.op_unused(),
-            0xf2 => self.op_repne(),
-            0xf3 => self.op_rep(),
-            0xf4 => self.op_hlt(),
-            0xf5 => self.op_cmc(),
-            0xf6..=0xf7 => self.op_grp3_rmw(bus, op),
-            0xf8 => self.op_clc(),
-            0xf9 => self.op_stc(),
-            0xfa => self.op_cli(),
-            0xfb => self.op_sti(),
-            0xfc => self.op_cld(),
-            0xfd => self.op_std(),
-            0xfe => self.op_grp4_rm8(bus),
-            0xff => self.op_grp5(bus),
-        };
     }
 }
