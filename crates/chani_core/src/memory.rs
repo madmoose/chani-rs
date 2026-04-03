@@ -111,28 +111,28 @@ impl Memory {
         //     println!("XXXX WRITE: byte {address} <- {value:#04x}");
         // }
 
-        let pal_base = 0x02bf;
-        if address.seg == 0x24c9 && (pal_base..pal_base + 0x300).contains(&address.ofs) {
-            let c = address.ofs - pal_base;
-            println!(
-                "WRITE: {} [{pal_base:04x}][{}][{}] = {:02x}",
-                address,
-                c / 3,
-                c % 3,
-                value & 0xff
-            );
-        }
-        let pal_base = pal_base + 0x0300;
-        if address.seg == 0x24c9 && (pal_base..pal_base + 0x300).contains(&address.ofs) {
-            let c = address.ofs - pal_base;
-            println!(
-                "WRITE: {} [{pal_base:04x}][{}][{}] = {:02x}",
-                address,
-                c / 3,
-                c % 3,
-                value
-            );
-        }
+        // let pal_base = 0x02bf;
+        // if address.seg == 0x24c9 && (pal_base..pal_base + 0x300).contains(&address.ofs) {
+        //     let c = address.ofs - pal_base;
+        //     println!(
+        //         "WRITE: {} [{pal_base:04x}][{}][{}] = {:02x}",
+        //         address,
+        //         c / 3,
+        //         c % 3,
+        //         value & 0xff
+        //     );
+        // }
+        // let pal_base = pal_base + 0x0300;
+        // if address.seg == 0x24c9 && (pal_base..pal_base + 0x300).contains(&address.ofs) {
+        //     let c = address.ofs - pal_base;
+        //     println!(
+        //         "WRITE: {} [{pal_base:04x}][{}][{}] = {:02x}",
+        //         address,
+        //         c / 3,
+        //         c % 3,
+        //         value
+        //     );
+        // }
 
         self.data[ea] = value;
     }
@@ -162,31 +162,31 @@ impl Memory {
         //     println!("XXXX WRITE: word {address} <- {value:#06x}");
         // }
 
-        for i in 0..2 {
-            let address = address + i;
-            let pal_base = 0x02bf;
-            if address.seg == 0x24c9 && (pal_base..pal_base + 0x300).contains(&address.ofs) {
-                let c = address.ofs - pal_base;
-                println!(
-                    "WRITE: {} [{pal_base:04x}][{}][{}] = {:02x}",
-                    address,
-                    c / 3,
-                    c % 3,
-                    value & 0xff
-                );
-            }
-            let pal_base = pal_base + 0x0300;
-            if address.seg == 0x24c9 && (pal_base..pal_base + 0x300).contains(&address.ofs) {
-                let c = address.ofs - pal_base;
-                println!(
-                    "WRITE: {} [{pal_base:04x}][{}][{}] = {:02x}",
-                    address,
-                    c / 3,
-                    c % 3,
-                    value >> 8
-                );
-            }
-        }
+        // for i in 0..2 {
+        //     let address = address + i;
+        //     let pal_base = 0x02bf;
+        //     if address.seg == 0x24c9 && (pal_base..pal_base + 0x300).contains(&address.ofs) {
+        //         let c = address.ofs - pal_base;
+        //         println!(
+        //             "WRITE: {} [{pal_base:04x}][{}][{}] = {:02x}",
+        //             address,
+        //             c / 3,
+        //             c % 3,
+        //             value & 0xff
+        //         );
+        //     }
+        //     let pal_base = pal_base + 0x0300;
+        //     if address.seg == 0x24c9 && (pal_base..pal_base + 0x300).contains(&address.ofs) {
+        //         let c = address.ofs - pal_base;
+        //         println!(
+        //             "WRITE: {} [{pal_base:04x}][{}][{}] = {:02x}",
+        //             address,
+        //             c / 3,
+        //             c % 3,
+        //             value >> 8
+        //         );
+        //     }
+        // }
 
         self.data[address.ea() as usize] = (value & 0xff) as u8;
         self.data[(address + 1).ea() as usize] = (value >> 8) as u8;

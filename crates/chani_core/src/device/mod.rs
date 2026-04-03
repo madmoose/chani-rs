@@ -1,9 +1,16 @@
 use std::any::Any;
 
 pub mod keyboard;
+pub mod opl3;
 pub mod pic;
 pub mod pit;
 pub mod vga;
+
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceAccessContext {
+    pub cs: u16,
+    pub ip: u16,
+}
 
 pub trait Device: Send {
     fn as_any(&self) -> &dyn Any;

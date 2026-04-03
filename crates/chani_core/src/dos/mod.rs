@@ -19,7 +19,7 @@ use crate::{
     address::{Address, addr},
     cpu::Cpu,
     file_system::Fd,
-    machine::{DosMachineContext, Machine, install_interrupt_handler_callback},
+    machine::{Machine, install_interrupt_handler_callback},
     memory::Memory,
 };
 
@@ -79,10 +79,10 @@ impl Display for UserRegs {
 }
 
 fn readlo(reg: u16) -> u8 {
-    (reg & 0x0f) as u8
+    (reg & 0x00ff) as u8
 }
 fn writelo(reg: &mut u16, v: u8) {
-    *reg = (*reg & 0xf0) | (v as u16);
+    *reg = (*reg & 0xff00) | (v as u16);
 }
 
 impl UserRegs {
@@ -135,6 +135,14 @@ pub struct Dos {
     user_regs: UserRegs,
     files: Vec<Option<Fd>>,
     pub current_directory: Vec<u8>,
+    pub mouse: Mouse,
+}
+
+#[derive(Debug, Default)]
+pub struct Mouse {
+    pub x: u16,
+    pub y: u16,
+    pub buttons: u16,
 }
 
 impl Dos {
@@ -231,45 +239,5 @@ impl Dos {
             }
             seg = mcb.next_seg();
         }
-    }
-
-    pub fn int33(&mut self, ctx: &mut DosMachineContext) {
-        // let ss = ctx.cpu.get_ss();
-        // let sp = ctx.cpu.get_sp();
-        // let ip = ctx.memory.read_u16(addr(ss, sp)) - 2;
-        // let cs = ctx.memory.read_u16(addr(ss, sp + 2));
-
-        // eprintln!("DOS int 33h callback executed at address {}", addr(cs, ip),);
-        let ax = ctx.cpu.get_ax();
-
-        let func = match ax {
-            0x0000 => Dos::int33_0000_reset_driver_and_read_status,
-            0x0001 => Dos::int33_0001_show_mouse_cursor,
-            0x0002 => Dos::int33_0002_hide_mouse_cursor,
-            0x0003 => Dos::int33_0003_return_position_and_button_status,
-            0x0004 => Dos::int33_0004_position_mouse_cursor,
-            0x0005 => Dos::int33_0005_return_button_press_data,
-            0x0006 => Dos::int33_0006_return_button_release_data,
-            0x0007 => Dos::int33_0007_define_horizontal_cursor_range,
-            0x0008 => Dos::int33_0008_define_vertical_cursor_range,
-            0x0009 => Dos::int33_0009_define_graphics_cursor,
-            0x000a => Dos::int33_000a_define_text_cursor,
-            0x000b => Dos::int33_000b_read_motion_counters,
-            0x000c => Dos::int33_000c_define_interrupt_subroutine_parameters,
-            0x000d => Dos::int33_000d_light_pen_emulation_on,
-            0x000e => Dos::int33_000e_light_pen_emulation_off,
-            0x000f => Dos::int33_000f_define_mickey_pixel_ratio,
-            0x0010 => Dos::int33_0010_define_screen_region_for_updating,
-            _ => {
-                println!("Unknown DOS int 33h function: {ax:#02x}");
-                todo!();
-            }
-        };
-
-        func(self, ctx);
-
-        // println!("DOS int 33h function {ah:#02x} executed successfully.\n");
-
-        ctx.cpu.iret(ctx.memory);
     }
 }

@@ -1,0 +1,813 @@
+project[cryo-dune-3.7-cd]:
+
+file = DNCDPRG.EXE
+hash = sha1:c55e9e35c24941d8590c068c69cb6cee85e4afcb
+arch = 8086
+
+segment[seg000]: type = code; start = 0; end = 0xf4b0
+segment[seg001]: type = data; start = 0xf4b0; end = 0x1336c
+
+attr[seg000:0000]: type = code; name = start
+attr[seg000:003a]: name = exit_with_error
+attr[seg000:0098]: type = code; name = adjust_sub_resource_pointers
+attr[seg000:00b0]: type = code; name = initialize_resources
+attr[seg000:00d1]: type = code; name = initialize_resources
+attr[seg000:0169]: type = code; name = map2_resource_func
+attr[seg000:01cb]: imm_seg = seg000
+attr[seg000:01e0]: type = code
+attr[seg000:020c]: type = [u16; 8]; imm_seg = seg000; name = script_2
+attr[seg000:021c]: type = code; name = play_intro2
+attr[seg000:02c1]: type = code
+attr[seg000:02de]: type = code; name = intro_part_2
+attr[seg000:02e0]: type = code; name = draw_stars
+attr[seg000:02e3]: type = code
+attr[seg000:02f8]: type = code; name = intro_paul_on_red_background
+attr[seg000:02fb]: type = code; name = intro_26_baron
+attr[seg000:02fe]: type = code
+attr[seg000:0301]: type = code
+attr[seg000:0309]: type = code; name = play_CREDITS_HNM
+attr[seg000:0337]: type = [u16; 288]; name = word_10337_intro_script
+attr[seg000:0577]: type = u16; name = word_10577_intro_script_end
+attr[seg000:0579]: type = code; name = clear_global_y_offset
+attr[seg000:0580]: type = code; name = play_intro
+attr[seg000:061c]: type = code; name = load_VIRGIN_HNM
+attr[seg000:0625]: type = code; name = play_VIRGIN_HNM
+attr[seg000:064d]: type = code; name = load_CRYO_HNM
+attr[seg000:0658]: type = code; name = load_CRYO2_HNM
+attr[seg000:0661]: type = code; name = play_CRYO_OR_CRYO2_HNM
+attr[seg000:0678]: type = code; name = load_PRESENT_HNM
+attr[seg000:0684]: type = code; name = play_PRESENT_HNM
+attr[seg000:0686]: type = code
+attr[seg000:0687]: type = code
+attr[seg000:068f]: type = code
+attr[seg000:069e]: type = code; name = load_INTRO_HNM
+attr[seg000:06aa]: type = code; name = intro_play_hnm_86_frames
+attr[seg000:06bd]: type = code; name = intro_play_hnm_skippable
+attr[seg000:06ce]: type = code; name = intro_load_desert_flyover_video
+attr[seg000:06d3]: type = code; name = intro_desert_flight_to_sietch
+attr[seg000:06d8]: type = code
+attr[seg000:06ea]: type = code
+attr[seg000:06fc]: type = code
+attr[seg000:0704]: type = code; name = intro_play_hnm_with_frame_task
+attr[seg000:0711]: type = code
+attr[seg000:071d]: type = code
+attr[seg000:0737]: type = code
+attr[seg000:073c]: type = code
+attr[seg000:0740]: type = code
+attr[seg000:0747]: type = code
+attr[seg000:074b]: type = code
+attr[seg000:0752]: type = code
+attr[seg000:0756]: type = code
+attr[seg000:075a]: type = code
+attr[seg000:075e]: type = code
+attr[seg000:0762]: type = code
+attr[seg000:0766]: type = code
+attr[seg000:0771]: type = code; name = intro_lady_jessica_2
+attr[seg000:077c]: type = code; name = intro_inside_sietch
+attr[seg000:0788]: type = code; name = intro_chani_in_sietch
+attr[seg000:078d]: type = code
+attr[seg000:0798]: type = code; name = intro_talking_head_play
+attr[seg000:07a3]: type = code; name = intro_kynes
+attr[seg000:07c6]: type = code; name = intro_somebody_in_sietch
+attr[seg000:07e0]: type = code; name = intro_water_ripples_in_cave
+attr[seg000:07ee]: type = code; name = intro_paul_on_red_background
+attr[seg000:07fd]: type = code; name = intro_load_desert_sky_animation
+attr[seg000:0820]: type = code; name = open_skyrs_palette
+attr[seg000:0826]: type = code
+attr[seg000:085d]: type = code; name = intro_play_desert_sky_animation
+attr[seg000:0868]: type = code; name = intro_midnight
+attr[seg000:087b]: type = code
+attr[seg000:0886]: type = code; name = intro_25_sting_start
+attr[seg000:08b6]: type = code; name = intro_27_baron_guards_play
+attr[seg000:08e5]: type = code
+attr[seg000:0911]: type = code; name = remove_all_frame_tasks
+attr[seg000:093f]: type = code; name = intro_script_load_word
+attr[seg000:0945]: type = code; name = intro_script_set_offset
+attr[seg000:094a]: type = code
+attr[seg000:095d]: type = code
+attr[seg000:0972]: type = code; name = intro_palace_equipment_room
+attr[seg000:098a]: type = code; name = intro_lady_jessica_1
+attr[seg000:0995]: type = code; name = intro_duke_leto
+attr[seg000:09a5]: type = code; name = intro_outside_of_palace
+attr[seg000:09ad]: type = code; name = intro_26_baron
+attr[seg000:09ef]: type = code; name = play_CREDITS_HNM
+attr[seg000:09f5]: type = code
+attr[seg000:0acd]: type = code; name = intro_28_night_attack_start
+attr[seg000:0b45]: type = code
+attr[seg000:0e3e]: type = code
+attr[seg000:0e47]: type = code
+attr[seg000:0ea6]: type = code
+attr[seg000:0eb9]: type = code
+attr[seg000:0ed0]: type = code
+attr[seg000:0f48]: type = code
+attr[seg000:0f66]: type = code
+attr[seg000:0f67]: type = code
+attr[seg000:0fc5]: type = code
+attr[seg000:100b]: type = code
+attr[seg000:1011]: type = code
+attr[seg000:1027]: type = code
+attr[seg000:102f]: type = code
+attr[seg000:1045]: type = code
+attr[seg000:1053]: type = code
+attr[seg000:1069]: type = [u16; 4]
+attr[seg000:10a4]: type = code
+attr[seg000:10b2]: type = code
+attr[seg000:10b7]: type = code
+attr[seg000:10b8]: type = code
+attr[seg000:10be]: type = code
+attr[seg000:10f7]: type = code
+attr[seg000:110f]: type = code
+attr[seg000:1127]: type = code
+attr[seg000:112d]: type = code
+attr[seg000:1133]: type = code
+attr[seg000:1139]: type = code
+attr[seg000:115c]: type = [u16; 5]
+attr[seg000:1166]: type = code
+attr[seg000:117b]: type = code
+attr[seg000:1188]: type = code
+attr[seg000:1196]: type = code
+attr[seg000:11a7]: type = code
+attr[seg000:11e6]: type = code
+attr[seg000:11e9]: type = [u16; 27]
+attr[seg000:121f]: type = code; name = set_game_phase
+attr[seg000:1269]: type = code
+attr[seg000:1399]: type = code
+attr[seg000:13a0]: type = code
+attr[seg000:13aa]: type = code
+attr[seg000:13c8]: type = code
+attr[seg000:13e4]: type = code
+attr[seg000:140b]: type = code
+attr[seg000:1422]: type = code
+attr[seg000:1442]: type = code; name = chankiss
+attr[seg000:1474]: type = code
+attr[seg000:1475]: type = [u16; 12]
+attr[seg000:148d]: type = code
+attr[seg000:1498]: type = code
+attr[seg000:14ac]: type = code
+attr[seg000:14c9]: type = code
+attr[seg000:1556]: type = code
+attr[seg000:15a8]: type = code
+attr[seg000:15b7]: type = code
+attr[seg000:15c9]: type = code
+attr[seg000:15d4]: type = code
+attr[seg000:15d8]: type = code
+attr[seg000:15df]: type = code
+attr[seg000:15ea]: type = code
+attr[seg000:15f5]: type = code
+attr[seg000:1603]: type = code
+attr[seg000:1617]: type = code
+attr[seg000:1625]: type = code
+attr[seg000:1630]: type = code
+attr[seg000:163e]: type = code
+attr[seg000:164c]: type = code
+attr[seg000:165a]: type = [u16; 17]
+attr[seg000:167c]: type = code
+attr[seg000:176b]: type = code; name = blink
+attr[seg000:1797]: type = code; name = ui_draw_head_and_shoulders
+attr[seg000:17e6]: type = code; name = ui_head_animate_up
+attr[seg000:1803]: type = code; name = ui_head_animate_down
+attr[seg000:181e]: type = code; name = ui_head_animate_down
+attr[seg000:18ee]: type = code; name = ui_draw_palace_plan
+attr[seg000:19fc]: type = code
+attr[seg000:1a34]: type = code; name = ui_draw_date_and_time_indicator
+attr[seg000:1a9b]: type = code; name = draw_moon_and_sun
+attr[seg000:1ac5]: type = code; name = get_ingame_day_q
+attr[seg000:1ad1]: type = code; name = get_ingame_day_in_ax
+attr[seg000:1ae0]: type = code; name = get_ingame_time_of_day
+attr[seg000:1ae7]: type = code
+attr[seg000:1b0c]: type = code
+attr[seg000:1d10]: type = code
+attr[seg000:1d35]: type = [u8; 48]
+attr[seg000:1db3]: type = [u16; 16]
+attr[seg000:1dd3]: type = code
+attr[seg000:1dd4]: type = code
+attr[seg000:1dd7]: type = code
+attr[seg000:1dda]: type = code
+attr[seg000:1dfe]: type = code
+attr[seg000:1ea1]: type = code
+attr[seg000:1ea9]: type = code
+attr[seg000:1eb1]: type = code
+attr[seg000:2017]: type = code; name = ui_comm
+attr[seg000:2065]: type = [u8; 11]
+attr[seg000:2239]: type = code
+attr[seg000:2318]: type = code
+attr[seg000:2388]: type = code
+attr[seg000:23d5]: type = code
+attr[seg000:23e6]: type = code
+attr[seg000:2419]: type = code
+attr[seg000:241a]: type = code
+attr[seg000:2431]: type = code
+attr[seg000:2453]: type = code
+attr[seg000:24a3]: type = code
+attr[seg000:24ee]: type = code
+attr[seg000:2555]: type = code
+attr[seg000:26a6]: type = code
+attr[seg000:274e]: type = code; name = comm_draw_panels
+attr[seg000:275f]: type = code; name = comm_draw_glow
+attr[seg000:2773]: type = code; name = comm_fade_out_glow
+attr[seg000:2795]: type = code; name = comm_fade_in_glow
+attr[seg000:27b6]: type = code; name = comm_draw_glow_index
+attr[seg000:27c9]: type = code; name = comm_draw_flicker
+attr[seg000:281c]: type = code; name = comm_animate_incoming_call
+attr[seg000:283a]: type = code
+attr[seg000:283e]: type = code
+attr[seg000:28a1]: type = code
+attr[seg000:28b5]: type = code
+attr[seg000:28e1]: type = code
+attr[seg000:290b]: type = code
+attr[seg000:2993]: type = code
+attr[seg000:2997]: type = code
+attr[seg000:29d4]: type = code
+attr[seg000:2aaf]: type = code
+attr[seg000:2c9a]: type = code
+attr[seg000:2cc7]: type = code
+attr[seg000:2ccf]: type = code
+attr[seg000:2d2c]: type = code
+attr[seg000:2d62]: type = code
+attr[seg000:2d74]: type = code; name = open_SAL_resource
+attr[seg000:2db1]: type = code; name = draw_room_game_screen
+attr[seg000:30b9]: type = code
+attr[seg000:3120]: type = code
+attr[seg000:316e]: type = code
+attr[seg000:3406]: type = code
+attr[seg000:348a]: type = code
+attr[seg000:34d0]: type = code
+attr[seg000:351a]: type = code
+attr[seg000:3520]: type = code
+attr[seg000:3722]: type = code
+attr[seg000:388d]: type = code; name = set_sky_palette
+attr[seg000:38b4]: type = code; name = draw_sky
+attr[seg000:395b]: type = code
+attr[seg000:395c]: type = code; name = get_sky_palette_id_from_game_time_in_bl
+attr[seg000:3971]: type = code; name = open_sky_or_skydn_palette_al_sub_bl
+attr[seg000:3978]: type = code; name = open_sky_palette_al_sub_bl_dsdx
+attr[seg000:39e6]: type = code; name = remove_room_frame_task
+attr[seg000:3a6a]: type = code; name = draw_ornis_loop
+attr[seg000:3a73]: type = code; name = draw_ornis
+attr[seg000:3a7c]: type = code; name = add_room_frame_task
+attr[seg000:3a95]: type = code; name = get_orni_position
+attr[seg000:3aa9]: type = code; name = draw_orni
+attr[seg000:3b59]: type = code; name = draw_SAL
+attr[seg000:3be9]: type = code; name = SAL_polygon
+attr[seg000:3d83]: type = code; name = sal_read_position_markers
+attr[seg000:3e13]: type = code; name = draw_gradient_section
+attr[seg000:3e80]: type = code; name = draw_gradient_section_2
+attr[seg000:3f15]: type = code; name = ui_click_room_up
+attr[seg000:3f1a]: type = code; name = ui_click_room_right
+attr[seg000:3f1f]: type = code; name = ui_click_room_down
+attr[seg000:3f24]: type = code; name = ui_click_room_left
+attr[seg000:3f27]: type = code; name = ui_click_move_room
+attr[seg000:407e]: type = code; name = get_map_position
+attr[seg000:40c9]: type = code
+attr[seg000:40d5]: type = code
+attr[seg000:4285]: type = code
+attr[seg000:42d1]: type = code
+attr[seg000:42d9]: type = code
+attr[seg000:4377]: type = code
+attr[seg000:43e3]: type = code
+attr[seg000:4415]: type = code
+attr[seg000:450e]: type = code
+attr[seg000:46b5]: type = code
+attr[seg000:4821]: type = code
+attr[seg000:4913]: type = code
+attr[seg000:497a]: type = code
+attr[seg000:4aad]: type = code
+attr[seg000:4ad0]: type = code
+attr[seg000:4ad7]: type = code
+attr[seg000:4bb9]: type = code
+attr[seg000:4e04]: type = code
+attr[seg000:4e8d]: type = code
+attr[seg000:4f09]: type = code
+attr[seg000:4ffb]: type = code
+attr[seg000:5082]: type = code
+attr[seg000:50a2]: type = code
+attr[seg000:50c4]: type = code
+attr[seg000:50db]: type = code
+attr[seg000:50ea]: type = code
+attr[seg000:5381]: type = code
+attr[seg000:53b6]: type = code
+attr[seg000:53f1]: type = code
+attr[seg000:55dd]: type = code; name = map_func
+attr[seg000:5692]: type = code
+attr[seg000:5728]: type = code
+attr[seg000:5746]: type = code
+attr[seg000:578a]: type = code
+attr[seg000:588b]: type = [u16; 8]
+attr[seg000:589b]: type = code
+attr[seg000:589e]: type = code
+attr[seg000:58a1]: type = code
+attr[seg000:58a4]: type = code
+attr[seg000:58b1]: type = code
+attr[seg000:58b4]: type = code
+attr[seg000:58c1]: type = code
+attr[seg000:58ce]: type = code
+attr[seg000:5923]: type = code
+attr[seg000:599f]: type = code
+attr[seg000:59c1]: type = code
+attr[seg000:5a03]: type = code
+attr[seg000:5a3d]: type = code; name = ui_transition_to_map_interface
+attr[seg000:5a56]: type = code
+attr[seg000:5a9a]: type = code; name = ui_main_view_map_interface
+attr[seg000:5b05]: type = code
+attr[seg000:5b1e]: type = code
+attr[seg000:5b99]: type = code; name = copy_rect_at_si_to_di
+attr[seg000:5ba0]: type = code; name = copy_game_area_rect_to_unknown_rect
+attr[seg000:5ba8]: type = code; name = copy_game_area_rect_to_clip_rect
+attr[seg000:5c76]: type = code
+attr[seg000:5ce4]: type = code
+attr[seg000:5e4f]: type = code; name = calc_SAL_index
+attr[seg000:5e6b]: type = code
+attr[seg000:6155]: type = code
+attr[seg000:6231]: type = code; name = get_location_type_string_offset
+attr[seg000:629d]: type = code; name = draw_string_location_type
+attr[seg000:62a6]: type = code; name = draw_location_name
+attr[seg000:63f0]: type = code; name = map_func_qq
+attr[seg000:646f]: type = code
+attr[seg000:64ed]: type = u16
+attr[seg000:6515]: type = code
+attr[seg000:653a]: type = code
+attr[seg000:65b4]: type = u16
+attr[seg000:6670]: type = code
+attr[seg000:667d]: type = code
+attr[seg000:66ce]: type = code
+attr[seg000:676e]: type = code
+attr[seg000:68d2]: type = code
+attr[seg000:68da]: type = code
+attr[seg000:69b3]: type = code
+attr[seg000:6a2b]: type = code
+attr[seg000:6a2f]: type = code
+attr[seg000:6a33]: type = code
+attr[seg000:6a45]: type = code
+attr[seg000:6a6b]: type = code
+attr[seg000:6a71]: type = code
+attr[seg000:6a83]: type = code
+attr[seg000:6a87]: type = code
+attr[seg000:6b34]: type = code
+attr[seg000:6b8a]: type = code
+attr[seg000:6b96]: type = code
+attr[seg000:6bd7]: type = code
+attr[seg000:6bf5]: type = [u16; 16]
+attr[seg000:6c26]: type = [u16; 16]
+attr[seg000:6cfc]: type = code
+attr[seg000:6d5f]: type = code
+attr[seg000:6df5]: type = code
+attr[seg000:6e0f]: type = code
+attr[seg000:6e20]: type = code
+attr[seg000:6e82]: type = code
+attr[seg000:6ea8]: type = code
+attr[seg000:6ecb]: type = code
+attr[seg000:6edb]: type = code
+attr[seg000:6f48]: type = code
+attr[seg000:6f78]: type = code; name = increase_charisma_by_al
+attr[seg000:6f93]: type = code; name = decrease_troop_motivation
+attr[seg000:6fe5]: type = code
+attr[seg000:70cc]: type = code
+attr[seg000:71ef]: type = code
+attr[seg000:7289]: type = code
+attr[seg000:72a2]: type = code
+attr[seg000:72b0]: type = code
+attr[seg000:7317]: type = code
+attr[seg000:7399]: type = code
+attr[seg000:739e]: type = code; name = map_func
+attr[seg000:7419]: type = code
+attr[seg000:7506]: type = code
+attr[seg000:7516]: type = code
+attr[seg000:7552]: type = code
+attr[seg000:75af]: type = code
+attr[seg000:75ea]: type = code
+attr[seg000:762a]: type = code
+attr[seg000:764d]: type = code
+attr[seg000:767d]: type = code
+attr[seg000:7693]: type = code
+attr[seg000:7711]: type = code
+attr[seg000:7734]: type = code
+attr[seg000:775c]: type = code
+attr[seg000:776d]: type = code
+attr[seg000:7cbb]: type = code
+attr[seg000:7d68]: type = code
+attr[seg000:7ee1]: type = code
+attr[seg000:8064]: type = code
+attr[seg000:80c7]: type = code
+attr[seg000:80c8]: type = code
+attr[seg000:80d9]: type = code
+attr[seg000:81ec]: type = code
+attr[seg000:824d]: type = code
+attr[seg000:8403]: type = code
+attr[seg000:8454]: type = code
+attr[seg000:8751]: type = code
+attr[seg000:881f]: type = code; name = ui_click_map_left
+attr[seg000:8824]: type = code; name = ui_click_map_right
+attr[seg000:8829]: type = code; name = ui_click_map_up
+attr[seg000:882e]: type = code; name = ui_click_map_down
+attr[seg000:8831]: type = code; name = ui_click_map_buttons
+attr[seg000:8865]: type = code; name = font_draw_interpolated_string_w_color_at_pos
+attr[seg000:88ae]: type = code
+attr[seg000:8944]: type = code; name = format_interpolated_string
+attr[seg000:8b10]: type = code
+attr[seg000:8f28]: type = code; name = draw_speech_bubble
+attr[seg000:9197]: type = code; name = setup_lip_sync_data_from_current
+attr[seg000:91a0]: type = code; name = setup_lip_sync_data_from_sprite_sheet
+attr[seg000:920f]: type = code; name = open_talking_head_resource
+attr[seg000:92f2]: type = code
+attr[seg000:92f7]: type = code
+attr[seg000:92fc]: type = code
+attr[seg000:9301]: type = code
+attr[seg000:9306]: type = code
+attr[seg000:930b]: type = code
+attr[seg000:9310]: type = code
+attr[seg000:9315]: type = code
+attr[seg000:931a]: type = code
+attr[seg000:931f]: type = code
+attr[seg000:9324]: type = code
+attr[seg000:9329]: type = code
+attr[seg000:932e]: type = code
+attr[seg000:936f]: type = code
+attr[seg000:9373]: type = code
+attr[seg000:937e]: type = code
+attr[seg000:941d]: type = code
+attr[seg000:9533]: type = code
+attr[seg000:9584]: type = code
+attr[seg000:95c1]: type = code
+attr[seg000:961a]: type = code
+attr[seg000:9840]: type = code
+attr[seg000:99b2]: type = code; name = swap_byte_arrays
+attr[seg000:9bee]: type = code; name = setup_non_lip_sync_data_structure
+attr[seg000:9d16]: type = code; name = copy_non_pcm_lip_sync_data_and_draw_talking_head
+attr[seg000:9d2d]: type = code; name = draw_talking_head_at_si
+attr[seg000:a107]: type = [u16; 15]
+attr[seg000:a125]: type = code
+attr[seg000:a157]: type = code
+attr[seg000:a172]: type = code
+attr[seg000:a1ca]: type = code
+attr[seg000:a1d0]: type = code
+attr[seg000:a1d6]: type = code
+attr[seg000:a1dc]: type = code
+attr[seg000:a1e8]: type = code
+attr[seg000:a1ed]: type = code
+attr[seg000:a1f7]: type = code
+attr[seg000:a219]: type = code
+attr[seg000:a235]: type = code
+attr[seg000:a244]: type = code
+attr[seg000:a248]: type = code
+attr[seg000:a25b]: type = code
+attr[seg000:a28e]: type = code
+attr[seg000:a30b]: type = code; name = read_condit_operand_into_ax
+attr[seg000:a334]: type = code; name = evaluate_operator_bx_on_dx_and_ax
+attr[seg000:a33c]: type = code
+attr[seg000:a33f]: type = code
+attr[seg000:a342]: type = code
+attr[seg000:a345]: type = code
+attr[seg000:a348]: type = code
+attr[seg000:a34f]: type = code
+attr[seg000:a356]: type = code
+attr[seg000:a35d]: type = code
+attr[seg000:a364]: type = code
+attr[seg000:a36b]: type = code
+attr[seg000:a36f]: type = code
+attr[seg000:a376]: type = [u16; 16]
+attr[seg000:a396]: type = code; name = evaluate_condition_ax
+attr[seg000:a3f0]: type = code
+attr[seg000:a3f9]: type = code; name = settings_ui_draw
+attr[seg000:a42c]: type = code; name = settings_ui_draw_language_buttons
+attr[seg000:a453]: type = code; name = settings_ui_sub_global_offset
+attr[seg000:a45c]: type = code; name = settings_ui_add_global_offset
+attr[seg000:a4c6]: type = code; name = settings_ui_draw_volume_sliders
+attr[seg000:a502]: type = code; name = settings_ui_draw_slider
+attr[seg000:a541]: type = code
+attr[seg000:a553]: type = code
+attr[seg000:a576]: type = code
+attr[seg000:a5df]: type = code
+attr[seg000:a6cc]: type = code; name = load_voc_and_lipsync_data
+attr[seg000:a7a5]: type = code; name = lip_sync_stop
+attr[seg000:a7c2]: type = code; name = lip_sync_frame_task
+attr[seg000:a814]: type = code; name = advance_lipsync
+attr[seg000:a82e]: type = code; name = set_lipsync_data_to_al
+attr[seg000:a83f]: type = code; name = voc_get_lipsync_data
+attr[seg000:a87e]: type = code; name = audio_test_frequency
+attr[seg000:a8bc]: type = code; name = create_voc_file_name_from_bx
+attr[seg000:a90b]: type = code; name = open_pcm_voice_file
+attr[seg000:a93f]: type = code; name = read_audio_file
+attr[seg000:a9a1]: type = code; name = close_pcm_voice_file_handle
+attr[seg000:a9e7]: type = code; name = pcm_test_audio_done
+attr[seg000:aa0f]: type = code; name = decode_sd_block
+attr[seg000:aa70]: type = code; name = transfer_sd_block_qq
+attr[seg000:ab15]: type = code; name = audio_start_voc
+attr[seg000:aba3]: type = code; name = check_pcm_voice_file_open
+attr[seg000:abc6]: type = code; name = set_voc_pcm_is_not_playing
+attr[seg000:abcc]: type = code; name = is_voc_pcm_playing
+attr[seg000:abdb]: type = code; name = play_pcm_al
+attr[seg000:abe9]: type = code; name = open_voc_resource
+attr[seg000:ac14]: type = code; name = pcm_stop_voc_q
+attr[seg000:ac30]: type = code; name = call_pcm_audio_vtable_func_5
+attr[seg000:ac35]: type = code
+attr[seg000:ad50]: type = code; name = play_music_WORMSUIT_HSQ
+attr[seg000:ad57]: type = code; name = play_music_MORNING_HSQ
+attr[seg000:ac6e]: type = code
+attr[seg000:ac7e]: type = code
+attr[seg000:ac90]: type = code
+attr[seg000:ac97]: type = code
+attr[seg000:ad95]: type = code; name = play_music
+attr[seg000:ae2f]: type = code; name = check_pcm_enabled
+attr[seg000:ae62]: type = code; name = load_music
+attr[seg000:aeaf]: type = code
+attr[seg000:aeb7]: type = code; name = midi_func_2_0
+attr[seg000:aed6]: type = code
+attr[seg000:af00]: type = code
+attr[seg000:af26]: type = code
+attr[seg000:af58]: type = code
+attr[seg000:af60]: type = code
+attr[seg000:af68]: type = code
+attr[seg000:af70]: type = code
+attr[seg000:afc7]: type = code
+attr[seg000:b039]: type = code
+attr[seg000:b18b]: type = code
+attr[seg000:b1af]: type = code; name = ui_draw_book_turning_page
+attr[seg000:b1ee]: type = code
+attr[seg000:b236]: type = code
+attr[seg000:b23f]: type = code
+attr[seg000:b270]: type = code; name = handle_ctrl_v_once
+attr[seg000:b28c]: type = code
+attr[seg000:b29e]: type = code
+attr[seg000:b30f]: type = code; name = load_save_game_timestamp
+attr[seg000:b35a]: type = code
+attr[seg000:b389]: type = code; name = create_save_cl
+attr[seg000:b427]: type = code; name = create_save_in_memory
+attr[seg000:b473]: type = code; name = restore_from_save_memory
+attr[seg000:b4bb]: type = code; name = decompress_sav
+attr[seg000:b4ea]: type = code; name = compress_sav
+attr[seg000:b58b]: type = code; name = map_func
+attr[seg000:b5a0]: type = code; name = tablat_lookup_from_bx_to_ax_bp
+attr[seg000:b6c3]: type = code; name = map_draw_zoomed_globe
+attr[seg000:b827]: type = code; name = draw_globe_and_ui_to_front_buffer
+attr[seg000:b84a]: type = code; name = globe_fill_blue_background_to_front_buffer
+attr[seg000:b85a]: type = code; name = draw_globe_with_atmosphere
+attr[seg000:b87e]: type = code; name = draw_globe_side_decorations
+attr[seg000:b8a7]: type = code; name = setup_globe_draw
+attr[seg000:b8c6]: type = code
+attr[seg000:b8f3]: type = code; name = globe_slide_decorations_open
+attr[seg000:b915]: type = code; name = globe_slide_decorations_close
+attr[seg000:b930]: type = code; name = remove_globe_frame_tasks
+attr[seg000:b961]: type = code
+attr[seg000:b977]: type = code; name = map_func_gfx
+attr[seg000:b9ae]: type = code
+attr[seg000:b9b9]: type = code
+attr[seg000:b9c0]: type = code
+attr[seg000:b9cc]: type = code
+attr[seg000:b9d3]: type = code
+attr[seg000:b9e0]: type = code; name = globe_rotation_increment_ax
+attr[seg000:b9f6]: type = code; name = recalculate_globe_rotation_table
+attr[seg000:ba15]: type = code; name = globe_increment_tilt_by_ax
+attr[seg000:ba75]: type = code; name = set_globe_tilt_and_rotation
+attr[seg000:baf1]: type = code
+attr[seg000:bc0c]: type = code; name = draw_globe_cursor_at_dx_bx
+attr[seg000:bc1f]: type = code
+attr[seg000:bc64]: type = code
+attr[seg000:bc81]: type = code
+attr[seg000:bdfa]: type = code; name = ui_stats_draw_ingame_day_and_charisma
+attr[seg000:be1d]: type = code; name = results_draw_text_and_icones
+attr[seg000:bf55]: type = code
+attr[seg000:bfa7]: type = code; name = string_update_ordinal_suffix
+attr[seg000:bfe3]: type = code; name = map_func
+attr[seg000:c07c]: type = code; name = set_fb1_as_active_framebuffer
+attr[seg000:c085]: type = code; name = set_backbuffer_as_frame_buffer
+attr[seg000:c08e]: type = code; name = set_screen_as_active_framebuffer
+attr[seg000:c097]: type = code; name = gfx_call_bp_with_front_buffer_as_screen
+attr[seg000:c0ad]: type = code; name = gfx_clear_active_framebuffer
+attr[seg000:c0b6]: type = code; name = room_frame_task
+attr[seg000:c0f4]: type = code; name = update_screen_palette
+attr[seg000:c102]: type = code; name = copy_pal_and_transition
+attr[seg000:c108]: type = code; name = transition
+attr[seg000:c137]: type = code; name = load_icones_sprites
+attr[seg000:c13b]: type = code; name = open_onmap_resource
+attr[seg000:c13e]: type = code; name = open_resource_by_index
+attr[seg000:c1aa]: type = code; name = apply_sprite_sheet_palette
+attr[seg000:c1ba]: type = code; name = apply_palette
+attr[seg000:c1f4]: type = code; name = get_subresource_ax_pointer_to_dssi
+attr[seg000:c202]: type = code; name = center_sprite_coordinates
+attr[seg000:c21a]: name = byte_1C21A_pal_offset
+attr[seg000:c21b]: type = code; name = draw_icons_list_at_si
+attr[seg000:c22f]: type = code; name = draw_sprite_clobbering_bx_dx
+attr[seg000:c2a1]: type = code; name = unrle_image_to_tmp_buffer
+attr[seg000:c2fd]: type = code; name = draw_sprite
+attr[seg000:c305]: type = code; name = draw_sprite_clipped
+attr[seg000:c30d]: type = code; name = draw_sprite_clipped_clobbering_bx_dx
+attr[seg000:c32f]: type = code; name = draw_sprite_list
+attr[seg000:c370]: type = code; name = blit_repeated_x
+attr[seg000:c412]: type = code; name = copy_active_framebuffer_to_framebuffer_2
+attr[seg000:c422]: type = code
+attr[seg000:c432]: type = code; name = clear_game_area
+attr[seg000:c43e]: type = code; name = copy_game_area_to_screen_fb2_to_fb1
+attr[seg000:c443]: type = code; name = copy_clip_rect_to_screen_from_fb2
+attr[seg000:c446]: type = code; name = copy_rect_fb2_to_fb1
+attr[seg000:c474]: type = code; name = copy_game_rect_from_fb2_to_fb1
+attr[seg000:c477]: type = code; name = gfx_copy_rect_fb1_to_fb2
+attr[seg000:c49a]: type = code; name = gfx_copy_framebuffer_to_screen
+attr[seg000:c4aa]: type = code; name = gfx_copy_rect_to_screen
+attr[seg000:c4cd]: type = code; name = gfx_copy_whole_framebuf_to_screen
+attr[seg000:c4ed]: type = code; name = update_screen_at_sprite_rect_updating_head
+attr[seg000:c4f0]: type = code; name = draw_head_if_needed_and_update_screen_rect_at_si
+attr[seg000:c4fb]: type = code; name = draw_head_if_needed_and_update_screen_rect
+attr[seg000:c51e]: type = code; name = particles_update_screen_rect
+attr[seg000:c560]: type = code; name = draw_rect_outline
+attr[seg000:c58a]: type = code; name = particles_remove_particle
+attr[seg000:c60b]: type = code; name = particles_spawn_particle
+attr[seg000:c64c]: type = code
+attr[seg000:c6ad]: type = code; name = particles_update_dirty_rect
+attr[seg000:c827]: type = code
+attr[seg000:c835]: type = code
+attr[seg000:c921]: type = code; name = get_hnm_resource_flag_name_ptr_by_index_ax_to_bx
+attr[seg000:c92b]: type = code; name = hnm_open_and_load_palette
+attr[seg000:c93c]: type = code; name = hnm_read_header
+attr[seg000:c9e8]: type = code; name = hnm_do_frame_skippable
+attr[seg000:c9f4]: type = code; name = hnm_do_frame_and_check_if_frame_advanced
+attr[seg000:ca01]: type = code; name = hnm_close_resource
+attr[seg000:ca1b]: type = code; name = hnm_load_first_frame
+attr[seg000:ca60]: type = code; name = hnm_do_frame
+attr[seg000:cad4]: type = code; name = hnm_wait_for_frame
+attr[seg000:cb1a]: type = code; name = hnm_prefetch
+attr[seg000:cc85]: type = code; name = check_if_hnm_complete
+attr[seg000:cc92]: type = u16; name = word_1CC92_blt_func_ofs
+attr[seg000:cc94]: type = u16; name = word_1CC94_blt_func_seg
+attr[seg000:cc96]: type = code; name = hnm_decode_video_frame
+attr[seg000:ccf4]: type = code; name = hnm_decode_typed_chunk_video_to_bp
+attr[seg000:cd8f]: type = code; name = hnm_read_header_size
+attr[seg000:cda0]: type = code; name = hnm_open_at_body_start
+attr[seg000:cdbf]: type = code; name = hnm_read_bytes
+attr[seg000:cdf7]: type = code; name = hnm_advance_read_ptr
+attr[seg000:ce01]: type = code; name = hnm_reset_frame_counter
+attr[seg000:ce07]: type = code; name = hnm_reset_counters
+attr[seg000:ce1a]: type = code; name = hnm_reset_buffers
+attr[seg000:ce3b]: type = code; name = hnm_handle_pal_chunk
+attr[seg000:ce6c]: type = code; name = hnm_initialize_memory_handler
+attr[seg000:cec9]: type = code; name = hnm_render_timer_callback
+attr[seg000:cefc]: type = code; name = load_IRULn_HSQ
+attr[seg000:cf1b]: type = code; name = play_IRULx_HSQ
+attr[seg000:cf4b]: type = code; name = IRULx_draw_or_clear_subtitle
+attr[seg000:cf70]: type = code; name = get_phrase_or_command_string_si
+attr[seg000:cfa0]: type = code; name = check_amr_or_eng_language
+attr[seg000:d00f]: type = code; name = load_PHRASExx_HSQ
+attr[seg000:d03c]: type = code; name = find_last_numeric_digit_in_str_at_es_si
+attr[seg000:d04e]: type = code; name = font_set_draw_position
+attr[seg000:d05f]: type = code; name = font_get_draw_position
+attr[seg000:d068]: type = code; name = font_select_tall_font
+attr[seg000:d075]: type = code; name = font_select_small_font
+attr[seg000:d096]: type = code; name = font_draw_glyph_func
+attr[seg000:d0d1]: type = code
+attr[seg000:d0ff]: type = code; name = font_draw_glyph_func
+attr[seg000:d12f]: type = code; name = font_draw_glyph_func_small
+attr[seg000:d16a]: type = code; name = font_draw_glyph_func
+attr[seg000:d194]: type = code; name = font_draw_phrase_or_command_string_with_color_at_pos
+attr[seg000:d19b]: type = code; name = font_draw_phrase_or_command_string
+attr[seg000:d1a6]: type = code; name = font_draw_phrase_list
+attr[seg000:d1bb]: type = code; name = font_draw_string
+attr[seg000:d1ef]: type = code; name = draw_all_ui_elements
+attr[seg000:d1f2]: type = code; name = draw_ui_elements_list_at_ds_si
+attr[seg000:d200]: type = code; name = draw_ui_element
+attr[seg000:d2df]: type = code
+attr[seg000:d423]: type = code
+attr[seg000:d429]: type = code
+attr[seg000:d42f]: type = code
+attr[seg000:d434]: type = code
+attr[seg000:d439]: type = code
+attr[seg000:d43e]: type = code
+attr[seg000:d443]: type = code
+attr[seg000:d50f]: type = code; name = highlight_hovered_text_action_item
+attr[seg000:d677]: type = code
+attr[seg000:d694]: type = code; name = set_di_to_ui_elements_ptr_based_on_cursor_image
+attr[seg000:d75a]: type = code; name = ui_set_and_draw_frieze_sides_closed_book
+attr[seg000:d792]: type = code; name = ui_set_and_draw_frieze_sides_map
+attr[seg000:d795]: type = code; name = ui_set_and_draw_frieze_sides
+attr[seg000:d7ad]: type = code; name = ui_set_and_draw_frieze_sides_open_book
+attr[seg000:d7b2]: type = code; name = ui_set_and_draw_frieze_sides_globe
+attr[seg000:d917]: type = code
+attr[seg000:d815]: type = code; name = game_loop
+attr[seg000:d9d2]: type = code; name = process_frame_tasks
+attr[seg000:da25]: type = code; name = add_frame_task
+attr[seg000:da53]: type = code; name = clear_frame_tasks
+attr[seg000:da5f]: type = code; name = remove_frame_task
+attr[seg000:daa3]: type = code; name = clear_some_mouse_rect
+attr[seg000:daaa]: type = code; name = set_some_mouse_rect
+attr[seg000:dae3]: type = code; name = set_mouse_pos
+attr[seg000:db14]: type = code; name = define_mouse_range
+attr[seg000:db44]: type = code; name = shl_cx_and_dx
+attr[seg000:db4c]: type = code; name = mouse_stuff
+attr[seg000:db67]: type = code; name = draw_mouse_cursor_if_needed
+attr[seg000:db74]: type = code; name = restore_mouse_if_rect_intersects
+attr[seg000:dbb2]: type = code; name = call_restore_cursor
+attr[seg000:dbec]: type = code; name = draw_mouse
+attr[seg000:dc20]: type = code; name = redraw_mouse
+attr[seg000:dc6a]: type = code; name = get_mouse_cursor_image_addr
+attr[seg000:dce0]: type = code; name = read_game_port
+attr[seg000:dd5a]: type = code; name = get_and_reset_key_scancode
+attr[seg000:dd63]: type = code; name = stc_on_user_input
+attr[seg000:ddb0]: type = code; name = wait_interruptable
+attr[seg000:ddf0]: type = code; name = wait_for_pcm_voice_interruptable
+attr[seg000:de0c]: type = code; name = check_midi
+attr[seg000:de4e]: type = code; name = kb_clear_scancode
+attr[seg000:de54]: type = code; name = kb_check_for_esc_key_hit
+attr[seg000:de68]: type = code; name = kb_drain_and_clear
+attr[seg000:de7a]: type = code
+attr[seg000:de7b]: type = code; name = pause_if_p_key_pressed
+attr[seg000:df1e]: type = code; name = get_mouse_pos_etc
+attr[seg000:dfa7]: type = [u16; 8]
+attr[seg000:e16f]: type = code
+attr[seg000:e18c]: type = code
+attr[seg000:e192]: type = code
+attr[seg000:e19b]: type = code
+attr[seg000:e1a2]: type = code
+attr[seg000:e1b9]: type = code
+attr[seg000:e1c3]: type = code
+attr[seg000:e1cb]: type = code
+attr[seg000:e26f]: type = code
+attr[seg000:e270]: type = code; name = save_regs
+attr[seg000:e283]: type = code; name = restore_regs
+attr[seg000:e2ca]: type = code
+attr[seg000:e2db]: type = code; name = find_string_and_replace_digits
+attr[seg000:e2e3]: type = code; name = string_replace_number_ending_at_es_si
+attr[seg000:e353]: type = code; name = wait_processing_frame_tasks_interruptable
+attr[seg000:e387]: type = code; name = wait_a_bit
+attr[seg000:e3a0]: type = code; name = wait_processing_frame_tasks
+attr[seg000:e3b7]: type = code; name = rand_masked
+attr[seg000:e3cc]: type = code; name = rand
+attr[seg000:e40c]: name = stru_1E40C_cmd_arg_list
+attr[seg000:e4ad]: type = code; name = parse_command_line
+attr[seg000:e56b]: type = code; name = parse_cmd_is_end_of_arg
+attr[seg000:e57b]: type = code; name = load_driver_ax_with_vtable_at_si
+attr[seg000:e594]: type = code; name = initialize_system
+attr[seg000:e674]: type = code
+attr[seg000:e675]: type = code; name = open_dune_dat
+attr[seg000:e741]: type = code; name = read_dune_dat_toc
+attr[seg000:e75b]: type = code; name = res_store_in_lookup_table
+attr[seg000:e76a]: type = code; name = initialize_audio
+attr[seg000:e8a8]: type = code; name = set_pit_timer_frequency
+attr[seg000:e8b8]: type = code; name = pit_timer_callback
+attr[seg000:e8d2]: type = u16; name = word_1E8D2_pit_timer_value
+attr[seg000:e8d4]: type = u8; name = byte_1E8D4_pit_timer_counter
+attr[seg000:e8d5]: type = code; name = uninitialize_memory_driver
+attr[seg000:e913]: type = code; name = install_interrupt_handlers
+attr[seg000:e94a]: type = code
+attr[seg000:e953]: type = u16
+attr[seg000:e955]: type = u8
+attr[seg000:e956]: type = [u32; 9]
+attr[seg000:e97a]: type = code; name = initialize_mouse
+attr[seg000:e9f4]: type = code; name = mouse_func_uncalled
+attr[seg000:ea30]: type = u16
+attr[seg000:ea32]: type = code; name = initialize_joystick
+attr[seg000:ea75]: type = u16
+attr[seg000:ea77]: type = u16; name = off_1EA77_memory_func_1
+attr[seg000:ea79]: type = u16; name = off_1EA79_memory_func_2
+attr[seg000:ea7b]: type = code; name = init_extended_memory_allocator
+attr[seg000:eab7]: type = code; name = memory_func_qq
+attr[seg000:ebb8]: type = code
+attr[seg000:ebe3]: type = code; name = alloc_extended_memory
+attr[seg000:ec46]: type = code; name = call_memory_func_2
+attr[seg000:ec59]: type = code; name = call_memory_func_1
+attr[seg000:ec9c]: type = code; name = xms_memory_func_1
+attr[seg000:ecec]: type = code; name = xms_memory_func_1
+attr[seg000:ed3a]: type = u16; name = word_1ED3A_ems_emm_handle
+attr[seg000:ed3c]: type = u16; name = word_1ED3C_ems_page_frame_base_seg
+attr[seg000:ed3e]: type = u16
+attr[seg000:ed40]: type = code; name = get_ems_emm_handle
+attr[seg000:ed45]: type = code; name = call_ems_func
+attr[seg000:edb9]: type = code; name = map_ems_for_midi_audio
+attr[seg000:ee02]: type = code; name = ems_memory_func_2
+attr[seg000:ee46]: type = code; name = ems_memory_func_1
+attr[seg000:ee8a]: type = u16; name = word_1EE8A_xms_memory_block
+attr[seg000:ee8c]: type = u32; name = dword_1EE8C_xms_driver_addr
+attr[seg000:ee90]: type = [u16; 8]
+attr[seg000:eea0]: type = code; name = initialize_himem_sys
+attr[seg000:eee9]: type = code
+attr[seg000:ef22]: type = code; name = call_xms_driver_func
+attr[seg000:ef2b]: type = code; name = call_xms_func_on_block
+attr[seg000:ef32]: type = code; name = xms_move_memory
+attr[seg000:ef6a]: type = code; name = pit_timer_callback
+attr[seg000:efba]: type = code; name = pit_timer_callback_midi
+attr[seg000:efe1]: type = code; name = clear_and_retry
+attr[seg000:f05c]: type = code; name = reset_keyboard
+attr[seg000:f08e]: type = code; name = clear_keyboard_array
+attr[seg000:f0a0]: type = code; name = open_resource_force_hsq
+attr[seg000:f0b9]: type = code; name = open_resource_by_index_si_into_esdi
+attr[seg000:f0d6]: type = code; name = read_and_maybe_hsq
+attr[seg000:f0f6]: type = code; name = bump_alloc_get_addr_in_di_and_bump
+attr[seg000:f0ff]: type = code; name = bump_allocate_bump_cx_bytes
+attr[seg000:f11c]: type = code; name = alloc_check_cx_pages_available
+attr[seg000:f131]: type = code; name = out_of_memory_error
+attr[seg000:f13f]: type = code; name = allocator_attempt_to_free_space
+attr[seg000:f1fb]: type = code; name = open_res_or_file_with_name_in_dx_size_ax
+attr[seg000:f229]: type = code; name = open_res_or_file_or_die
+attr[seg000:f244]: type = code; name = read_resource_to_esdi
+attr[seg000:f255]: type = code; name = open_nonres_file
+attr[seg000:f260]: type = code; name = read_ffff_to_esdi_and_close
+attr[seg000:f29b]: type = code
+attr[seg000:f2a7]: type = code; name = seek_dune_dat_to_res_dsdx
+attr[seg000:f2d6]: type = code; name = seek_dune_dat_offset_dxax
+attr[seg000:f2e7]: type = code
+attr[seg000:f2ea]: type = code; name = read_dune_dat_cx_to_esdi
+attr[seg000:f2fc]: type = code; name = strcpy_to_filename_buf
+attr[seg000:f314]: type = code; name = get_res_index_in_ax_by_name_dssi
+attr[seg000:f3a7]: type = code; name = res_locate_in_lookup_table
+attr[seg000:f3d3]: type = code; name = check_hsq_checksum
+attr[seg000:f403]: type = code; name = hsq_decomp_skip_header_dssi_to_esdi
+attr[seg000:f40d]: type = code; name = hsq_decomp_no_header
+
+end

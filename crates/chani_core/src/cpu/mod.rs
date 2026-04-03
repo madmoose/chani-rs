@@ -27,7 +27,7 @@ pub enum State {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-enum Register {
+pub enum Register {
     AX,
     CX,
     DX,
@@ -43,31 +43,31 @@ enum Register {
     IP,
 }
 
-impl From<disasm::SReg> for Register {
-    fn from(v: disasm::SReg) -> Self {
+impl From<chani_disasm::SReg> for Register {
+    fn from(v: chani_disasm::SReg) -> Self {
         match v {
-            disasm::SReg::ES => Register::ES,
-            disasm::SReg::CS => Register::CS,
-            disasm::SReg::SS => Register::SS,
-            disasm::SReg::DS => Register::DS,
+            chani_disasm::SReg::ES => Register::ES,
+            chani_disasm::SReg::CS => Register::CS,
+            chani_disasm::SReg::SS => Register::SS,
+            chani_disasm::SReg::DS => Register::DS,
         }
     }
 }
 
-impl From<disasm::BaseReg> for Register {
-    fn from(v: disasm::BaseReg) -> Self {
+impl From<chani_disasm::BaseReg> for Register {
+    fn from(v: chani_disasm::BaseReg) -> Self {
         match v {
-            disasm::BaseReg::BX => Register::BX,
-            disasm::BaseReg::BP => Register::BP,
+            chani_disasm::BaseReg::BX => Register::BX,
+            chani_disasm::BaseReg::BP => Register::BP,
         }
     }
 }
 
-impl From<disasm::IndexReg> for Register {
-    fn from(v: disasm::IndexReg) -> Self {
+impl From<chani_disasm::IndexReg> for Register {
+    fn from(v: chani_disasm::IndexReg) -> Self {
         match v {
-            disasm::IndexReg::SI => Register::SI,
-            disasm::IndexReg::DI => Register::DI,
+            chani_disasm::IndexReg::SI => Register::SI,
+            chani_disasm::IndexReg::DI => Register::DI,
         }
     }
 }

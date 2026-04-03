@@ -6,7 +6,7 @@ use super::{
     FLAG_AF, FLAG_CF, FLAG_DF, FLAG_IF, FLAG_OF, FLAG_PF, FLAG_SF, FLAG_TF, FLAG_ZF, Register,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RegisterFile {
     reg: [u16; 13],
     flags: u16,
@@ -18,6 +18,12 @@ impl Default for RegisterFile {
             reg: Default::default(),
             flags: filter_flags(0),
         }
+    }
+}
+
+impl From<RegisterFile> for chani_disasm::RegisterFile {
+    fn from(val: RegisterFile) -> Self {
+        chani_disasm::RegisterFile { reg: val.reg }
     }
 }
 

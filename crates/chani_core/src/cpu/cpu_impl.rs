@@ -1,3 +1,6 @@
+use bytes_ext::U16Ext;
+use chani_disasm::{DataWidth, DisplayContext, MemRef};
+
 use super::bitops::BitOps;
 use super::register_file::RegisterFile;
 use super::{
@@ -12,14 +15,17 @@ use super::{
 };
 use super::{State, StrOp};
 use crate::address::{Address, addr};
+use crate::clock::Clock;
 use crate::cpu::CpuContext;
 use crate::memory::Memory;
+use crate::{DUNE_DNADL, DUNE_DNVGA, DUNE_SEG001};
 use std::collections::HashMap;
 use std::fmt::LowerHex;
 use std::mem::swap;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Cpu {
+    clock: Clock,
     state: State,
     instruction_address: Address,
     register_file: RegisterFile,
@@ -35,6 +41,19 @@ pub struct Cpu {
 
     pub callback_base_address: Address,
     pub callbacks: HashMap<Address, Callback>,
+
+    logging: bool,
+    names: HashMap<(u16, u16), String>,
+    // pub pal: Pal888,
+    globdata_log: bool,
+
+    ppm_cnt: usize,
+    ppm_cnt2: usize,
+    ppm_index: usize,
+    ppm_index2: usize,
+
+    band_index: i16,
+    backup_register_file: Option<RegisterFile>,
 }
 
 impl SReg {
@@ -82,15 +101,43 @@ impl LowerHex for Dd {
 }
 
 impl Cpu {
-    pub fn new() -> Self {
+    pub fn new(clock: Clock) -> Self {
+        let mut names = HashMap::new();
+
+        names.insert((DUNE_DNVGA, 0x01a5), String::from("GLOBDATA_PTR"));
+        names.insert((DUNE_DNVGA, 0x01a7), String::from("MAP_PTR"));
+        names.insert((DUNE_DNVGA, 0x01bb), String::from("TABLAT_PTR"));
+
         Self {
+            clock,
             callback_base_address: addr(0xfe00, 0),
-            ..Self::default()
+            state: Default::default(),
+            instruction_address: Default::default(),
+            register_file: Default::default(),
+            sreg_ovr: Default::default(),
+            int_delay: Default::default(),
+            int_nmi: Default::default(),
+            int_intr: Default::default(),
+            int_number: Default::default(),
+            rep_mode: Default::default(),
+            cycles: Default::default(),
+            instruction_count: Default::default(),
+            callbacks: Default::default(),
+            logging: false,
+            names,
+            globdata_log: false,
+            ppm_cnt: 0,
+            ppm_cnt2: 1,
+            ppm_index: 1,
+            ppm_index2: 1,
+
+            band_index: -93,
+            backup_register_file: None,
         }
     }
 
     pub fn frequency(&self) -> f64 {
-        5.0
+        self.clock.0
     }
 
     pub fn run_cycles<Context: CpuContext>(
@@ -121,11 +168,11 @@ impl Cpu {
     fn resolve_memory_reference<Context: CpuContext>(
         &self,
         ctx: &mut Context,
-        mem_ref: disasm::MemRef,
+        mem_ref: MemRef,
     ) -> (Address, Dd) {
         let (addr, width) = match mem_ref {
-            disasm::MemRef::Direct { seg, ofs, width } => (addr(seg, ofs), width),
-            disasm::MemRef::Indirect {
+            MemRef::Direct { seg, ofs, width } => (addr(seg, ofs), width),
+            MemRef::Indirect {
                 seg,
                 base,
                 index,
@@ -143,9 +190,9 @@ impl Cpu {
         };
 
         let v = match width {
-            disasm::DataWidth::Byte => Dd::Byte(ctx.memory().read_u8(addr)),
-            disasm::DataWidth::Word => Dd::Word(ctx.memory().read_u16(addr)),
-            disasm::DataWidth::Dword => {
+            DataWidth::Byte => Dd::Byte(ctx.memory().read_u8(addr)),
+            DataWidth::Word => Dd::Word(ctx.memory().read_u16(addr)),
+            DataWidth::Dword => {
                 let lo = ctx.memory().read_u16(addr);
                 let hi = ctx.memory().read_u16(addr + 2);
                 Dd::Dword(((hi as u32) << 16) + (lo as u32))
@@ -157,10 +204,6 @@ impl Cpu {
 
     pub fn step<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let mut op: u8;
-
-        let csip = self.register_file.get_csip();
-
-        self.instruction_address = csip;
 
         if !self.int_delay && self.register_file.get_if() {
             if self.int_nmi {
@@ -175,6 +218,181 @@ impl Cpu {
             }
         }
         self.int_delay = false;
+
+        let csip = self.register_file.get_csip();
+        self.instruction_address = csip;
+
+        // if csip == (DUNE_SEG000, 0xb713) {
+        //     self.logging = false;
+        // }
+        // if csip == (DUNE_SEG000, 0xb7d1) {
+        //     self.logging = false;
+        // }
+
+        // self.logging = csip.seg == DUNE_DNVGA && csip.ofs >= 0x1f4c && csip.ofs < 0x2024;
+
+        // if csip == (DUNE_DNVGA, 0x230a) {
+        //     println!("{}", csip);
+        //     if let Some(backup_register_file) = &self.backup_register_file {
+        //         const PAL: &[u8; 768] = include_bytes!("../../../../PAL.BIN");
+        //         let pal = PAL.into();
+
+        //         const W: usize = 312;
+        //         const H: usize = 4;
+        //         let mut data = [0u8; H * W];
+        //         for y in 0..H as u16 {
+        //             for x in 0..W as u16 {
+        //                 let b = ctx
+        //                     .memory()
+        //                     .read_u8(addr(self.get_ds(), 0x4c60 + 160 + y * 400 + x));
+        //                 let b = (b >> 4) + 0x10;
+        //                 data[(y * (W as u16) + x) as usize] = b;
+        //             }
+        //         }
+        //         // println!("data = {data:?}");
+        //         write_ppm(
+        //             &pal,
+        //             &data,
+        //             W,
+        //             H,
+        //             &format!("globdata-{:03}.ppm", self.band_index + 93),
+        //         );
+
+        //         if self.band_index < 93 {
+        //             self.register_file = backup_register_file.clone();
+
+        //             self.register_file.set(Register::IP, 0x1f4c);
+        //             csip = self.register_file.get_csip();
+        //             self.instruction_address = csip;
+        //         } else {
+        //             std::process::exit(0);
+        //         }
+        //     }
+        // }
+        // if csip == (DUNE_DNVGA, 0x1f4c) {
+        //     println!("{}", csip);
+        //     if self.backup_register_file.is_none() {
+        //         self.backup_register_file = Some(self.register_file.clone());
+        //     }
+
+        //     println!("Clearing globdata");
+        //     for i in 0..2500 {
+        //         ctx.memory().write_u8(addr(DUNE_DNVGA, 0x4c60 + i), 0);
+        //     }
+
+        //     self.set_ax(self.band_index as u16);
+        //     self.band_index += 1;
+        //     println!("AX = {}", self.get_ax() as i16);
+        //     // self.set_ax((57i16) as u16);
+        //     self.set_dx(0);
+        // }
+
+        // if csip == (DUNE_DNVGA, 0x2025) {
+        //     println!(
+        //         "LOG\nLOG sub_27855_interpolate_horizontally ({:#x})\n",
+        //         self.globdata_running_sum
+        //     );
+        // }
+        // if csip == (DUNE_DNVGA, 0x2123) {
+        //     println!(
+        //         "LOG\nLOG interpolate_vertically_1 ({:#x})\n",
+        //         self.globdata_running_sum
+        //     );
+        // }
+        // if csip == (DUNE_DNVGA, 0x2153) {
+        //     println!(
+        //         "LOG\nLOG interpolate_vertically_2 center-end ({:#x})\n",
+        //         self.globdata_running_sum
+        //     );
+        // }
+        // if csip == (DUNE_DNVGA, 0x2221) {
+        //     println!(
+        //         "LOG\nLOG interpolate_vertically center-start ({:#x})\n",
+        //         self.globdata_running_sum
+        //     );
+        // }
+        // if csip == (DUNE_DNVGA, 0x22a0) {
+        //     println!("LOG\nLOG post-process ({:#x})\n", self.globdata_running_sum);
+        // }
+
+        // if csip == (DUNE_DNVGA, 0x204D) {
+        //     println!("\n# branch_small_bx\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x2066) {
+        //     println!("\n# setup_partial_loop\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x2079) {
+        //     println!("\n# branch_large_bx\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x208B) {
+        //     println!("\n# setup_partial_loop_2\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x209E) {
+        //     println!("\n# main_interpolation_check\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x20B3) {
+        //     println!("\n# interpolation_loop\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x20CB) {
+        //     println!("\n# gradient_interpolation\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x20E0) {
+        //     println!("\n# flat_color\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x20EB) {
+        //     println!("\n# final_loop\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x20ED) {
+        //     println!("\n# final_loop_body\n");
+        // }
+        // if csip == (DUNE_DNVGA, 0x2115) {
+        //     println!("\n# exit\n");
+        // }
+
+        // if csip == (DUNE_SEG000, 0xb70f) {
+        //     println!("{}", self.register_file);
+        // }
+
+        // if csip == (DUNE_DNADL, 0x0b34) {
+        //     println!("out 0x388 {:02x} = {:02x}", self.get_al(), self.get_ah());
+        // }
+
+        for i in 0..7 {
+            // if i == 5 {
+            //     continue;
+            // }
+            if csip == (DUNE_DNADL, 0x0100 + 3 * i) {
+                println!(
+                    "midi fn {:4x} al={:02x} ah={:02x} bl={:02x} bh={:02x}",
+                    csip.ofs,
+                    self.get_al(),
+                    self.get_ah(),
+                    self.get_bx().lo(),
+                    self.get_bx().hi()
+                );
+            }
+        }
+
+        if self.logging {
+            let bytes = ctx.memory().iter_from(csip.ea());
+            if let Some(inst) = chani_disasm::decode(csip.seg, csip.ofs, bytes) {
+                let inst_str = inst.to_string_opts(DisplayContext {
+                    lookup: &|seg, ofs| self.names.get(&(seg, ofs)).map(String::as_str),
+                    register_file: Some(self.register_file.clone().into()),
+                    imm_seg: None,
+                });
+                let mem_value = if inst.reads_from_mem()
+                    && let Some(mem_ref) = inst.mem_ref()
+                {
+                    let (_address, value) = self.resolve_memory_reference(ctx, mem_ref);
+                    Some(value)
+                } else {
+                    None
+                };
+                let mem_value = mem_value.map(|v| format!("{v:x}")).unwrap_or_default();
+                println!("{csip} {inst_str:-34}{mem_value:4} {}", self.register_file);
+            }
+        }
 
         self.sreg_ovr = None;
         self.rep_mode = RepMode::None;
@@ -636,7 +854,25 @@ impl Cpu {
     }
 
     fn mem_read8(&self, memory: &Memory, seg: u16, ofs: u16) -> u8 {
-        memory.read_u8(addr(seg, ofs))
+        let v = memory.read_u8(addr(seg, ofs));
+
+        if self.logging {
+            // let csip = self.get_instruction_address();
+            //     if seg == DUNE_SEG001 && (0x4948..0x4948 + 792).contains(&ofs) {
+            //         println!("\nTABLAT[{}] = {:04x}\n", ofs - 0x4948, v);
+            //     }
+            if self.globdata_log && seg == DUNE_SEG001 && (0x4c60..0x8b3b).contains(&ofs) {
+                // println!(
+                //     "LOG {csip} READ BYTE GLOBDATA[{}] = {:02x}",
+                //     ofs - 0x4c60,
+                //     v
+                // );
+                println!("{},{:02x}", ofs - 0x4c60, v);
+                // self.dump_globdata_buffer_as_ppm(memory);
+            }
+        }
+
+        v
     }
 
     fn mem_read16(&self, memory: &Memory, seg: u16, ofs: u16) -> u16 {
@@ -644,6 +880,8 @@ impl Cpu {
         // let lo = memory.read_u8(addr(seg, ofs)) as u16;
         // let hi = memory.read_u8(addr(seg, ofs.wrapping_add(1))) as u16;
         // (hi << 8) + lo
+
+        // v
     }
 
     fn mem_readw(&self, memory: &Memory, seg: u16, ofs: u16, w: Width) -> u16 {
@@ -653,15 +891,117 @@ impl Cpu {
         }
     }
 
-    fn mem_write8(&self, memory: &mut Memory, seg: u16, ofs: u16, v: u8) {
+    fn mem_write8(&mut self, memory: &mut Memory, seg: u16, ofs: u16, v: u8) {
         memory.write_u8(addr(seg, ofs), v);
+        if self.logging {
+            let csip = self.get_instruction_address();
+
+            if seg == DUNE_SEG001 && (0x4948..0x4c60).contains(&ofs) {
+                // println!("LOG {csip} WRITE BYTE TABLAT[{}] = {:02x}", ofs - 0x4948, v);
+            } else if self.globdata_log && seg == DUNE_SEG001 && (0x4c60..0x8b3b).contains(&ofs) {
+                // if self.globdata_first {
+                //     self.globdata_first = false;
+                //     for ofs in 0x4c60..0x4c60 + 3290 {
+                //         memory.write_u8(addr(DUNE_SEG001, ofs), 0);
+                //     }
+                // }
+
+                println!("{},{:02x}", ofs - 0x4c60, v);
+                println!(
+                    "LOG {csip} WRITE BYTE GLOBDATA[{}] = {:02x}",
+                    ofs - 0x4c60,
+                    v
+                );
+                // self.globdata_running_sum = self.globdata_running_sum.wrapping_add(v as u64);
+                // self.dump_globdata_buffer_as_ppm(memory);
+            } else if seg == 0x3823 {
+                // println!(
+                //     "LOG {csip} WRITE BYTE FRAMEBUFFER[{:04x}:{:04x}] = {:02x}",
+                //     seg, ofs, v
+                // );
+                // self.dump_output_as_ppm(memory);
+            }
+        }
     }
 
-    fn mem_write16(&self, memory: &mut Memory, seg: u16, ofs: u16, v: u16) {
+    fn mem_write16(&mut self, memory: &mut Memory, seg: u16, ofs: u16, v: u16) {
         memory.write_u16(addr(seg, ofs), v);
+        if self.logging {
+            let csip = self.get_instruction_address();
+
+            if seg == DUNE_SEG001 && (0x4948..0x4c60).contains(&ofs) {
+                // println!("LOG {csip} WRITE WORD TABLAT[{}] = {:04x}", ofs - 0x4948, v);
+            } else if self.globdata_log && seg == DUNE_SEG001 && (0x4c60..0x8b3b).contains(&ofs) {
+                // if self.globdata_first {
+                //     self.globdata_first = false;
+                //     for ofs in 0x4c60..0x4c60 + 3290 {
+                //         memory.write_u8(addr(DUNE_SEG001, ofs), 0);
+                //     }
+                // }
+
+                println!("{},{:02x}", ofs - 0x4c60, v & 0xff);
+                println!("{},{:02x}", ofs - 0x4c60 + 1, (v >> 8));
+
+                println!(
+                    "LOG {csip} WRITE BYTE GLOBDATA[{}] = {:02x}",
+                    ofs - 0x4c60,
+                    v & 0xff
+                );
+                // self.globdata_running_sum =
+                //     self.globdata_running_sum.wrapping_add((v & 0xff) as u64);
+
+                println!(
+                    "LOG {csip} WRITE BYTE GLOBDATA[{}] = {:02x}",
+                    ofs - 0x4c60 + 1,
+                    v >> 8
+                );
+                // self.dump_globdata_buffer_as_ppm(memory);
+            } else if seg == 0x3823 {
+                // println!(
+                //     "LOG {csip} WRITE WORD FRAMEBUFFER[{:04x}:{:04x}] = {:04x}",
+                //     seg, ofs, v
+                // );
+                // self.dump_output_as_ppm(memory);
+            }
+        }
     }
 
-    fn mem_writew(&self, memory: &mut Memory, seg: u16, ofs: u16, v: u16, w: Width) {
+    // fn dump_globdata_buffer_as_ppm(&mut self, memory: &mut Memory) {
+    //     const PPM_CNT: usize = 1;
+
+    //     const PAL: &[u8; 768] = include_bytes!("../../../../PAL-1760651713.BIN");
+    //     let pal = PAL.into();
+
+    //     self.ppm_cnt2 += 1;
+    //     // if (self.ppm_cnt2 % PPM_CNT) == PPM_CNT - 1 {
+    //     let mut data = [0u8; 16091];
+    //     memory.read_bytes(addr(DUNE_SEG001, 0x4c60), &mut data);
+    //     let filename = format!("log-globdata/log-globdata-{:06}.ppm", self.ppm_index2);
+    //     write_ppm(&pal, &data, 329, 10, &filename);
+    //     self.ppm_index2 += 1;
+    //     // if self.ppm_index2 > 3000 {
+    //     //     exit(0);
+    //     // }
+    //     // }
+    // }
+
+    // fn dump_output_as_ppm(&mut self, memory: &mut Memory) {
+    //     const PPM_CNT: usize = 100;
+
+    //     const PAL: &[u8; 768] = include_bytes!("../../../../PAL-1760651713.BIN");
+    //     let pal = PAL.into();
+
+    //     self.ppm_cnt = (self.ppm_cnt + 1) % PPM_CNT;
+    //     if self.ppm_cnt == PPM_CNT - 1 {
+    //         let mut data = [0u8; 64000];
+    //         memory.read_bytes(addr(0x3823, 0x0000), &mut data);
+    //         let filename = format!("log-map/log-map-{:06}.ppm", self.ppm_index);
+    //         write_ppm(&pal, &data, 320, 200, &filename);
+    //         self.ppm_index += 1;
+    //     }
+    // }
+
+    fn mem_writew(&mut self, memory: &mut Memory, seg: u16, ofs: u16, v: u16, w: Width) {
         match w {
             W8 => self.mem_write8(memory, seg, ofs, read_lo(v)),
             W16 => self.mem_write16(memory, seg, ofs, v),
@@ -922,13 +1262,15 @@ impl Cpu {
         let sp = self.get_sp().wrapping_sub(2);
 
         self.set_sp(sp);
-        self.mem_write16(memory, ss, sp, v);
+        memory.write_u16(addr(ss, sp), v);
+        // self.mem_write16(memory, ss, sp, v);
     }
 
     fn pop(&mut self, memory: &Memory) -> u16 {
         let ss = self.get_ss();
         let sp = self.get_sp();
-        let r = self.mem_read16(memory, ss, sp);
+        let r = memory.read_u16(addr(ss, sp));
+        // let r = self.mem_read16(memory, ss, sp);
         self.set_sp(sp.wrapping_add(2));
         r
     }

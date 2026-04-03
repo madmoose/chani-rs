@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex, mpsc};
 
 use crate::color::{RGB666, RGB888};
@@ -10,6 +11,22 @@ pub struct Frame {
     w: usize,
     h: usize,
     data: Vec<u8>,
+}
+
+impl Default for Frame {
+    fn default() -> Self {
+        Self::new(320, 200)
+    }
+}
+
+impl Debug for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frame")
+            .field("w", &self.w)
+            .field("h", &self.h)
+            // .field("data", &self.data)
+            .finish()
+    }
 }
 
 impl Frame {
@@ -34,14 +51,18 @@ impl Frame {
     }
 
     #[inline]
-    pub fn set_rgb666(&mut self, x: usize, y: usize, color: RGB666) {
+    pub fn set_rgb888(&mut self, x: usize, y: usize, color: RGB888) {
         let offset = 4 * (self.w * y + x);
-        let color: RGB888 = color.into();
 
         self.data[offset + 0] = color.r;
         self.data[offset + 1] = color.g;
         self.data[offset + 2] = color.b;
         self.data[offset + 3] = 255; // Alpha
+    }
+
+    #[inline]
+    pub fn set_rgb666(&mut self, x: usize, y: usize, color: RGB666) {
+        self.set_rgb888(x, y, color.into());
     }
 }
 

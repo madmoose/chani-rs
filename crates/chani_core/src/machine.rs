@@ -1,11 +1,15 @@
+use std::fs::File;
+use std::io::{BufWriter, Write};
+
 use bytes_ext::U16Ext;
 
 use crate::address::{Address, addr};
 use crate::bios::Bios;
-use crate::clock::Clock;
+use crate::clock::{Attoseconds, Clock};
 use crate::cpu::{Callback, Cpu, CpuContext};
 use crate::device::Device;
 use crate::device::keyboard::Keyboard;
+use crate::device::opl3::OPL3;
 use crate::device::pit::Pit;
 use crate::device::vga::Vga;
 use crate::dos::Dos;
@@ -13,6 +17,7 @@ use crate::file_system::FileSystemManager;
 use crate::frame::{FrameCacheSync, FrameSender};
 use crate::input_event::{InputEvent, InputEventReceiver};
 use crate::memory::Memory;
+use crate::palette::Pal888;
 
 pub struct Machine {
     pub bios: Box<Bios>,
@@ -260,7 +265,7 @@ impl Machine {
     pub fn new() -> Self {
         let clock = Clock(14.31818);
         let mut memory = Memory::new();
-        let mut cpu = Box::new(Cpu::new());
+        let mut cpu = Box::new(Cpu::new(clock / 3));
         let mut dos = Box::new(Dos::new());
         let mut bios = Box::new(Bios::new());
         let file_system_manager = FileSystemManager::new();
@@ -275,6 +280,7 @@ impl Machine {
 
             let keyboard_device_id = devices.add(Box::new(Keyboard::new()));
             let pit_device_id = devices.add(Box::new(Pit::new()));
+            let opl3_device_id = devices.add(Box::new(OPL3::new()));
             let vga_device_id = devices.add(Box::new(Vga::new(frame_cache.clone())));
 
             let io_map = vec![
@@ -282,6 +288,7 @@ impl Machine {
                 ((0x040, 0x059), pit_device_id),
                 // 8042 keyboard controller ports
                 ((0x060, 0x064), keyboard_device_id),
+                ((0x388, 0x38b), opl3_device_id),
                 ((0x3c0, 0x3df), vga_device_id),
             ];
 
@@ -360,7 +367,39 @@ impl Machine {
         (self.dos.as_mut(), &mut self.cpu, &mut self.memory)
     }
 
-    pub fn run_until_next_event(&mut self) {
+    pub fn get_vga_pal_888(&self) -> Pal888 {
+        self.devices.vga().get_pal_888()
+    }
+
+    pub fn save_palette(&self) {
+        let pal = self.get_vga_pal_888();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let filename = format!("PAL-{}.BIN", timestamp);
+
+        let result = (|| -> std::io::Result<()> {
+            let file = File::create(&filename)?;
+            let mut writer = BufWriter::new(file);
+            for i in 0..=255 {
+                let color = pal[i];
+                writer.write_all(&[color.r, color.g, color.b])?;
+            }
+
+            let ppm_filename = format!("PAL-{}.ppm", timestamp);
+            pal.write_ppm(&ppm_filename, 8)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => println!("Palette saved to {} and PAL-{}.ppm", filename, timestamp),
+            Err(e) => println!("Failed to save palette: {}", e),
+        }
+    }
+
+    pub fn run_until_next_event(&mut self) -> Attoseconds {
         // Find the device with the soonest event.
 
         // Time in microseconds
@@ -406,9 +445,11 @@ impl Machine {
 
             device.run(&mut ctx, cycles);
         }
+
+        Attoseconds::from_microseconds(time)
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> Attoseconds {
         if let Some(input_event_receiver) = self.input_event_receiver.as_ref() {
             for event in input_event_receiver.try_iter() {
                 match event {
@@ -418,15 +459,29 @@ impl Machine {
                     InputEvent::KeyUp(key) => {
                         self.devices.keyboard().key_up(key);
                     }
+                    InputEvent::MousePos((x, y)) => {
+                        self.dos.mouse.x = ((640.0 * x) as i32).clamp(0, 639) as u16;
+                        self.dos.mouse.y = ((200.0 * y) as i32).clamp(0, 199) as u16;
+                    }
+                    InputEvent::MouseButtons(buttons) => {
+                        self.dos.mouse.buttons = (self.dos.mouse.buttons & !0b11)
+                            | (buttons.primary_down as u16)
+                            | ((buttons.secondary_down as u16) << 1);
+                    }
                 }
             }
         }
 
-        self.run_until_next_event();
+        let time = self.run_until_next_event();
         let vga = self.devices.vga_mut();
         if vga.is_frame_ready() {
             vga.complete_frame(&self.memory);
+
+            // let pal = vga.get_pal_888();
+            // self.cpu.pal = pal;
+
             // vga.write_ppm(&self.memory, addr(0xa000, 0x0000), 320, 200);
         }
+        time
     }
 }

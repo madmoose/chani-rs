@@ -12,6 +12,7 @@ use std::{
 };
 
 use chani_core::{
+    dos::ExecArgs,
     frame::{Frame, FrameReceiver},
     input_event::{InputEvent, InputEventSender},
     machine::Machine,
@@ -35,7 +36,7 @@ impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let texture = cc.egui_ctx.load_texture(
             "framebuffer",
-            egui::ColorImage::new([0, 0], vec![]),
+            egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]),
             egui::TextureOptions::NEAREST,
         );
 
@@ -51,21 +52,14 @@ impl App {
             .file_system_manager
             .set_drive_at_index::<chani_core::file_system::native::NativeFileSystem>(
                 2,
-                "/Users/thomas/Games/Cryo - Dune CD",
+                "/Users/madmoose/Games/cryo-dune/pc-3.7-cd",
             )
             .expect("Failed to mount C-drive");
 
         {
             let (dos, mut ctx) = machine.get_dos_and_context();
-            dos.exec_load_and_execute(
-                &mut ctx,
-                br"DNCDPRG.EXE",
-                chani_core::dos::LoadArgs {
-                    environ: 0,
-                    com_line: 0,
-                },
-            )
-            .expect("Failed to load executable");
+            dos.exec_load_and_execute(&mut ctx, br"DNCDPRG.EXE", 0, ExecArgs::Str(""))
+                .expect("Failed to load executable");
         }
 
         let machine_runner = MachineRunner::new(machine);
@@ -76,7 +70,7 @@ impl App {
         Self {
             // sidebar_width: 200.0,
             // timeline_height: 100.0,
-            framebuffer_window: DisplayWindow::new(current_texture),
+            framebuffer_window: DisplayWindow::new(current_texture, input_tx.clone()),
             machine_runner,
             input_tx,
         }
@@ -110,17 +104,27 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let _screen_rect = ctx.screen_rect();
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let control_bar_height = 30.0;
 
-        self.framebuffer_window.show(ctx);
+        // Top menu bar
+        egui::Panel::top("menu_bar").show_inside(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Save palette").clicked() {
+                        self.machine_runner
+                            .send_command(machine_runner::MachineCommand::SavePalette);
+                        ui.close();
+                    }
+                });
+            });
+        });
 
         // Bottom control bar
-        egui::TopBottomPanel::bottom("control_bar")
-            .exact_height(control_bar_height)
+        egui::Panel::bottom("control_bar")
+            .exact_size(control_bar_height)
             .resizable(false)
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Control Bar:");
                     if ui.button("Play").clicked() {
@@ -143,6 +147,8 @@ impl eframe::App for App {
                     ui.label(status);
                 });
             });
+
+        self.framebuffer_window.show(ui.ctx());
     }
 
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
@@ -159,7 +165,7 @@ impl eframe::App for App {
                 } else {
                     InputEvent::KeyUp(key_from_egui_key(*key))
                 };
-                _ = dbg!(self.input_tx.send(event));
+                _ = self.input_tx.send(event);
             }
         });
     }

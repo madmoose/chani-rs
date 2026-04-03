@@ -2,7 +2,19 @@ use crate::{address::addr, machine::DosMachineContext};
 
 impl super::Bios {
     pub(super) fn int10_video(&mut self, ctx: &mut DosMachineContext) {
+        let ss = ctx.cpu.get_ss();
+        let sp = ctx.cpu.get_sp();
+        let ip = ctx.memory.read_u16(addr(ss, sp)) - 2;
+        let cs = ctx.memory.read_u16(addr(ss, sp + 2));
+
         let ah = ctx.cpu.get_ah();
+
+        println!(
+            "BIOS int 10h ah={:02x} executed at address {}",
+            ah,
+            addr(cs, ip)
+        );
+
         match ah {
             0x00 => self.int10_00_set_video_mode(ctx),
             0x01 => self.int10_01_set_text_mode_cursor_shape(ctx),

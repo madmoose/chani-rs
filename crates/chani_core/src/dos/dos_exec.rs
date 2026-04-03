@@ -132,14 +132,22 @@ impl ExeHeader {
     }
 }
 
+pub type ExecEnv = u16;
+
+pub enum ExecArgs<'a> {
+    Seg(u16),
+    Str(&'a str),
+}
+
 impl Dos {
     pub fn exec_load_and_execute(
         &mut self,
         ctx: &mut DosMachineContext,
         path: &[u8],
-        args: LoadArgs,
+        env: ExecEnv,
+        args: ExecArgs<'_>,
     ) -> Result<(), ExecError> {
-        let load_result = self.exec_load_without_executing(ctx, path, args)?;
+        let load_result = self.exec_load_without_executing(ctx, path, env, args)?;
 
         ctx.cpu.set_cx(0xff);
         ctx.cpu.set_dx(0x0000);
@@ -164,12 +172,13 @@ impl Dos {
         &mut self,
         ctx: &mut DosMachineContext,
         path: &[u8],
-        args: LoadArgs,
+        env: ExecEnv,
+        args: ExecArgs<'_>,
     ) -> Result<LoadReturnArgs, ExecError> {
         ctx.memory.disable_logging();
 
-        let _new_env = if args.environ != 0 {
-            let old_env = args.environ;
+        let _new_env = if env != 0 {
+            let old_env = env;
             let Some(env_len) = get_environment_length(ctx.memory, old_env) else {
                 return Err(ExecError::BadEnvironment);
             };
@@ -240,6 +249,28 @@ impl Dos {
             let psp_seg = 0x017e - 0x10;
             let image_seg = psp_seg + 0x10;
 
+            match args {
+                ExecArgs::Seg(_seg) => {
+                    todo!();
+                }
+                ExecArgs::Str(str) => {
+                    if let Some(ascii_str) = str.as_ascii() {
+                        assert!(ascii_str.len() < 127);
+
+                        ctx.memory
+                            .write_u8(addr(psp_seg, 0x80), ascii_str.len() as u8);
+
+                        for (ofs, &c) in ascii_str.iter().enumerate() {
+                            ctx.memory
+                                .write_u8(addr(psp_seg, 0x81 + ofs as u16), c as u8);
+                        }
+
+                        ctx.memory
+                            .write_u8(addr(psp_seg, 0x81 + (ascii_str.len() as u16)), 0x0d);
+                    }
+                }
+            }
+
             let pos = SeekFrom::Start((header.par_dir as u64) << 4);
             self.seek(ctx, fd, pos).map_err(|_| ExecError::BadFormat)?;
 
@@ -276,12 +307,12 @@ impl Dos {
 
                     let v = ctx.memory.read_u16(rel_addr);
 
-                    println!(
-                        "relocating: {}: {:04x} -> {:04x}",
-                        addr(seg, ofs),
-                        v,
-                        v + image_seg
-                    );
+                    // println!(
+                    //     "relocating: {}: {:04x} -> {:04x}",
+                    //     addr(seg, ofs),
+                    //     v,
+                    //     v + image_seg
+                    // );
 
                     ctx.memory.write_u16(rel_addr, v + image_seg);
                 }

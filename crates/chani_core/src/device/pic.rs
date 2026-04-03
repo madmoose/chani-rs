@@ -129,7 +129,7 @@ impl Device for Pic {
         1.0
     }
 
-    fn read(&mut self, _addr: u16) -> u8 {
+    fn read(&mut self, __addr: u16) -> u8 {
         todo!()
     }
 

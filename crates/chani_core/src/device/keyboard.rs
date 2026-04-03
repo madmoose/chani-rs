@@ -375,7 +375,7 @@ impl Device for Keyboard {
         }
     }
 
-    fn write(&mut self, _addr: u16, _v: u8) {
+    fn write(&mut self, __addr: u16, _v: u8) {
         // Unhandled I/O write - keyboard is typically input-only
     }
 

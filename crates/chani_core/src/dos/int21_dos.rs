@@ -527,12 +527,15 @@ impl Dos {
         ctx: &mut DosMachineContext,
     ) -> SyscallResult {
         let num = self.user_regs.get_al();
+        println!("num: {num:#x}");
 
         let offset = 4 * num as u16;
+        println!("offset: = {:#x}", offset);
 
         // IVT is at segment 0, offset = 4*num
         self.user_regs.bx = ctx.memory.read_u16(addr(0, offset));
         self.user_regs.es = ctx.memory.read_u16(addr(0, offset + 2));
+        ctx.memory.hexdump(addr(0, 0), 256 * 4);
 
         Ok(())
     }

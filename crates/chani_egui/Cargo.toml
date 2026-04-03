@@ -1,8 +1,8 @@
 [package]
-name = "chani"
-version = "0.1.0"
+name = "chani_egui"
+version = "0.0.0"
 edition = "2024"
-default-run = "chani"
+default-run = "chani_egui"
 
 [dependencies]
 chani_core.workspace = true

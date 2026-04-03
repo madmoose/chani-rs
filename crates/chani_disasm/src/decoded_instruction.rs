@@ -4,11 +4,11 @@ use smallvec::SmallVec;
 
 use crate::{BaseReg, DataWidth, IndexReg, MemRef, SReg};
 
-use super::opcode_table::{ArgDir, ArgType};
+use super::opcode_table::{ArgDir, ArgType, Opcode};
 
 #[derive(Debug)]
 pub struct DecodedInstruction {
-    pub mnemonic: &'static str,
+    pub opcode: Opcode,
     pub bytes: SmallVec<[u8; 16]>,
     pub op_seg: u16,
     pub op_ofs: u16,
@@ -33,6 +33,9 @@ fn write_imm(f: &mut std::fmt::Formatter<'_>, v: u32) -> std::fmt::Result {
         ((n >> (nybble_position * 4)) & 0xf) as u8
     }
 
+    if v < 10 {
+        return write!(f, "{v}");
+    }
     if most_significant_nybble(v) > 9 {
         write!(f, "0")?;
     }
@@ -50,6 +53,79 @@ fn is_mem_ref_arg(arg_type: ArgType, modrm: u8) -> bool {
 }
 
 impl DecodedInstruction {
+    pub fn mnemonic(&self) -> &'static str {
+        self.opcode.as_str()
+    }
+
+    pub fn branches(&self) -> bool {
+        matches!(
+            self.opcode,
+            Opcode::Call
+                | Opcode::Ja
+                | Opcode::Jb
+                | Opcode::Jbe
+                | Opcode::Jcxz
+                | Opcode::Jg
+                | Opcode::Jge
+                | Opcode::Jl
+                | Opcode::Jle
+                | Opcode::Jmp
+                | Opcode::Jno
+                | Opcode::Jnb
+                | Opcode::Jns
+                | Opcode::Jnz
+                | Opcode::Jo
+                | Opcode::Jpe
+                | Opcode::Jpo
+                | Opcode::Js
+                | Opcode::Jz
+                | Opcode::Loop
+                | Opcode::Loopnz
+                | Opcode::Loopz
+                | Opcode::Ret
+                | Opcode::Retf
+                | Opcode::Iret
+                | Opcode::Hlt
+        )
+    }
+
+    pub fn branch_destination(&self) -> Option<(u16, u16)> {
+        for i in 0..2 {
+            match self.arg_type[i] {
+                ArgType::Rel8 => {
+                    let inc = self.imm[i] as i8 as i16 as u16;
+                    let ofs = self
+                        .op_ofs
+                        .wrapping_add(self.bytes.len() as u16)
+                        .wrapping_add(inc);
+                    return Some((self.op_seg, ofs));
+                }
+                ArgType::Rel16 => {
+                    let inc = self.imm[i] as i16 as u16;
+                    let ofs = self
+                        .op_ofs
+                        .wrapping_add(self.bytes.len() as u16)
+                        .wrapping_add(inc);
+                    return Some((self.op_seg, ofs));
+                }
+                ArgType::IMem32 => {
+                    let ofs = self.imm[i] as u16;
+                    let seg = (self.imm[i] >> 16) as u16;
+                    return Some((seg, ofs));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub fn stops_control_flow(&self) -> bool {
+        matches!(
+            self.opcode,
+            Opcode::Ret | Opcode::Retf | Opcode::Iret | Opcode::Jmp | Opcode::Hlt
+        )
+    }
+
     pub fn mem_dir(&self) -> ArgDir {
         let mem_arg_index = self
             .arg_type
@@ -183,8 +259,44 @@ impl DecodedInstruction {
     }
 }
 
-impl Display for DecodedInstruction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+pub struct DisplayContext<'a> {
+    pub lookup: &'a dyn Fn(u16, u16) -> Option<&'a str>,
+    pub register_file: Option<RegisterFile>,
+    pub imm_seg: Option<u16>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RegisterFile {
+    pub reg: [u16; 13],
+}
+
+impl RegisterFile {
+    pub fn get_sreg(&self, r: SReg) -> u16 {
+        match r {
+            SReg::ES => self.reg[8],
+            SReg::CS => self.reg[9],
+            SReg::SS => self.reg[10],
+            SReg::DS => self.reg[11],
+        }
+    }
+
+    pub fn get_base_reg(&self, r: BaseReg) -> u16 {
+        match r {
+            BaseReg::BX => self.reg[0],
+            BaseReg::BP => self.reg[2],
+        }
+    }
+
+    pub fn get_index_reg(&self, r: IndexReg) -> u16 {
+        match r {
+            IndexReg::SI => self.reg[4],
+            IndexReg::DI => self.reg[5],
+        }
+    }
+}
+
+impl DecodedInstruction {
+    pub fn format(&self, f: &mut std::fmt::Formatter<'_>, ctx: DisplayContext) -> std::fmt::Result {
         let mut col = 0;
 
         // for b in &self.bytes {
@@ -206,15 +318,24 @@ impl Display for DecodedInstruction {
         }
 
         if self.flag_f3 {
-            match self.mnemonic {
-                "stosb" | "stosw" | "movsb" | "movsw" | "lodsb" | "lodsw" => write!(f, "rep ")?,
-                "cmpsb" | "cmpsw" | "scasb" | "scasw" => write!(f, "repz ")?,
+            match self.opcode {
+                Opcode::Stosb
+                | Opcode::Stosw
+                | Opcode::Movsb
+                | Opcode::Movsw
+                | Opcode::Lodsb
+                | Opcode::Lodsw => write!(f, "rep ")?,
+                Opcode::Cmpsb | Opcode::Cmpsw | Opcode::Scasb | Opcode::Scasw => {
+                    write!(f, "repz ")?
+                }
                 _ => (),
             }
         }
         if self.flag_f2 {
-            match self.mnemonic {
-                "cmpsb" | "cmpsw" | "scasb" | "scasw" => write!(f, "repnz ")?,
+            match self.opcode {
+                Opcode::Cmpsb | Opcode::Cmpsw | Opcode::Scasb | Opcode::Scasw => {
+                    write!(f, "repnz ")?
+                }
                 _ => (),
             }
         }
@@ -226,8 +347,8 @@ impl Display for DecodedInstruction {
             col += 3;
         }
 
-        write!(f, "{}", self.mnemonic)?;
-        col += self.mnemonic.len();
+        write!(f, "{}", self.mnemonic())?;
+        col += self.mnemonic().len();
 
         let needs_width_specifier =
             self.has_mem_arg && self.arg_type.iter().any(ArgType::needs_width_specifier);
@@ -248,6 +369,34 @@ impl Display for DecodedInstruction {
             } else {
                 write!(f, ", ")?;
                 col += 2;
+            }
+
+            if is_mem_ref_arg(self.arg_type[i], self.modrm)
+                && let Some(mem_ref) = self.mem_ref()
+            {
+                let resolved = match mem_ref {
+                    MemRef::Direct { seg, ofs, width: _ } => Some((seg, ofs)),
+                    MemRef::Indirect {
+                        seg,
+                        base,
+                        index,
+                        disp,
+                        width: _,
+                    } => ctx.register_file.as_ref().map(|rf| {
+                        let seg = rf.get_sreg(seg);
+                        let base = base.map(|b| rf.get_base_reg(b)).unwrap_or(0);
+                        let index = index.map(|i| rf.get_index_reg(i)).unwrap_or(0);
+                        let ofs = base.wrapping_add(index).wrapping_add(disp);
+                        (seg, ofs)
+                    }),
+                };
+
+                if let Some((seg, ofs)) = resolved {
+                    if let Some(name) = (ctx.lookup)(seg, ofs) {
+                        write!(f, "{}", name)?;
+                        continue;
+                    }
+                }
             }
 
             match self.arg_type[i] {
@@ -291,6 +440,12 @@ impl Display for DecodedInstruction {
                     write!(f, "{}", s[reg as usize])?;
                 }
                 ArgType::Imm8 | ArgType::Imm16 => {
+                    if let Some(seg) = ctx.imm_seg {
+                        if let Some(name) = (ctx.lookup)(seg, self.imm[i] as u16) {
+                            write!(f, "{name}")?;
+                            continue;
+                        }
+                    }
                     write_imm(f, self.imm[i])?;
                 }
                 ArgType::Rel8 => {
@@ -299,6 +454,13 @@ impl Display for DecodedInstruction {
                         .op_ofs
                         .wrapping_add(self.bytes.len() as u16)
                         .wrapping_add(inc);
+                    let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
+                    if in_cs {
+                        if let Some(name) = (ctx.lookup)(self.op_seg, ofs) {
+                            write!(f, "{name}")?;
+                            continue;
+                        }
+                    }
                     write_imm(f, ofs as u32)?;
                 }
                 ArgType::Rel16 => {
@@ -307,6 +469,13 @@ impl Display for DecodedInstruction {
                         .op_ofs
                         .wrapping_add(self.bytes.len() as u16)
                         .wrapping_add(inc);
+                    let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
+                    if in_cs {
+                        if let Some(name) = (ctx.lookup)(self.op_seg, ofs) {
+                            write!(f, "{name}")?;
+                            continue;
+                        }
+                    }
                     write_imm(f, ofs as u32)?;
                 }
                 ArgType::IMem8 | ArgType::IMem16 => {
@@ -406,5 +575,40 @@ impl Display for DecodedInstruction {
         }
 
         Ok(())
+    }
+
+    pub fn to_string_opts(&self, ctx: DisplayContext<'_>) -> String {
+        struct FormattedInstruction<'a, 'b> {
+            instr: &'a DecodedInstruction,
+            ctx: DisplayContext<'b>,
+        }
+
+        impl<'a, 'b> std::fmt::Display for FormattedInstruction<'a, 'b> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.instr.format(
+                    f,
+                    DisplayContext {
+                        lookup: self.ctx.lookup,
+                        register_file: self.ctx.register_file,
+                        imm_seg: self.ctx.imm_seg,
+                    },
+                )
+            }
+        }
+
+        FormattedInstruction { instr: self, ctx }.to_string()
+    }
+}
+
+impl Display for DecodedInstruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.format(
+            f,
+            DisplayContext {
+                lookup: &|_, _| None,
+                register_file: None,
+                imm_seg: None,
+            },
+        )
     }
 }

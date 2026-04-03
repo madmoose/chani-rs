@@ -131,7 +131,7 @@ where
     let has_mem_arg = inst.arg_type.iter().any(|&t| is_mem_arg(t, modrm));
 
     Some(DecodedInstruction {
-        mnemonic: inst.mnemonic,
+        opcode: inst.opcode,
         op_seg: seg,
         op_ofs: ofs,
         bytes: bytes.take(),

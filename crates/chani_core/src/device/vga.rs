@@ -4,6 +4,7 @@ use crate::device::Device;
 use crate::frame::{Frame, FrameCacheSync, FrameSender};
 use crate::machine::DeviceMachineContext;
 use crate::memory::Memory;
+use crate::palette::Pal888;
 use std::any::Any;
 use std::fs::{File, create_dir_all};
 use std::io::{BufWriter, Write};
@@ -192,13 +193,13 @@ impl Vga {
             let addr: Address = self.memory_map.into();
 
             let mut frame = Frame::new(w, h);
-
+            let pal = self.get_pal_888();
             for y in 0..h {
                 for x in 0..w {
                     let offset = w * y + x;
                     let c = memory.read_u8(addr + offset as u16);
-                    let color = self.dac_ram.get_color(c);
-                    frame.set_rgb666(x, y, color);
+                    let color = pal[c];
+                    frame.set_rgb888(x, y, color);
                 }
             }
 
@@ -244,13 +245,11 @@ impl Vga {
         self.frame_sender = Some(receiver);
     }
 
-    pub fn get_pal_888(&self) -> [u8; 768] {
-        let mut pal = [0u8; 768];
-        for i in 0..256 {
-            let color = self.dac_ram.get_color(i as u8);
-            pal[i * 3 + 0] = ((255 * (color.r as u16)) / 63) as u8;
-            pal[i * 3 + 1] = ((255 * (color.g as u16)) / 63) as u8;
-            pal[i * 3 + 2] = ((255 * (color.b as u16)) / 63) as u8;
+    pub fn get_pal_888(&self) -> Pal888 {
+        let mut pal = Pal888::default();
+        for i in 0..=255 {
+            let color = self.dac_ram.get_color(i);
+            pal[i] = color.into();
         }
         pal
     }
@@ -258,14 +257,16 @@ impl Vga {
     pub fn write_ppm(&mut self, memory: &Memory, addr: Address, w: usize, h: usize) {
         let mut frame = vec![0u8; w * h * 3];
 
+        let pal = self.get_pal_888();
+
         for y in 0..h {
             for x in 0..w {
                 let offset = w * y + x;
                 let c = memory.read_u8(addr + offset as u16);
-                let color = self.dac_ram.get_color(c);
-                frame[3 * offset + 0] = ((255 * (color.r as u16)) / 63) as u8;
-                frame[3 * offset + 1] = ((255 * (color.g as u16)) / 63) as u8;
-                frame[3 * offset + 2] = ((255 * (color.b as u16)) / 63) as u8;
+                let color = pal[c];
+                frame[3 * offset + 0] = color.r;
+                frame[3 * offset + 1] = color.g;
+                frame[3 * offset + 2] = color.b;
             }
         }
 

@@ -1,16 +1,26 @@
-use eframe::egui::{self, Vec2, Vec2b};
+use chani_core::{
+    MouseButtons, MouseState,
+    input_event::{InputEvent, InputEventSender},
+};
+use eframe::egui::{self, PointerButton, Vec2, Vec2b};
 use std::sync::{Arc, Mutex};
 
 pub struct DisplayWindow {
     texture: Arc<Mutex<egui::TextureHandle>>,
+    input_tx: InputEventSender,
+    mouse_state: Option<MouseState>,
 }
 
 impl DisplayWindow {
-    pub fn new(texture: Arc<Mutex<egui::TextureHandle>>) -> Self {
-        Self { texture }
+    pub fn new(texture: Arc<Mutex<egui::TextureHandle>>, input_tx: InputEventSender) -> Self {
+        Self {
+            texture,
+            input_tx,
+            mouse_state: None,
+        }
     }
 
-    pub fn show(&self, ctx: &egui::Context) {
+    pub fn show(&mut self, ctx: &egui::Context) {
         egui::Window::new("Display")
             .resizable(true)
             .default_size([640.0, 480.0])
@@ -20,9 +30,7 @@ impl DisplayWindow {
                 let texture = &*texture_guard;
 
                 let available_size = ui.available_size();
-                // dbg!(available_size);
                 let texture_size = texture.size_vec2();
-                // dbg!(texture_size);
                 if texture_size.min_elem() < 1.0 {
                     return;
                 }
@@ -38,7 +46,52 @@ impl DisplayWindow {
 
                 let display_size = Vec2::new(w, h);
 
-                ui.image((texture.id(), display_size));
+                let response = ui.image((texture.id(), display_size));
+
+                // Get mouse position and button states
+                if let Some(cursor_pos) = ui.ctx().pointer_hover_pos() {
+                    let image_rect = response.rect;
+                    if image_rect.contains(cursor_pos) {
+                        let relative_pos = cursor_pos - image_rect.min;
+                        let normalized_x = relative_pos.x / image_rect.width();
+                        let normalized_y = relative_pos.y / image_rect.height();
+
+                        let mouse_buttons = ui.ctx().input(|i| MouseButtons {
+                            primary_down: i.pointer.button_down(PointerButton::Primary),
+                            secondary_down: i.pointer.button_down(PointerButton::Secondary),
+                            middle_down: i.pointer.button_down(PointerButton::Middle),
+                        });
+
+                        let new_mouse_state = MouseState {
+                            position: (normalized_x, normalized_y),
+                            buttons: mouse_buttons,
+                        };
+
+                        let position_changed = self
+                            .mouse_state
+                            .as_ref()
+                            .is_none_or(|st| st.position != new_mouse_state.position);
+
+                        let buttons_changed = self
+                            .mouse_state
+                            .as_ref()
+                            .is_none_or(|st| st.buttons != new_mouse_state.buttons);
+
+                        if position_changed {
+                            _ = self
+                                .input_tx
+                                .send(InputEvent::MousePos(new_mouse_state.position));
+                        }
+
+                        if buttons_changed {
+                            _ = self
+                                .input_tx
+                                .send(InputEvent::MouseButtons(new_mouse_state.buttons));
+                        }
+
+                        self.mouse_state = Some(new_mouse_state);
+                    }
+                }
             });
     }
 }
