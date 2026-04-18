@@ -1,5 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
+#[derive(Debug)]
 pub struct WorkQueue<T> {
     queue: VecDeque<T>,
     seen: HashSet<T>,
@@ -13,9 +14,12 @@ impl<T: Eq + std::hash::Hash + Clone> WorkQueue<T> {
         }
     }
 
-    pub fn push(&mut self, item: T) {
+    pub fn push(&mut self, item: T) -> bool {
         if self.seen.insert(item.clone()) {
             self.queue.push_back(item);
+            true
+        } else {
+            false
         }
     }
 

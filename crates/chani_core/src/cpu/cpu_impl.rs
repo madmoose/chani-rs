@@ -379,7 +379,7 @@ impl Cpu {
                 let inst_str = inst.to_string_opts(DisplayContext {
                     lookup: &|seg, ofs| self.names.get(&(seg, ofs)).map(String::as_str),
                     register_file: Some(self.register_file.clone().into()),
-                    imm_seg: None,
+                    ofs_seg: None,
                 });
                 let mem_value = if inst.reads_from_mem()
                     && let Some(mem_ref) = inst.mem_ref()

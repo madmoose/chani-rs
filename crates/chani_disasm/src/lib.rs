@@ -1,9 +1,10 @@
-pub mod attributes;
+pub mod address_attributes;
 pub mod branch_map;
+pub mod data_type;
 mod decoded_instruction;
 mod disassemble;
 pub mod exe_mz;
-pub mod listing_line;
+pub mod layout;
 mod memory_reference;
 mod opcode_table;
 pub mod project;
@@ -15,6 +16,8 @@ pub use decoded_instruction::{DecodedInstruction, DisplayContext, RegisterFile};
 pub use disassemble::decode;
 pub use memory_reference::*;
 pub use opcode_table::Opcode;
+
+type SmallString = smallstr::SmallString<[u8; 55]>;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SReg {

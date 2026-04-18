@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-pub type Addr = (usize, u16); // (segment index, offset)
+pub type Addr = (usize, u32); // (segment index, offset)
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct BranchMap {
     forward: BTreeMap<Addr, BTreeSet<Addr>>,
     backward: BTreeMap<Addr, BTreeSet<Addr>>,

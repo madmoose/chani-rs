@@ -7,3 +7,4 @@ edition = "2024"
 bytes_ext.workspace = true
 chani_datafile.workspace = true
 smallvec.workspace = true
+smallstr.workspace = true

@@ -1,11 +1,24 @@
 project[cryo-dune-3.7-cd]:
 
-file = DNCDPRG.EXE
-hash = sha1:c55e9e35c24941d8590c068c69cb6cee85e4afcb
 arch = 8086
+
+binary[exe]:
+    format = exe
+    path   = DNCDPRG.EXE
+    hash   = sha1:c55e9e35c24941d8590c068c69cb6cee85e4afcb
+end
 
 segment[seg000]: type = code; start = 0; end = 0xf4b0
 segment[seg001]: type = data; start = 0xf4b0; end = 0x1336c
+
+struct[IntroPart]:
+    unk0       = u16
+    load       = ofs16
+    midi       = u16
+    transition = u16
+    play       = ofs16
+    wait       = u16
+end
 
 attr[seg000:0000]: type = code; name = start
 attr[seg000:003a]: name = exit_with_error
@@ -13,9 +26,9 @@ attr[seg000:0098]: type = code; name = adjust_sub_resource_pointers
 attr[seg000:00b0]: type = code; name = initialize_resources
 attr[seg000:00d1]: type = code; name = initialize_resources
 attr[seg000:0169]: type = code; name = map2_resource_func
-attr[seg000:01cb]: imm_seg = seg000
+attr[seg000:01cb]: ofs_seg = seg000
 attr[seg000:01e0]: type = code
-attr[seg000:020c]: type = [u16; 8]; imm_seg = seg000; name = script_2
+attr[seg000:020c]: type = [u16; 8]; ofs_seg = seg000; name = script_2
 attr[seg000:021c]: type = code; name = play_intro2
 attr[seg000:02c1]: type = code
 attr[seg000:02de]: type = code; name = intro_part_2
@@ -26,7 +39,7 @@ attr[seg000:02fb]: type = code; name = intro_26_baron
 attr[seg000:02fe]: type = code
 attr[seg000:0301]: type = code
 attr[seg000:0309]: type = code; name = play_CREDITS_HNM
-attr[seg000:0337]: type = [u16; 288]; name = word_10337_intro_script
+attr[seg000:0337]: type = [IntroPart; 48]; ofs_seg = seg000; name = word_10337_intro_script
 attr[seg000:0577]: type = u16; name = word_10577_intro_script_end
 attr[seg000:0579]: type = code; name = clear_global_y_offset
 attr[seg000:0580]: type = code; name = play_intro
@@ -188,7 +201,7 @@ attr[seg000:1ea1]: type = code
 attr[seg000:1ea9]: type = code
 attr[seg000:1eb1]: type = code
 attr[seg000:2017]: type = code; name = ui_comm
-attr[seg000:2065]: type = [u8; 11]
+attr[seg000:2165]: type = [u8; 11]
 attr[seg000:2239]: type = code
 attr[seg000:2318]: type = code
 attr[seg000:2388]: type = code
@@ -500,12 +513,12 @@ attr[seg000:abe9]: type = code; name = open_voc_resource
 attr[seg000:ac14]: type = code; name = pcm_stop_voc_q
 attr[seg000:ac30]: type = code; name = call_pcm_audio_vtable_func_5
 attr[seg000:ac35]: type = code
-attr[seg000:ad50]: type = code; name = play_music_WORMSUIT_HSQ
-attr[seg000:ad57]: type = code; name = play_music_MORNING_HSQ
 attr[seg000:ac6e]: type = code
 attr[seg000:ac7e]: type = code
 attr[seg000:ac90]: type = code
 attr[seg000:ac97]: type = code
+attr[seg000:ad50]: type = code; name = play_music_WORMSUIT_HSQ
+attr[seg000:ad57]: type = code; name = play_music_MORNING_HSQ
 attr[seg000:ad95]: type = code; name = play_music
 attr[seg000:ae2f]: type = code; name = check_pcm_enabled
 attr[seg000:ae62]: type = code; name = load_music
@@ -679,8 +692,8 @@ attr[seg000:d792]: type = code; name = ui_set_and_draw_frieze_sides_map
 attr[seg000:d795]: type = code; name = ui_set_and_draw_frieze_sides
 attr[seg000:d7ad]: type = code; name = ui_set_and_draw_frieze_sides_open_book
 attr[seg000:d7b2]: type = code; name = ui_set_and_draw_frieze_sides_globe
-attr[seg000:d917]: type = code
 attr[seg000:d815]: type = code; name = game_loop
+attr[seg000:d917]: type = code
 attr[seg000:d9d2]: type = code; name = process_frame_tasks
 attr[seg000:da25]: type = code; name = add_frame_task
 attr[seg000:da53]: type = code; name = clear_frame_tasks

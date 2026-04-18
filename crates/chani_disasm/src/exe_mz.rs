@@ -148,13 +148,13 @@ impl ExeMzHeader {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ExeMzRelocation {
     pub ofs: u16,
     pub seg: u16,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ExeMz {
     pub name: String,
     pub head: ExeMzHeader,

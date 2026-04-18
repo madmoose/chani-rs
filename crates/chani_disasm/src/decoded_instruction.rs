@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::fmt::{Display, Write};
 
 use smallvec::SmallVec;
 
@@ -23,7 +23,7 @@ pub struct DecodedInstruction {
     pub has_mem_arg: bool,
 }
 
-fn write_imm(f: &mut std::fmt::Formatter<'_>, v: u32) -> std::fmt::Result {
+fn write_imm<W: Write>(w: &mut W, v: u32) -> std::fmt::Result {
     fn most_significant_nybble(n: u32) -> u8 {
         if n == 0 {
             return 0;
@@ -34,12 +34,12 @@ fn write_imm(f: &mut std::fmt::Formatter<'_>, v: u32) -> std::fmt::Result {
     }
 
     if v < 10 {
-        return write!(f, "{v}");
+        return write!(w, "{v}");
     }
     if most_significant_nybble(v) > 9 {
-        write!(f, "0")?;
+        write!(w, "0")?;
     }
-    write!(f, "{v:x}h")?;
+    write!(w, "{v:x}h")?;
 
     Ok(())
 }
@@ -55,6 +55,13 @@ fn is_mem_ref_arg(arg_type: ArgType, modrm: u8) -> bool {
 impl DecodedInstruction {
     pub fn mnemonic(&self) -> &'static str {
         self.opcode.as_str()
+    }
+
+    pub fn arg_count(&self) -> usize {
+        self.arg_type
+            .iter()
+            .position(|&arg_type| arg_type == ArgType::None)
+            .unwrap_or(2)
     }
 
     pub fn branches(&self) -> bool {
@@ -262,7 +269,7 @@ impl DecodedInstruction {
 pub struct DisplayContext<'a> {
     pub lookup: &'a dyn Fn(u16, u16) -> Option<&'a str>,
     pub register_file: Option<RegisterFile>,
-    pub imm_seg: Option<u16>,
+    pub ofs_seg: Option<u16>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -296,24 +303,11 @@ impl RegisterFile {
 }
 
 impl DecodedInstruction {
-    pub fn format(&self, f: &mut std::fmt::Formatter<'_>, ctx: DisplayContext) -> std::fmt::Result {
+    pub fn format_opcode<W: Write>(&self, w: &mut W) -> Result<usize, std::fmt::Error> {
         let mut col = 0;
 
-        // for b in &self.bytes {
-        //     write!(f, "{b:02X} ")?;
-        //     col += 3;
-        // }
-
-        // loop {
-        //     if col > 7 + 5 * 3 {
-        //         break;
-        //     }
-        //     write!(f, " ")?;
-        //     col += 1;
-        // }
-
         if self.flag_lock {
-            write!(f, "lock ")?;
+            write!(w, "lock ")?;
             col += 5;
         }
 
@@ -324,9 +318,9 @@ impl DecodedInstruction {
                 | Opcode::Movsb
                 | Opcode::Movsw
                 | Opcode::Lodsb
-                | Opcode::Lodsw => write!(f, "rep ")?,
+                | Opcode::Lodsw => write!(w, "rep ")?,
                 Opcode::Cmpsb | Opcode::Cmpsw | Opcode::Scasb | Opcode::Scasw => {
-                    write!(f, "repz ")?
+                    write!(w, "repz ")?
                 }
                 _ => (),
             }
@@ -334,7 +328,7 @@ impl DecodedInstruction {
         if self.flag_f2 {
             match self.opcode {
                 Opcode::Cmpsb | Opcode::Cmpsw | Opcode::Scasb | Opcode::Scasw => {
-                    write!(f, "repnz ")?
+                    write!(w, "repnz ")?
                 }
                 _ => (),
             }
@@ -343,15 +337,227 @@ impl DecodedInstruction {
         if let Some(seg_ovr) = self.seg_ovr
             && !self.has_mem_arg
         {
-            write!(f, "{seg_ovr}:")?;
+            write!(w, "{seg_ovr}:")?;
             col += 3;
         }
 
-        write!(f, "{}", self.mnemonic())?;
+        write!(w, "{}", self.mnemonic())?;
         col += self.mnemonic().len();
 
+        Ok(col)
+    }
+
+    pub fn format_arg<W: Write>(
+        &self,
+        w: &mut W,
+        i: usize,
+        ctx: &DisplayContext,
+    ) -> std::fmt::Result {
         let needs_width_specifier =
             self.has_mem_arg && self.arg_type.iter().any(ArgType::needs_width_specifier);
+
+        if is_mem_ref_arg(self.arg_type[i], self.modrm)
+            && let Some(mem_ref) = self.mem_ref()
+        {
+            let resolved = match mem_ref {
+                MemRef::Direct { seg, ofs, width: _ } => Some((seg, ofs)),
+                MemRef::Indirect {
+                    seg,
+                    base,
+                    index,
+                    disp,
+                    width: _,
+                } => ctx.register_file.as_ref().map(|rf| {
+                    let seg = rf.get_sreg(seg);
+                    let base = base.map(|b| rf.get_base_reg(b)).unwrap_or(0);
+                    let index = index.map(|i| rf.get_index_reg(i)).unwrap_or(0);
+                    let ofs = base.wrapping_add(index).wrapping_add(disp);
+                    (seg, ofs)
+                }),
+            };
+
+            if let Some((seg, ofs)) = resolved {
+                if let Some(name) = (ctx.lookup)(seg, ofs) {
+                    return write!(w, "{}", name);
+                }
+            }
+        }
+
+        match self.arg_type[i] {
+            ArgType::Inherit => unreachable!(),
+            ArgType::None => unreachable!(),
+            ArgType::Const1 => write!(w, "1")?,
+            ArgType::Const3 => write!(w, "3")?,
+            ArgType::AL => write!(w, "al")?,
+            ArgType::CL => write!(w, "cl")?,
+            ArgType::DL => write!(w, "dl")?,
+            ArgType::BL => write!(w, "bl")?,
+            ArgType::AH => write!(w, "ah")?,
+            ArgType::CH => write!(w, "ch")?,
+            ArgType::DH => write!(w, "dh")?,
+            ArgType::BH => write!(w, "bh")?,
+            ArgType::AX => write!(w, "ax")?,
+            ArgType::CX => write!(w, "cx")?,
+            ArgType::DX => write!(w, "dx")?,
+            ArgType::BX => write!(w, "bx")?,
+            ArgType::SP => write!(w, "sp")?,
+            ArgType::BP => write!(w, "bp")?,
+            ArgType::SI => write!(w, "si")?,
+            ArgType::DI => write!(w, "di")?,
+            ArgType::ES => write!(w, "es")?,
+            ArgType::CS => write!(w, "cs")?,
+            ArgType::SS => write!(w, "ss")?,
+            ArgType::DS => write!(w, "ds")?,
+            ArgType::Reg8 => {
+                let reg = (self.modrm >> 3) & 0b111;
+                let s = ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"];
+                write!(w, "{}", s[reg as usize])?;
+            }
+            ArgType::Reg16 => {
+                let reg = (self.modrm >> 3) & 0b111;
+                let s = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"];
+                write!(w, "{}", s[reg as usize])?;
+            }
+            ArgType::SReg => {
+                let reg = (self.modrm >> 3) & 0b11;
+                let s = ["es", "cs", "ss", "ds"];
+                write!(w, "{}", s[reg as usize])?;
+            }
+            ArgType::Imm8 | ArgType::Imm16 => {
+                if let Some(seg) = ctx.ofs_seg {
+                    if let Some(name) = (ctx.lookup)(seg, self.imm[i] as u16) {
+                        return write!(w, "{name}");
+                    }
+                }
+                write_imm(w, self.imm[i])?;
+            }
+            ArgType::Rel8 => {
+                let inc = self.imm[i] as i8 as i16 as u16;
+                let ofs = self
+                    .op_ofs
+                    .wrapping_add(self.bytes.len() as u16)
+                    .wrapping_add(inc);
+                let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
+                if in_cs {
+                    if let Some(name) = (ctx.lookup)(self.op_seg, ofs) {
+                        return write!(w, "{name}");
+                    }
+                }
+                write_imm(w, ofs as u32)?;
+            }
+            ArgType::Rel16 => {
+                let inc = self.imm[i] as u16;
+                let ofs = self
+                    .op_ofs
+                    .wrapping_add(self.bytes.len() as u16)
+                    .wrapping_add(inc);
+                let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
+                if in_cs {
+                    if let Some(name) = (ctx.lookup)(self.op_seg, ofs) {
+                        return write!(w, "{name}");
+                    }
+                }
+                write_imm(w, ofs as u32)?;
+            }
+            ArgType::IMem8 | ArgType::IMem16 => {
+                if let Some(ovr) = self.seg_ovr {
+                    write!(w, "{ovr}:")?;
+                }
+                write!(w, "[")?;
+                write_imm(w, self.imm[i])?;
+                write!(w, "]")?;
+            }
+            ArgType::IMem32 => {
+                let ofs = self.imm[i] as u16;
+                let seg = (self.imm[i] >> 16) as u16;
+                if let Some(ovr) = self.seg_ovr {
+                    write!(w, "{ovr}:")?;
+                }
+                write!(w, "[{seg:04x}:{ofs:04x}]")?;
+            }
+            ArgType::Mem16 | ArgType::Mem32 | ArgType::RM8 | ArgType::RM16 => {
+                let modrm = self.modrm;
+                let mod_bits = (modrm >> 6) & 0b11;
+                let rm = modrm & 0b111;
+                let arg = self.arg_type[i];
+                let wd = matches!(arg, ArgType::RM16 | ArgType::Mem16);
+
+                if mod_bits == 0b11 {
+                    // Only RM8/RM16 are valid here, Mem16/Mem32 are not
+                    if matches!(arg, ArgType::Mem16 | ArgType::Mem32) {
+                        write!(w, "invalid")?;
+                    } else {
+                        // str_reg equivalent: use 16-bit or 8-bit reg name
+                        let reg_names = if wd {
+                            ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"]
+                        } else {
+                            ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"]
+                        };
+                        write!(w, "{}", reg_names[rm as usize])?;
+                    }
+                } else {
+                    if needs_width_specifier {
+                        match arg {
+                            ArgType::RM8 => write!(w, "byte ptr ")?,
+                            ArgType::RM16 | ArgType::Mem16 => write!(w, "word ptr ")?,
+                            ArgType::Mem32 => write!(w, "far ptr ")?,
+                            _ => {}
+                        }
+                    }
+                    if let Some(ovr) = self.seg_ovr {
+                        write!(w, "{ovr}:")?;
+                    }
+                    write!(w, "[")?;
+                    match rm {
+                        0b000 => write!(w, "bx+si")?,
+                        0b001 => write!(w, "bx+di")?,
+                        0b010 => write!(w, "bp+si")?,
+                        0b011 => write!(w, "bp+di")?,
+                        0b100 => write!(w, "si")?,
+                        0b101 => write!(w, "di")?,
+                        0b110 => {
+                            if mod_bits != 0 {
+                                write!(w, "bp")?;
+                            } else {
+                                write_imm(w, self.imm[i])?;
+                            }
+                        }
+                        0b111 => write!(w, "bx")?,
+                        _ => {}
+                    }
+                    match mod_bits {
+                        0b01 => {
+                            let disp = self.imm[i] as i8;
+                            if disp < 0 {
+                                write!(w, "-")?;
+                                write_imm(w, (-(disp as i32)) as u32)?;
+                            } else if disp > 0 {
+                                write!(w, "+")?;
+                                write_imm(w, disp as u32)?;
+                            }
+                        }
+                        0b10 => {
+                            let disp = self.imm[i] as i16;
+                            if disp < 0 {
+                                write!(w, "-")?;
+                                write_imm(w, (-(disp as i32)) as u32)?;
+                            } else if disp > 0 {
+                                write!(w, "+")?;
+                                write_imm(w, disp as u32)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    write!(w, "]")?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn format<W: Write>(&self, mut w: W, ctx: DisplayContext) -> std::fmt::Result {
+        let mut col = self.format_opcode(&mut w)?;
 
         for i in 0..2 {
             if self.arg_type[i] == ArgType::None {
@@ -360,218 +566,17 @@ impl DecodedInstruction {
 
             if i == 0 {
                 loop {
-                    write!(f, " ")?;
+                    write!(w, " ")?;
                     col += 1;
                     if col >= 8 {
                         break;
                     }
                 }
             } else {
-                write!(f, ", ")?;
-                col += 2;
+                write!(w, ", ")?;
             }
 
-            if is_mem_ref_arg(self.arg_type[i], self.modrm)
-                && let Some(mem_ref) = self.mem_ref()
-            {
-                let resolved = match mem_ref {
-                    MemRef::Direct { seg, ofs, width: _ } => Some((seg, ofs)),
-                    MemRef::Indirect {
-                        seg,
-                        base,
-                        index,
-                        disp,
-                        width: _,
-                    } => ctx.register_file.as_ref().map(|rf| {
-                        let seg = rf.get_sreg(seg);
-                        let base = base.map(|b| rf.get_base_reg(b)).unwrap_or(0);
-                        let index = index.map(|i| rf.get_index_reg(i)).unwrap_or(0);
-                        let ofs = base.wrapping_add(index).wrapping_add(disp);
-                        (seg, ofs)
-                    }),
-                };
-
-                if let Some((seg, ofs)) = resolved {
-                    if let Some(name) = (ctx.lookup)(seg, ofs) {
-                        write!(f, "{}", name)?;
-                        continue;
-                    }
-                }
-            }
-
-            match self.arg_type[i] {
-                ArgType::Inherit => unreachable!(),
-                ArgType::None => unreachable!(),
-                ArgType::Const1 => write!(f, "1")?,
-                ArgType::Const3 => write!(f, "3")?,
-                ArgType::AL => write!(f, "al")?,
-                ArgType::CL => write!(f, "cl")?,
-                ArgType::DL => write!(f, "dl")?,
-                ArgType::BL => write!(f, "bl")?,
-                ArgType::AH => write!(f, "ah")?,
-                ArgType::CH => write!(f, "ch")?,
-                ArgType::DH => write!(f, "dh")?,
-                ArgType::BH => write!(f, "bh")?,
-                ArgType::AX => write!(f, "ax")?,
-                ArgType::CX => write!(f, "cx")?,
-                ArgType::DX => write!(f, "dx")?,
-                ArgType::BX => write!(f, "bx")?,
-                ArgType::SP => write!(f, "sp")?,
-                ArgType::BP => write!(f, "bp")?,
-                ArgType::SI => write!(f, "si")?,
-                ArgType::DI => write!(f, "di")?,
-                ArgType::ES => write!(f, "es")?,
-                ArgType::CS => write!(f, "cs")?,
-                ArgType::SS => write!(f, "ss")?,
-                ArgType::DS => write!(f, "ds")?,
-                ArgType::Reg8 => {
-                    let reg = (self.modrm >> 3) & 0b111;
-                    let s = ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"];
-                    write!(f, "{}", s[reg as usize])?;
-                }
-                ArgType::Reg16 => {
-                    let reg = (self.modrm >> 3) & 0b111;
-                    let s = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"];
-                    write!(f, "{}", s[reg as usize])?;
-                }
-                ArgType::SReg => {
-                    let reg = (self.modrm >> 3) & 0b11;
-                    let s = ["es", "cs", "ss", "ds"];
-                    write!(f, "{}", s[reg as usize])?;
-                }
-                ArgType::Imm8 | ArgType::Imm16 => {
-                    if let Some(seg) = ctx.imm_seg {
-                        if let Some(name) = (ctx.lookup)(seg, self.imm[i] as u16) {
-                            write!(f, "{name}")?;
-                            continue;
-                        }
-                    }
-                    write_imm(f, self.imm[i])?;
-                }
-                ArgType::Rel8 => {
-                    let inc = self.imm[i] as i8 as i16 as u16;
-                    let ofs = self
-                        .op_ofs
-                        .wrapping_add(self.bytes.len() as u16)
-                        .wrapping_add(inc);
-                    let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
-                    if in_cs {
-                        if let Some(name) = (ctx.lookup)(self.op_seg, ofs) {
-                            write!(f, "{name}")?;
-                            continue;
-                        }
-                    }
-                    write_imm(f, ofs as u32)?;
-                }
-                ArgType::Rel16 => {
-                    let inc = self.imm[i] as u16;
-                    let ofs = self
-                        .op_ofs
-                        .wrapping_add(self.bytes.len() as u16)
-                        .wrapping_add(inc);
-                    let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
-                    if in_cs {
-                        if let Some(name) = (ctx.lookup)(self.op_seg, ofs) {
-                            write!(f, "{name}")?;
-                            continue;
-                        }
-                    }
-                    write_imm(f, ofs as u32)?;
-                }
-                ArgType::IMem8 | ArgType::IMem16 => {
-                    if let Some(ovr) = self.seg_ovr {
-                        write!(f, "{ovr}:")?;
-                    }
-                    write!(f, "[")?;
-                    write_imm(f, self.imm[i])?;
-                    write!(f, "]")?;
-                }
-                ArgType::IMem32 => {
-                    let ofs = self.imm[i] as u16;
-                    let seg = (self.imm[i] >> 16) as u16;
-                    if let Some(ovr) = self.seg_ovr {
-                        write!(f, "{ovr}:")?;
-                    }
-                    write!(f, "[{seg:04x}:{ofs:04x}]")?;
-                }
-                ArgType::Mem16 | ArgType::Mem32 | ArgType::RM8 | ArgType::RM16 => {
-                    let modrm = self.modrm;
-                    let mod_bits = (modrm >> 6) & 0b11;
-                    let rm = modrm & 0b111;
-                    let arg = self.arg_type[i];
-                    let w = matches!(arg, ArgType::RM16 | ArgType::Mem16);
-                    let show_mem_width = needs_width_specifier;
-
-                    if mod_bits == 0b11 {
-                        // Only RM8/RM16 are valid here, Mem16/Mem32 are not
-                        if matches!(arg, ArgType::Mem16 | ArgType::Mem32) {
-                            write!(f, "invalid")?;
-                        } else {
-                            // str_reg equivalent: use 16-bit or 8-bit reg name
-                            let reg_names = if w {
-                                ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"]
-                            } else {
-                                ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"]
-                            };
-                            write!(f, "{}", reg_names[rm as usize])?;
-                        }
-                    } else {
-                        if show_mem_width {
-                            match arg {
-                                ArgType::RM8 => write!(f, "byte ptr ")?,
-                                ArgType::RM16 | ArgType::Mem16 => write!(f, "word ptr ")?,
-                                ArgType::Mem32 => write!(f, "far ptr ")?,
-                                _ => {}
-                            }
-                        }
-                        if let Some(ovr) = self.seg_ovr {
-                            write!(f, "{ovr}:")?;
-                        }
-                        write!(f, "[")?;
-                        match rm {
-                            0b000 => write!(f, "bx+si")?,
-                            0b001 => write!(f, "bx+di")?,
-                            0b010 => write!(f, "bp+si")?,
-                            0b011 => write!(f, "bp+di")?,
-                            0b100 => write!(f, "si")?,
-                            0b101 => write!(f, "di")?,
-                            0b110 => {
-                                if mod_bits != 0 {
-                                    write!(f, "bp")?;
-                                } else {
-                                    write_imm(f, self.imm[i])?;
-                                }
-                            }
-                            0b111 => write!(f, "bx")?,
-                            _ => {}
-                        }
-                        match mod_bits {
-                            0b01 => {
-                                let disp = self.imm[i] as i8;
-                                if disp < 0 {
-                                    write!(f, "-")?;
-                                    write_imm(f, (-(disp as i32)) as u32)?;
-                                } else if disp > 0 {
-                                    write!(f, "+")?;
-                                    write_imm(f, disp as u32)?;
-                                }
-                            }
-                            0b10 => {
-                                let disp = self.imm[i] as i16;
-                                if disp < 0 {
-                                    write!(f, "-")?;
-                                    write_imm(f, (-(disp as i32)) as u32)?;
-                                } else if disp > 0 {
-                                    write!(f, "+")?;
-                                    write_imm(f, disp as u32)?;
-                                }
-                            }
-                            _ => {}
-                        }
-                        write!(f, "]")?;
-                    }
-                }
-            };
+            self.format_arg(&mut w, i, &ctx)?;
         }
 
         Ok(())
@@ -590,7 +595,7 @@ impl DecodedInstruction {
                     DisplayContext {
                         lookup: self.ctx.lookup,
                         register_file: self.ctx.register_file,
-                        imm_seg: self.ctx.imm_seg,
+                        ofs_seg: self.ctx.ofs_seg,
                     },
                 )
             }
@@ -607,7 +612,7 @@ impl Display for DecodedInstruction {
             DisplayContext {
                 lookup: &|_, _| None,
                 register_file: None,
-                imm_seg: None,
+                ofs_seg: None,
             },
         )
     }
