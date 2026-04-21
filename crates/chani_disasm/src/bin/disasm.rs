@@ -35,9 +35,7 @@ fn main() {
         }
     };
 
-    project.mark_data_attributes();
-    project.disassemble();
-    project.generate_auto_labels();
+    project.analyze();
 
     let listing = build_listing(&project);
 
