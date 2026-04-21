@@ -1,5 +1,5 @@
 use bytes_ext::U16Ext;
-use chani_disasm::{DataWidth, DisplayContext, MemRef};
+use chani_disasm::{BaseReg, DataWidth, DisplayContext, IndexReg, MemRef, SymbolLookup};
 
 use super::bitops::BitOps;
 use super::register_file::RegisterFile;
@@ -22,6 +22,29 @@ use crate::{DUNE_DNADL, DUNE_DNVGA, DUNE_SEG001};
 use std::collections::HashMap;
 use std::fmt::LowerHex;
 use std::mem::swap;
+
+struct NameMapLookup<'a>(&'a HashMap<(u16, u16), String>);
+
+impl SymbolLookup for NameMapLookup<'_> {
+    fn lookup_direct(&self, seg: u16, ofs: u16, _width: DataWidth) -> Option<&str> {
+        self.0.get(&(seg, ofs)).map(String::as_str)
+    }
+
+    fn lookup_indirect(
+        &self,
+        _seg: chani_disasm::SReg,
+        _base: Option<BaseReg>,
+        _index: Option<IndexReg>,
+        _disp: u16,
+        _width: DataWidth,
+    ) -> Option<&str> {
+        None
+    }
+
+    fn lookup_offset(&self, _ofs: u16) -> Option<&str> {
+        None
+    }
+}
 
 #[derive(Debug)]
 pub struct Cpu {
@@ -377,9 +400,7 @@ impl Cpu {
             let bytes = ctx.memory().iter_from(csip.ea());
             if let Some(inst) = chani_disasm::decode(csip.seg, csip.ofs, bytes) {
                 let inst_str = inst.to_string_opts(DisplayContext {
-                    lookup: &|seg, ofs| self.names.get(&(seg, ofs)).map(String::as_str),
-                    register_file: Some(self.register_file.clone().into()),
-                    ofs_seg: None,
+                    lookup: &NameMapLookup(&self.names),
                 });
                 let mem_value = if inst.reads_from_mem()
                     && let Some(mem_ref) = inst.mem_ref()
