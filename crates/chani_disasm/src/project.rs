@@ -7,8 +7,8 @@ use chani_datafile::parser;
 
 use crate::branch_map::BranchMap;
 use crate::data_type::{CompositeDataType, DataType, ScalarDataType, StructDef, StructField};
-use crate::decode;
 use crate::work_queue::WorkQueue;
+use crate::{SmallString, decode};
 use crate::{address_attributes::AddressAttributes, exe_mz::ExeMz};
 
 #[derive(Debug, Clone)]
@@ -62,7 +62,7 @@ impl BinaryFormat {
 
 #[derive(Debug, Clone)]
 pub struct BinaryDef {
-    pub name: String,
+    pub name: SmallString,
     pub format: BinaryFormat,
     pub path: String,
     pub hash: Option<Hash>,
@@ -80,11 +80,11 @@ pub struct BinImage {
 // ── Core types ────────────────────────────────────────────────────────────────
 
 #[allow(unused)]
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Project {
-    pub project: String,
+    pub project: SmallString,
     pub binaries: Vec<BinaryDef>,
-    pub arch: String,
+    pub arch: SmallString,
     pub segments: Segments,
     pub structs: Structs,
     pub attrs: BTreeMap<(SegmentIdx, u32), Attr>,
@@ -96,8 +96,8 @@ pub struct Project {
 #[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct Segment {
-    pub name: String,
-    pub r#type: Option<String>,
+    pub name: SmallString,
+    pub r#type: Option<SmallString>,
     pub start: Option<u32>,
     pub end: Option<u32>,
     pub addr_attributes: AddressAttributes,
@@ -126,6 +126,7 @@ enum UnresolvedAttrType {
         elem: Box<UnresolvedAttrType>,
         count: usize,
     },
+    CStr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -135,7 +136,7 @@ struct UnresolvedStructDef {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct UnresolvedStructField {
-    pub name: String,
+    pub name: SmallString,
     pub r#type: UnresolvedAttrType,
 }
 
@@ -160,10 +161,17 @@ impl AttrType {
         }
     }
 
-    pub fn byte_size(&self, structs: &Structs) -> usize {
+    pub fn byte_size(&self, bytes: &[u8], structs: &Structs) -> usize {
         match self {
             AttrType::Code => unreachable!(),
-            AttrType::Data(d) => d.byte_size(structs),
+            AttrType::Data(d) => d.byte_size(bytes, structs),
+        }
+    }
+
+    pub fn as_data(&self) -> Option<&DataType> {
+        match self {
+            AttrType::Code => None,
+            AttrType::Data(data_type) => Some(data_type),
         }
     }
 }
@@ -175,7 +183,7 @@ type SegmentIdx = usize;
 pub struct Attr {
     pub addr: (SegmentIdx, u32),
     pub r#type: Option<AttrType>,
-    pub name: Option<String>,
+    pub name: Option<SmallString>,
     pub ofs_seg: Option<SegmentIdx>,
     pub comment: Option<String>,
     /// True if this attr was auto-generated and should not be saved.
@@ -254,7 +262,7 @@ impl Project {
         let segments = make_segments(&exe);
 
         let binary = BinaryDef {
-            name: "exe".to_string(),
+            name: "exe".into(),
             format: BinaryFormat::Exe,
             path: exe_path.to_owned(),
             hash: None,
@@ -262,9 +270,9 @@ impl Project {
         };
 
         Ok(Project {
-            project: String::new(),
+            project: SmallString::new(),
             binaries: vec![binary],
-            arch: String::new(),
+            arch: SmallString::new(),
             segments,
             structs: Vec::new(),
             attrs: BTreeMap::new(),
@@ -293,13 +301,13 @@ impl Project {
 
     fn from_dict(dict: Dict) -> Result<Self, String> {
         let project = dict.key.clone();
-        let mut arch = String::new();
+        let mut arch = SmallString::new();
 
         let mut binary_dicts: Vec<&Dict> = Vec::new();
         let mut segment_dicts: Vec<&Dict> = Vec::new();
         let mut struct_dicts: Vec<&Dict> = Vec::new();
         let mut attr_dicts: Vec<&Dict> = Vec::new();
-        let mut unresolved_structs: BTreeMap<String, UnresolvedStructDef> = BTreeMap::new();
+        let mut unresolved_structs: BTreeMap<SmallString, UnresolvedStructDef> = BTreeMap::new();
         let mut attrs = BTreeMap::new();
 
         // Pass 1: collect dicts, parse simple properties.
@@ -342,7 +350,7 @@ impl Project {
 
         // Pass 3: resolve struct/segment names to indices.
         let structs = resolve_structs(unresolved_structs, &segments)?;
-        let struct_names: Vec<String> = structs.iter().map(|s| s.name.to_string()).collect();
+        let struct_names: Vec<SmallString> = structs.iter().map(|s| s.name.clone()).collect();
 
         // Pass 4: parse attr dicts.
         for d in attr_dicts {
@@ -470,19 +478,31 @@ impl Project {
 
     /// Mark all data-typed attributes in `addr_attributes` with their byte extents.
     pub fn mark_data_attributes(&mut self) {
-        let spans: Vec<(usize, u32, usize)> = self
+        // Phase 1: collect (seg_idx, ofs, DataType) — clone to release the attrs borrow.
+        let attrs: Vec<(usize, u32, DataType)> = self
             .attrs
             .values()
             .filter_map(|attr| {
                 if let Some(AttrType::Data(ref d)) = attr.r#type {
                     let (seg_idx, ofs) = attr.addr;
-                    Some((seg_idx, ofs, d.byte_size(&self.structs)))
+                    Some((seg_idx, ofs, d.clone()))
                 } else {
                     None
                 }
             })
             .collect();
 
+        // Phase 2: compute actual byte sizes from real binary data (all immutable borrows).
+        let spans: Vec<(usize, u32, usize)> = attrs
+            .into_iter()
+            .map(|(seg_idx, ofs, data_type)| {
+                let bytes = self.bytes_at_seg(seg_idx, ofs);
+                let size = data_type.byte_size(bytes, &self.structs).max(1);
+                (seg_idx, ofs, size)
+            })
+            .collect();
+
+        // Phase 3: mark (mutable borrow).
         for (seg_idx, ofs, size) in spans {
             self.segments[seg_idx]
                 .addr_attributes
@@ -585,7 +605,7 @@ impl Project {
         };
 
         for (seg_idx, ofs) in self.branches.all_targets() {
-            let label = format!("loc_{:05x}", label_addr(seg_idx, ofs));
+            let label = format!("loc_{:05x}", label_addr(seg_idx, ofs)).into();
             Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
         }
 
@@ -596,7 +616,7 @@ impl Project {
             .map(|a| a.addr)
             .collect();
         for (seg_idx, ofs) in code_addrs {
-            let label = format!("loc_{:05x}", label_addr(seg_idx, ofs));
+            let label = format!("loc_{:05x}", label_addr(seg_idx, ofs)).into();
             Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
         }
 
@@ -607,7 +627,35 @@ impl Project {
             .map(|a| a.addr)
             .collect();
         for (seg_idx, ofs) in data_addrs {
-            let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+            let label = format!("data_{:05x}", label_addr(seg_idx, ofs)).into();
+            Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
+        }
+
+        // Collect all ofs16 targets (direct or inside composites) and label them.
+        let ofs16_info: Vec<(usize, u32, DataType, Option<usize>)> = self
+            .attrs
+            .values()
+            .filter_map(|attr| {
+                if let Some(AttrType::Data(ref d)) = attr.r#type {
+                    Some((attr.addr.0, attr.addr.1, d.clone(), attr.ofs_seg))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut ofs16_targets: Vec<(usize, u32)> = Vec::new();
+        for (seg_idx, ofs, data_type, fallback_seg) in &ofs16_info {
+            let bytes = self.bytes_at_seg(*seg_idx, *ofs);
+            collect_ofs16_targets(
+                data_type,
+                bytes,
+                &self.structs,
+                *fallback_seg,
+                &mut ofs16_targets,
+            );
+        }
+        for (seg_idx, ofs) in ofs16_targets {
+            let label = format!("data_{:05x}", label_addr(seg_idx, ofs)).into();
             Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
         }
     }
@@ -624,7 +672,7 @@ impl Project {
         attrs: &mut BTreeMap<(SegmentIdx, u32), Attr>,
         seg_idx: SegmentIdx,
         ofs: u32,
-        label: String,
+        label: SmallString,
     ) {
         let key = (seg_idx, ofs);
         let existing = attrs.get(&key);
@@ -648,80 +696,46 @@ impl Project {
         let target = seg as u32 * 16;
         self.segments.iter().position(|s| s.start == Some(target))
     }
+}
 
-    pub fn type_byte_size(&self, t: &AttrType) -> usize {
-        t.byte_size(&self.structs)
+// ── Symbol lookup ─────────────────────────────────────────────────────────────
+
+pub struct ProjectLookup<'a> {
+    pub project: &'a Project,
+    pub sreg_map: crate::SRegMap,
+    pub register_file: Option<crate::RegisterFile>,
+    pub default_seg: Option<usize>,
+}
+
+impl crate::SymbolLookup for ProjectLookup<'_> {
+    fn lookup_direct(&self, seg: u16, ofs: u16, _width: crate::DataWidth) -> Option<&str> {
+        let idx = self.project.segment_index_for(seg)?;
+        self.project.name_at(idx, ofs as u32)
     }
 
-    pub fn flatten_struct(
+    fn lookup_indirect(
         &self,
-        struct_idx: usize,
-        prefix: &str,
-        base_offset: usize,
-    ) -> Vec<FlatField> {
-        let def = &self.structs[struct_idx];
-        let mut result = Vec::new();
-        let mut field_offset = 0;
+        seg: crate::SReg,
+        base: Option<crate::BaseReg>,
+        index: Option<crate::IndexReg>,
+        disp: u16,
+        width: crate::DataWidth,
+    ) -> Option<&str> {
+        let rf = self.register_file.as_ref();
+        let base_val = base.and_then(|b| rf.map(|rf| rf.get_base_reg(b))).unwrap_or(0);
+        let idx_val = index.and_then(|i| rf.map(|rf| rf.get_index_reg(i))).unwrap_or(0);
+        let ofs = base_val.wrapping_add(idx_val).wrapping_add(disp);
 
-        for field in &def.fields {
-            match &field.r#type {
-                DataType::Scalar(scalar) => {
-                    let size = scalar.byte_size();
-                    result.push(FlatField {
-                        name: format!("{}{}", prefix, field.name),
-                        r#type: scalar.clone(),
-                        offset: base_offset + field_offset,
-                    });
-                    field_offset += size;
-                }
-                DataType::Composite(CompositeDataType::Struct(inner_idx)) => {
-                    let inner_idx = *inner_idx;
-                    let struct_size = field.r#type.byte_size(&self.structs);
-                    let mut sub = self.flatten_struct(
-                        inner_idx,
-                        &format!("{}{}.", prefix, field.name),
-                        base_offset + field_offset,
-                    );
-                    result.append(&mut sub);
-                    field_offset += struct_size;
-                }
-                DataType::Composite(CompositeDataType::Array { elem, count }) => {
-                    let count = *count;
-                    let elem_size = elem.byte_size(&self.structs);
-                    match elem.as_ref() {
-                        DataType::Scalar(scalar) => {
-                            let elem_size = scalar.byte_size();
-                            for i in 0..count {
-                                result.push(FlatField {
-                                    name: format!("{}{}[{}]", prefix, field.name, i),
-                                    r#type: scalar.clone(),
-                                    offset: base_offset + field_offset + i * elem_size,
-                                });
-                            }
-                            field_offset += count * elem_size;
-                        }
-                        DataType::Composite(CompositeDataType::Struct(inner_idx)) => {
-                            let inner_idx = *inner_idx;
-                            let struct_size = elem_size;
-                            for i in 0..count {
-                                let mut sub = self.flatten_struct(
-                                    inner_idx,
-                                    &format!("{}{}[{}].", prefix, field.name, i),
-                                    base_offset + field_offset + i * struct_size,
-                                );
-                                result.append(&mut sub);
-                            }
-                            field_offset += count * struct_size;
-                        }
-                        DataType::Composite(CompositeDataType::Array { .. }) => {
-                            field_offset += elem_size * count;
-                        }
-                    }
-                }
-            }
+        if let Some(seg_idx) = self.sreg_map.get(seg) {
+            return self.project.name_at(seg_idx, ofs as u32);
         }
 
-        result
+        let seg_val = rf?.get_sreg(seg);
+        self.lookup_direct(seg_val, ofs, width)
+    }
+
+    fn lookup_offset(&self, ofs: u16) -> Option<&str> {
+        self.project.name_at(self.default_seg?, ofs as u32)
     }
 }
 
@@ -751,7 +765,7 @@ fn make_segments(exe: &ExeMz) -> Vec<Segment> {
             let start = seg as u32 * 16;
             let end = segs.get(i + 1).map_or(image_size, |&s| s as u32 * 16);
             Segment {
-                name: format!("seg{i:03}"),
+                name: format!("seg{i:03}").into(),
                 r#type: None,
                 start: Some(start),
                 end: Some(end),
@@ -768,6 +782,47 @@ fn fmt_u32(v: u32) -> String {
         "0".to_string()
     } else {
         format!("0x{:x}", v)
+    }
+}
+
+// ── Ofs16 target collection ───────────────────────────────────────────────────
+
+fn collect_ofs16_targets(
+    data_type: &DataType,
+    bytes: &[u8],
+    structs: &Structs,
+    fallback_seg: Option<usize>,
+    targets: &mut Vec<(usize, u32)>,
+) {
+    match data_type {
+        DataType::Scalar(scalar) => {
+            let seg = match scalar {
+                ScalarDataType::Ofs16(seg_opt) => seg_opt.or(fallback_seg),
+                ScalarDataType::U16 => fallback_seg,
+                _ => None,
+            };
+            if let Some(seg_idx) = seg {
+                let lo = bytes.first().copied().unwrap_or(0) as u32;
+                let hi = bytes.get(1).copied().unwrap_or(0) as u32;
+                targets.push((seg_idx, lo | (hi << 8)));
+            }
+        }
+        DataType::Composite(CompositeDataType::Struct(idx)) => {
+            let mut cursor = 0usize;
+            for f in &structs[*idx].fields {
+                let field_bytes = bytes.get(cursor..).unwrap_or(&[]);
+                collect_ofs16_targets(&f.r#type, field_bytes, structs, None, targets);
+                cursor += f.r#type.byte_size(field_bytes, structs);
+            }
+        }
+        DataType::Composite(CompositeDataType::Array { elem, count }) => {
+            let mut cursor = 0usize;
+            for _ in 0..*count {
+                let elem_bytes = bytes.get(cursor..).unwrap_or(&[]);
+                collect_ofs16_targets(elem, elem_bytes, structs, None, targets);
+                cursor += elem.byte_size(elem_bytes, structs);
+            }
+        }
     }
 }
 
@@ -810,11 +865,11 @@ fn parse_u32(s: &str) -> Result<u32, String> {
 // ── Binary dict parsing ───────────────────────────────────────────────────────
 
 struct UnresolvedBinaryDef {
-    name: String,
+    name: SmallString,
     format: Option<BinaryFormat>,
     path: String,
     hash: Option<Hash>,
-    load_str: Option<String>,
+    load_str: Option<SmallString>,
 }
 
 fn parse_binary_def(dict: &Dict) -> Result<UnresolvedBinaryDef, String> {
@@ -833,7 +888,7 @@ fn parse_binary_def(dict: &Dict) -> Result<UnresolvedBinaryDef, String> {
                 "format" => format = Some(BinaryFormat::from_str(value.trim())?),
                 "path" => path = value.trim().to_owned(),
                 "hash" => hash = Some(parse_hash(value.trim())?),
-                "load" => load_str = Some(value.trim().to_owned()),
+                "load" => load_str = Some(value.trim().into()),
                 _ => return Err(format!("unknown key '{}' in binary '{}'", key, name)),
             }
         }
@@ -941,7 +996,7 @@ fn parse_segment(dict: &Dict) -> Result<Segment, String> {
 
 // ── Struct dict parsing ───────────────────────────────────────────────────────
 
-fn parse_struct(dict: &Dict) -> Result<(String, UnresolvedStructDef), String> {
+fn parse_struct(dict: &Dict) -> Result<(SmallString, UnresolvedStructDef), String> {
     let name = dict.key.clone();
     if name.is_empty() {
         return Err("struct name cannot be empty".to_string());
@@ -983,7 +1038,7 @@ fn parse_attr_type(s: &str) -> Result<UnresolvedAttrType, ()> {
             count,
         });
     }
-    if let Some(inner) = s.strip_prefix("char[").and_then(|s| s.strip_suffix(']')) {
+    if let Some(inner) = s.strip_prefix("char(").and_then(|s| s.strip_suffix(')')) {
         let n = inner.trim().parse::<usize>().map_err(|_| ())?;
         return Ok(UnresolvedAttrType::Char(n));
     }
@@ -998,6 +1053,7 @@ fn parse_attr_type(s: &str) -> Result<UnresolvedAttrType, ()> {
         "u8" => Ok(UnresolvedAttrType::U8),
         "u16" => Ok(UnresolvedAttrType::U16),
         "u32" => Ok(UnresolvedAttrType::U32),
+        "cstr" => Ok(UnresolvedAttrType::CStr),
         _ => {
             if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 Ok(UnresolvedAttrType::Struct(s.to_owned()))
@@ -1009,7 +1065,7 @@ fn parse_attr_type(s: &str) -> Result<UnresolvedAttrType, ()> {
 }
 
 fn validate_no_struct_cycles(
-    structs: &BTreeMap<String, UnresolvedStructDef>,
+    structs: &BTreeMap<SmallString, UnresolvedStructDef>,
 ) -> Result<(), String> {
     for name in structs.keys() {
         check_struct_for_cycle(name, structs, &mut Vec::new())?;
@@ -1019,7 +1075,7 @@ fn validate_no_struct_cycles(
 
 fn check_struct_for_cycle(
     name: &str,
-    structs: &BTreeMap<String, UnresolvedStructDef>,
+    structs: &BTreeMap<SmallString, UnresolvedStructDef>,
     path: &mut Vec<String>,
 ) -> Result<(), String> {
     if let Some(pos) = path.iter().position(|n| n == name) {
@@ -1040,7 +1096,7 @@ fn check_struct_for_cycle(
 
 fn check_attr_type_for_cycle(
     t: &UnresolvedAttrType,
-    structs: &BTreeMap<String, UnresolvedStructDef>,
+    structs: &BTreeMap<SmallString, UnresolvedStructDef>,
     path: &mut Vec<String>,
 ) -> Result<(), String> {
     match t {
@@ -1053,7 +1109,7 @@ fn check_attr_type_for_cycle(
 fn resolve_data_type(
     t: &UnresolvedAttrType,
     segments: &[Segment],
-    struct_names: &[String],
+    struct_names: &[SmallString],
 ) -> Result<DataType, String> {
     match t {
         UnresolvedAttrType::Code => Err("'code' is not valid as an embedded type".to_owned()),
@@ -1061,6 +1117,7 @@ fn resolve_data_type(
         UnresolvedAttrType::U16 => Ok(DataType::Scalar(ScalarDataType::U16)),
         UnresolvedAttrType::U32 => Ok(DataType::Scalar(ScalarDataType::U32)),
         UnresolvedAttrType::Char(n) => Ok(DataType::Scalar(ScalarDataType::Char(*n))),
+        UnresolvedAttrType::CStr => Ok(DataType::Scalar(ScalarDataType::CStr)),
         UnresolvedAttrType::Ofs16(None) => Ok(DataType::Scalar(ScalarDataType::Ofs16(None))),
         UnresolvedAttrType::Ofs16(Some(seg_name)) => {
             let idx = segments
@@ -1089,7 +1146,7 @@ fn resolve_data_type(
 fn resolve_attr_type(
     t: &UnresolvedAttrType,
     segments: &[Segment],
-    struct_names: &[String],
+    struct_names: &[SmallString],
 ) -> Result<AttrType, String> {
     match t {
         UnresolvedAttrType::Code => Ok(AttrType::Code),
@@ -1102,10 +1159,10 @@ fn resolve_attr_type(
 }
 
 fn resolve_structs(
-    unresolved: BTreeMap<String, UnresolvedStructDef>,
+    unresolved: BTreeMap<SmallString, UnresolvedStructDef>,
     segments: &[Segment],
 ) -> Result<Vec<StructDef>, String> {
-    let struct_names: Vec<String> = unresolved.keys().cloned().collect();
+    let struct_names: Vec<SmallString> = unresolved.keys().cloned().collect();
 
     unresolved
         .into_values()
@@ -1131,10 +1188,14 @@ fn resolve_structs(
 
 // ── Attr dict parsing ─────────────────────────────────────────────────────────
 
-fn parse_attr(dict: &Dict, segments: &[Segment], struct_names: &[String]) -> Result<Attr, String> {
+fn parse_attr(
+    dict: &Dict,
+    segments: &[Segment],
+    struct_names: &[SmallString],
+) -> Result<Attr, String> {
     let addr = parse_addr(&dict.key, segments)?;
     let mut r#type: Option<AttrType> = None;
-    let mut name: Option<String> = None;
+    let mut name: Option<SmallString> = None;
     let mut ofs_seg: Option<SegmentIdx> = None;
     let mut comment: Option<String> = None;
 
@@ -1160,7 +1221,7 @@ fn parse_attr(dict: &Dict, segments: &[Segment], struct_names: &[String]) -> Res
                         })?;
                     ofs_seg = Some(idx);
                 }
-                "comment" => comment = Some(value.clone()),
+                "comment" => comment = Some(value.to_string()),
                 _ => return Err(format!("unknown key '{}' in attr '{}'", key, dict.key)),
             }
         }

@@ -1,4 +1,4 @@
-use crate::parser::Token;
+use crate::{SmallString, parser::Token};
 
 /// A DREAMM document containing top-level dictionaries
 #[derive(Debug, Clone, PartialEq)]
@@ -9,15 +9,18 @@ pub struct Document {
 /// A dictionary block with name, key, and ordered contents
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dict {
-    pub name: String,
-    pub key: String,
+    pub name: SmallString,
+    pub key: SmallString,
     pub items: Vec<Item>,
 }
 
 /// An item within a dictionary - either a property or nested dict
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
-    Property { key: String, value: String },
+    Property {
+        key: SmallString,
+        value: SmallString,
+    },
     Dict(Dict),
 }
 

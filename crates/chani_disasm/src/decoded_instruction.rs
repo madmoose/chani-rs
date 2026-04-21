@@ -266,10 +266,49 @@ impl DecodedInstruction {
     }
 }
 
+pub trait SymbolLookup {
+    /// For `MemRef::Direct { seg, ofs, width }`.
+    fn lookup_direct(&self, seg: u16, ofs: u16, width: DataWidth) -> Option<&str>;
+
+    /// For `MemRef::Indirect { seg, base, index, disp, width }`.
+    /// Resolves base/index registers and the segment register internally.
+    fn lookup_indirect(
+        &self,
+        seg: SReg,
+        base: Option<BaseReg>,
+        index: Option<IndexReg>,
+        disp: u16,
+        width: DataWidth,
+    ) -> Option<&str>;
+
+    /// For `Imm8`/`Imm16` — resolves using a pre-configured default segment.
+    fn lookup_offset(&self, ofs: u16) -> Option<&str>;
+}
+
 pub struct DisplayContext<'a> {
-    pub lookup: &'a dyn Fn(u16, u16) -> Option<&'a str>,
-    pub register_file: Option<RegisterFile>,
-    pub ofs_seg: Option<u16>,
+    pub lookup: &'a dyn SymbolLookup,
+}
+
+/// Static mapping from segment registers to known project segment indices.
+/// Used by [`ProjectLookup`] to resolve segment registers without a runtime
+/// register file. Fields are `None` when the mapping is unknown.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SRegMap {
+    pub es: Option<usize>,
+    pub cs: Option<usize>,
+    pub ss: Option<usize>,
+    pub ds: Option<usize>,
+}
+
+impl SRegMap {
+    pub fn get(&self, r: SReg) -> Option<usize> {
+        match r {
+            SReg::ES => self.es,
+            SReg::CS => self.cs,
+            SReg::SS => self.ss,
+            SReg::DS => self.ds,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -359,27 +398,14 @@ impl DecodedInstruction {
         if is_mem_ref_arg(self.arg_type[i], self.modrm)
             && let Some(mem_ref) = self.mem_ref()
         {
-            let resolved = match mem_ref {
-                MemRef::Direct { seg, ofs, width: _ } => Some((seg, ofs)),
-                MemRef::Indirect {
-                    seg,
-                    base,
-                    index,
-                    disp,
-                    width: _,
-                } => ctx.register_file.as_ref().map(|rf| {
-                    let seg = rf.get_sreg(seg);
-                    let base = base.map(|b| rf.get_base_reg(b)).unwrap_or(0);
-                    let index = index.map(|i| rf.get_index_reg(i)).unwrap_or(0);
-                    let ofs = base.wrapping_add(index).wrapping_add(disp);
-                    (seg, ofs)
-                }),
-            };
-
-            if let Some((seg, ofs)) = resolved {
-                if let Some(name) = (ctx.lookup)(seg, ofs) {
-                    return write!(w, "{}", name);
+            let name = match mem_ref {
+                MemRef::Direct { seg, ofs, width } => ctx.lookup.lookup_direct(seg, ofs, width),
+                MemRef::Indirect { seg, base, index, disp, width } => {
+                    ctx.lookup.lookup_indirect(seg, base, index, disp, width)
                 }
+            };
+            if let Some(name) = name {
+                return write!(w, "{name}");
             }
         }
 
@@ -424,10 +450,8 @@ impl DecodedInstruction {
                 write!(w, "{}", s[reg as usize])?;
             }
             ArgType::Imm8 | ArgType::Imm16 => {
-                if let Some(seg) = ctx.ofs_seg {
-                    if let Some(name) = (ctx.lookup)(seg, self.imm[i] as u16) {
-                        return write!(w, "{name}");
-                    }
+                if let Some(name) = ctx.lookup.lookup_offset(self.imm[i] as u16) {
+                    return write!(w, "{name}");
                 }
                 write_imm(w, self.imm[i])?;
             }
@@ -439,7 +463,7 @@ impl DecodedInstruction {
                     .wrapping_add(inc);
                 let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
                 if in_cs {
-                    if let Some(name) = (ctx.lookup)(self.op_seg, ofs) {
+                    if let Some(name) = ctx.lookup.lookup_direct(self.op_seg, ofs, DataWidth::Word) {
                         return write!(w, "{name}");
                     }
                 }
@@ -453,13 +477,24 @@ impl DecodedInstruction {
                     .wrapping_add(inc);
                 let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
                 if in_cs {
-                    if let Some(name) = (ctx.lookup)(self.op_seg, ofs) {
+                    if let Some(name) = ctx.lookup.lookup_direct(self.op_seg, ofs, DataWidth::Word) {
                         return write!(w, "{name}");
                     }
                 }
                 write_imm(w, ofs as u32)?;
             }
             ArgType::IMem8 | ArgType::IMem16 => {
+                let seg = self.seg_ovr.unwrap_or(SReg::DS);
+                let width = if matches!(self.arg_type[i], ArgType::IMem8) {
+                    DataWidth::Byte
+                } else {
+                    DataWidth::Word
+                };
+                if let Some(name) =
+                    ctx.lookup.lookup_indirect(seg, None, None, self.imm[i] as u16, width)
+                {
+                    return write!(w, "{name}");
+                }
                 if let Some(ovr) = self.seg_ovr {
                     write!(w, "{ovr}:")?;
                 }
@@ -594,8 +629,6 @@ impl DecodedInstruction {
                     f,
                     DisplayContext {
                         lookup: self.ctx.lookup,
-                        register_file: self.ctx.register_file,
-                        ofs_seg: self.ctx.ofs_seg,
                     },
                 )
             }
@@ -605,15 +638,29 @@ impl DecodedInstruction {
     }
 }
 
+struct NullLookup;
+
+impl SymbolLookup for NullLookup {
+    fn lookup_direct(&self, _seg: u16, _ofs: u16, _width: DataWidth) -> Option<&str> {
+        None
+    }
+    fn lookup_indirect(
+        &self,
+        _seg: SReg,
+        _base: Option<BaseReg>,
+        _index: Option<IndexReg>,
+        _disp: u16,
+        _width: DataWidth,
+    ) -> Option<&str> {
+        None
+    }
+    fn lookup_offset(&self, _ofs: u16) -> Option<&str> {
+        None
+    }
+}
+
 impl Display for DecodedInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.format(
-            f,
-            DisplayContext {
-                lookup: &|_, _| None,
-                register_file: None,
-                ofs_seg: None,
-            },
-        )
+        self.format(f, DisplayContext { lookup: &NullLookup })
     }
 }

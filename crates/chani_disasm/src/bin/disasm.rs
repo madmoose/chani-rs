@@ -1,12 +1,12 @@
 use std::{
     collections::BTreeMap,
-    io::{self, Write},
+    io::{self, Write, stdout},
     path::Path,
 };
 
 use chani_disasm::{
-    DisplayContext,
-    layout::{LayoutBuilder, Widgets, render_widgets},
+    DisplayContext, SRegMap,
+    layout::{LayoutBuilder, Widget, Widgets, render_widgets},
     project::Project,
 };
 
@@ -39,39 +39,58 @@ fn main() {
     project.disassemble();
     project.generate_auto_labels();
 
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
-    if let Err(e) = print_listing(&project, &mut stdout)
-        && e.kind() != io::ErrorKind::BrokenPipe
-    {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
+    let listing = build_listing(&project);
+
+    // let mut stdout = io::BufWriter::new(io::stdout().lock());
+    // if let Err(e) = print_listing(&listing, &mut stdout)
+    //     && e.kind() != io::ErrorKind::BrokenPipe
+    // {
+    //     eprintln!("error: {e}");
+    //     std::process::exit(1);
+    // }
 }
 
-fn print_listing(project: &Project, w: &mut impl Write) -> io::Result<()> {
-    let mut listing = BTreeMap::<(usize, u32), Widgets>::new();
+type Listing = BTreeMap<(usize, u32), Vec<Widget>>;
+
+fn build_listing(project: &Project) -> Listing {
+    let mut listing: Listing = BTreeMap::<(usize, u32), Widgets>::new();
 
     for seg_idx in 0..project.segments.len() {
         let seg = &project.segments[seg_idx];
         let seg_start = seg.start.unwrap_or(0);
         let seg_end = seg.end.unwrap_or(0);
 
-        let ctx = DisplayContext {
-            lookup: &|sv, mem_ofs| {
-                let si = project.segment_index_for(sv)?;
-                project.name_at(si, mem_ofs as u32)
+        let lookup = chani_disasm::project::ProjectLookup {
+            project,
+            sreg_map: SRegMap {
+                cs: Some(seg_idx),
+                ..Default::default()
             },
             register_file: None,
-            ofs_seg: None,
+            default_seg: None,
         };
+        let ctx = DisplayContext { lookup: &lookup };
 
-        let mut ofs = 0;
-        let seg_len = seg_end - seg_start;
-        while ofs < seg_len {
+        let mut ofs = seg_start;
+        while ofs < seg_end {
+            println!("\n===================\n");
             let mut layout_builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
 
             layout_builder.layout();
-            listing.insert((seg_idx, ofs), layout_builder.widgets());
+            let widgets = layout_builder.widgets();
+
+            {
+                let mut stdout = stdout().lock();
+                let mut buf = String::with_capacity(120);
+                let lines = widgets.iter().map(|w| w.y).max().unwrap_or_default() + 1;
+                for y in 0..lines {
+                    buf.clear();
+                    render_widgets(&widgets, &mut buf, y);
+                    let _ = writeln!(stdout, "{buf}");
+                }
+            }
+
+            listing.insert((seg_idx, ofs), widgets);
 
             let Some(next_ofs) = project.segments[seg_idx].addr_attributes.next(ofs) else {
                 break;
@@ -80,6 +99,10 @@ fn print_listing(project: &Project, w: &mut impl Write) -> io::Result<()> {
         }
     }
 
+    listing
+}
+
+fn print_listing(listing: &Listing, w: &mut impl Write) -> io::Result<()> {
     let mut buf = String::with_capacity(120);
     for widgets in listing.values() {
         let lines = widgets.iter().map(|w| w.y).max().unwrap_or_default() + 1;

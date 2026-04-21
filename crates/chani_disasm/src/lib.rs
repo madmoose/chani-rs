@@ -12,7 +12,7 @@ pub mod work_queue;
 
 use std::fmt::Display;
 
-pub use decoded_instruction::{DecodedInstruction, DisplayContext, RegisterFile};
+pub use decoded_instruction::{DecodedInstruction, DisplayContext, RegisterFile, SRegMap, SymbolLookup};
 pub use disassemble::decode;
 pub use memory_reference::*;
 pub use opcode_table::Opcode;

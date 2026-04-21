@@ -8,11 +8,21 @@ use nom::{
     sequence::{delimited, pair, preceded},
 };
 
+use crate::SmallString;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    DictStart { name: String, key: String },
-    DictEnd { name: String },
-    KeyValue { key: String, value: String },
+    DictStart {
+        name: SmallString,
+        key: SmallString,
+    },
+    DictEnd {
+        name: SmallString,
+    },
+    KeyValue {
+        key: SmallString,
+        value: SmallString,
+    },
 }
 
 fn ws(i: &str) -> IResult<&str, &str> {
@@ -87,8 +97,8 @@ fn key_value(i: &str) -> IResult<&str, Token> {
     Ok((
         i,
         Token::KeyValue {
-            key: key.to_string(),
-            value: val.to_string(),
+            key: key.into(),
+            value: val.into(),
         },
     ))
 }
@@ -118,9 +128,7 @@ fn dict_body<'a>(name: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
         // Check for end keyword
         if let Ok((rest, _)) = end_keyword(input) {
             let (rest, _) = skip_blanks(rest)?;
-            tokens.push(Token::DictEnd {
-                name: name.to_string(),
-            });
+            tokens.push(Token::DictEnd { name: name.into() });
             return Ok((rest, tokens));
         }
 
@@ -170,8 +178,8 @@ fn dict_block(i: &str) -> IResult<&str, Vec<Token>> {
         // Multi-line: colon followed by newline
         let (i, _) = alt((line_ending, eof)).parse(i)?;
         let mut tokens = vec![Token::DictStart {
-            name: name.to_string(),
-            key: key.to_string(),
+            name: name.into(),
+            key: key.into(),
         }];
         let (i, body) = dict_body(name, i)?;
         tokens.extend(body);
@@ -181,13 +189,11 @@ fn dict_block(i: &str) -> IResult<&str, Vec<Token>> {
         let (i, pairs) = single_line_pairs(i)?;
         let (i, _) = skip_blanks(i)?;
         let mut tokens = vec![Token::DictStart {
-            name: name.to_string(),
-            key: key.to_string(),
+            name: name.into(),
+            key: key.into(),
         }];
         tokens.extend(pairs);
-        tokens.push(Token::DictEnd {
-            name: name.to_string(),
-        });
+        tokens.push(Token::DictEnd { name: name.into() });
         Ok((i, tokens))
     }
 }

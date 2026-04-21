@@ -5,10 +5,14 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ScalarDataType {
+    Unknown,
     U8,
     U16,
     U32,
+    /// Fixed-length character buffer of `n` bytes.
     Char(usize),
+    /// Null-terminated C string; byte size is variable (0 is returned as a sentinel).
+    CStr,
     Ofs16(Option<usize>),
 }
 
@@ -44,10 +48,10 @@ impl DataType {
         }
     }
 
-    pub fn byte_size(&self, structs: &Structs) -> usize {
+    pub fn byte_size(&self, bytes: &[u8], structs: &Structs) -> usize {
         match self {
-            DataType::Scalar(s) => s.byte_size(),
-            DataType::Composite(c) => c.byte_size(structs),
+            DataType::Scalar(s) => s.byte_size(bytes),
+            DataType::Composite(c) => c.byte_size(bytes, structs),
         }
     }
 
@@ -104,21 +108,29 @@ impl DataType {
 impl ScalarDataType {
     pub fn type_str(&self, segments: &[Segment]) -> String {
         match self {
+            ScalarDataType::Unknown => "unknown".to_owned(),
             ScalarDataType::U8 => "u8".to_owned(),
             ScalarDataType::U16 => "u16".to_owned(),
             ScalarDataType::U32 => "u32".to_owned(),
             ScalarDataType::Char(n) => format!("char[{n}]"),
             ScalarDataType::Ofs16(None) => "ofs16".to_owned(),
             ScalarDataType::Ofs16(Some(idx)) => format!("ofs16({})", segments[*idx].name),
+            ScalarDataType::CStr => "cstr".to_owned(),
         }
     }
 
-    pub fn byte_size(&self) -> usize {
+    pub fn byte_size(&self, bytes: &[u8]) -> usize {
         match self {
+            ScalarDataType::Unknown => 1,
             ScalarDataType::U8 => 1,
             ScalarDataType::U16 | ScalarDataType::Ofs16(_) => 2,
             ScalarDataType::U32 => 4,
             ScalarDataType::Char(n) => *n,
+            ScalarDataType::CStr => bytes
+                .iter()
+                .position(|&b| b == 0)
+                .map(|n| n + 1)
+                .unwrap_or(bytes.len()),
         }
     }
 }
@@ -133,14 +145,24 @@ impl CompositeDataType {
         }
     }
 
-    pub fn byte_size(&self, structs: &Structs) -> usize {
+    pub fn byte_size(&self, bytes: &[u8], structs: &Structs) -> usize {
         match self {
-            CompositeDataType::Struct(idx) => structs[*idx]
-                .fields
-                .iter()
-                .map(|f| f.r#type.byte_size(structs))
-                .sum(),
-            CompositeDataType::Array { elem, count } => elem.byte_size(structs) * count,
+            CompositeDataType::Struct(idx) => {
+                let mut cursor = 0usize;
+                for f in &structs[*idx].fields {
+                    cursor += f
+                        .r#type
+                        .byte_size(bytes.get(cursor..).unwrap_or(&[]), structs);
+                }
+                cursor
+            }
+            CompositeDataType::Array { elem, count } => {
+                let mut cursor = 0usize;
+                for _ in 0..*count {
+                    cursor += elem.byte_size(bytes.get(cursor..).unwrap_or(&[]), structs);
+                }
+                cursor
+            }
         }
     }
 }
