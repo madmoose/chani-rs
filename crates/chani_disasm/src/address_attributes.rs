@@ -4,6 +4,7 @@ const ATTR_DATA: u8 = 4; // Marked as data
 const ATTR_DATA_CONT: u8 = 8; // Continuation bytes of data
 const ATTR_FLOW: u8 = 16; // The immediately preceding decoded instruction does not stop control flow
 const ATTR_OP_STOPS_FLOW: u8 = 32; // This instruction stops control flow (ret, jmp, hlt, etc.)
+const ATTR_BLOCK_START: u8 = 64; // First instruction of a basic block
 
 #[derive(Debug, Clone, Default)]
 pub struct AddressAttributes {
@@ -159,5 +160,20 @@ impl AddressAttributes {
     pub fn is_data(&self, ofs: u32) -> bool {
         self.idx(ofs)
             .map_or(false, |i| self.attrs[i] & (ATTR_DATA | ATTR_DATA_CONT) != 0)
+    }
+
+    pub fn mark_as_block_start(&mut self, ofs: u32) {
+        if let Some(i) = self.idx(ofs) {
+            self.attrs[i] |= ATTR_BLOCK_START;
+        }
+    }
+
+    pub fn is_block_start(&self, ofs: u32) -> bool {
+        self.idx(ofs)
+            .map_or(false, |i| self.attrs[i] & ATTR_BLOCK_START != 0)
+    }
+
+    pub fn base(&self) -> u32 {
+        self.base
     }
 }

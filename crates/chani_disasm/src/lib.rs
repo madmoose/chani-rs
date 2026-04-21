@@ -1,4 +1,5 @@
 pub mod address_attributes;
+pub mod basic_block;
 pub mod branch_map;
 pub mod data_type;
 mod decoded_instruction;

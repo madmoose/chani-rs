@@ -5,10 +5,11 @@ use std::{collections::BTreeMap, fs};
 use chani_datafile::ast::{self, Dict, Document, Item};
 use chani_datafile::parser;
 
+use crate::basic_block::{BasicBlock, BasicBlockMap};
 use crate::branch_map::BranchMap;
 use crate::data_type::{CompositeDataType, DataType, ScalarDataType, StructDef, StructField};
 use crate::work_queue::WorkQueue;
-use crate::{SmallString, decode};
+use crate::{SmallString, SymbolLookup, decode};
 use crate::{address_attributes::AddressAttributes, exe_mz::ExeMz};
 
 #[derive(Debug, Clone)]
@@ -91,6 +92,7 @@ pub struct Project {
     pub exe: Option<ExeMz>,
     pub images: Vec<BinImage>,
     pub branches: BranchMap,
+    pub blocks: BasicBlockMap,
 }
 
 #[allow(unused)]
@@ -279,6 +281,7 @@ impl Project {
             exe: Some(exe),
             images: Vec::new(),
             branches: BranchMap::new(),
+            blocks: BasicBlockMap::new(),
         })
     }
 
@@ -368,6 +371,7 @@ impl Project {
             exe: Default::default(),
             images: Vec::new(),
             branches: BranchMap::new(),
+            blocks: BasicBlockMap::new(),
         })
     }
 
@@ -476,6 +480,13 @@ impl Project {
         writeln!(w, "end")
     }
 
+    pub fn analyze(&mut self) {
+        self.mark_data_attributes();
+        self.disassemble();
+        self.build_basic_blocks();
+        self.generate_auto_labels();
+    }
+
     /// Mark all data-typed attributes in `addr_attributes` with their byte extents.
     pub fn mark_data_attributes(&mut self) {
         // Phase 1: collect (seg_idx, ofs, DataType) — clone to release the attrs borrow.
@@ -515,34 +526,38 @@ impl Project {
         let mut queue: WorkQueue<(usize, u32)> = WorkQueue::new();
         let mut branches = BranchMap::new();
 
-        // Seed from EXE entry point (no-op when no EXE binary is loaded).
+        // Collect all entry seeds before touching addr_attributes (avoids borrow conflicts).
+        let mut seeds: Vec<(usize, u32)> = Vec::new();
+
         if let Some(exe) = &self.exe {
             if let Some(seg_idx) = self.segment_index_for(exe.head.cs) {
-                queue.push((seg_idx, exe.head.ip as u32));
+                seeds.push((seg_idx, exe.head.ip as u32));
             }
         }
 
-        // Seed com images from their load offset (entry point is always load_offset + 0x100).
         for img in &self.images {
             let bin_def = self
                 .binaries
                 .iter()
                 .find(|b| b.load.map_or(false, |(si, _)| si == img.seg_idx));
             if matches!(bin_def.map(|b| &b.format), Some(BinaryFormat::Com)) {
-                queue.push((img.seg_idx, img.load_offset + 0x100));
+                seeds.push((img.seg_idx, img.load_offset + 0x100));
             }
         }
 
-        // Seed every address explicitly marked as code in the project file.
         let code_seeds: Vec<(usize, u32)> = self
             .attrs
             .values()
             .filter(|a| a.r#type == Some(AttrType::Code))
             .map(|a| a.addr)
             .collect();
+        seeds.extend(code_seeds);
 
-        for addr in code_seeds {
+        for addr in seeds {
             queue.push(addr);
+            self.segments[addr.0]
+                .addr_attributes
+                .mark_as_block_start(addr.1);
         }
 
         while let Some((seg_idx, ofs)) = queue.pop() {
@@ -572,7 +587,17 @@ impl Project {
                         if let Some(dst_idx) = self.segment_index_for(dst_seg) {
                             branches.add((seg_idx, cur_ofs), (dst_idx, dst_ofs as u32));
                             queue.push((dst_idx, dst_ofs as u32));
+                            self.segments[dst_idx]
+                                .addr_attributes
+                                .mark_as_block_start(dst_ofs as u32);
                         }
+                    }
+                    if !inst.stops_control_flow() {
+                        // Fall-through of a conditional branch / call is a new block start.
+                        let fall_through = cur_ofs.wrapping_add(len);
+                        self.segments[seg_idx]
+                            .addr_attributes
+                            .mark_as_block_start(fall_through);
                     }
                 }
 
@@ -588,6 +613,133 @@ impl Project {
         }
 
         self.branches = branches;
+    }
+
+    /// Build the basic block map from the results of `disassemble()`.
+    /// Must be called after `disassemble()`.
+    pub fn build_basic_blocks(&mut self) {
+        struct PendingBlock {
+            seg_idx: usize,
+            start: u32,
+            end: u32,
+            last_instr: u32,
+            has_fall_through: bool,
+        }
+
+        let mut pending: Vec<PendingBlock> = Vec::new();
+
+        for seg_idx in 0..self.segments.len() {
+            let attrs = &self.segments[seg_idx].addr_attributes;
+            let base = attrs.base();
+
+            let mut block_start: Option<u32> = None;
+            let mut last_instr: u32 = base;
+
+            let mut ofs_opt = if attrs.is_op(base) {
+                Some(base)
+            } else {
+                attrs.next(base)
+            };
+
+            while let Some(ofs) = ofs_opt {
+                let attrs = &self.segments[seg_idx].addr_attributes;
+
+                if !attrs.is_op(ofs) {
+                    // Hit data or unmarked — close any open block without fall-through.
+                    if let Some(start) = block_start.take() {
+                        let end = last_instr + attrs.op_len(last_instr);
+                        pending.push(PendingBlock {
+                            seg_idx,
+                            start,
+                            end,
+                            last_instr,
+                            has_fall_through: false,
+                        });
+                    }
+                    ofs_opt = attrs.next(ofs);
+                    continue;
+                }
+
+                if attrs.is_block_start(ofs) {
+                    if let Some(start) = block_start.take() {
+                        // Close previous block; fall-through continues to ofs.
+                        pending.push(PendingBlock {
+                            seg_idx,
+                            start,
+                            end: ofs,
+                            last_instr,
+                            has_fall_through: true,
+                        });
+                    }
+                    block_start = Some(ofs);
+                }
+
+                last_instr = ofs;
+
+                if attrs.stops_flow(ofs) {
+                    if let Some(start) = block_start.take() {
+                        let end = ofs + attrs.op_len(ofs);
+                        pending.push(PendingBlock {
+                            seg_idx,
+                            start,
+                            end,
+                            last_instr: ofs,
+                            has_fall_through: false,
+                        });
+                    }
+                }
+
+                ofs_opt = attrs.next(ofs);
+            }
+
+            // Close any block still open at segment end.
+            if let Some(start) = block_start {
+                let attrs = &self.segments[seg_idx].addr_attributes;
+                let end = last_instr + attrs.op_len(last_instr);
+                pending.push(PendingBlock {
+                    seg_idx,
+                    start,
+                    end,
+                    last_instr,
+                    has_fall_through: false,
+                });
+            }
+        }
+
+        // Build block entries with successors.
+        let mut map = BasicBlockMap::new();
+        for pb in &pending {
+            let last_addr = (pb.seg_idx, pb.last_instr);
+            let mut successors: smallvec::SmallVec<[(usize, u32); 2]> =
+                self.branches.targets(last_addr).collect();
+            if pb.has_fall_through {
+                successors.push((pb.seg_idx, pb.end));
+            }
+            map.insert(BasicBlock {
+                seg_idx: pb.seg_idx,
+                start: pb.start,
+                end: pb.end,
+                successors,
+                predecessors: Vec::new(),
+            });
+        }
+
+        // Invert successor edges to populate predecessors.
+        let edges: Vec<((usize, u32), (usize, u32))> = map
+            .blocks()
+            .flat_map(|b| {
+                let from = (b.seg_idx, b.start);
+                b.successors.iter().map(move |&to| (to, from))
+            })
+            .collect();
+
+        for (to, from) in edges {
+            if let Some(block) = map.block_at_mut(to.0, to.1) {
+                block.predecessors.push(from);
+            }
+        }
+
+        self.blocks = map;
     }
 
     /// Generate automatic labels for branch targets and typed-but-unnamed addresses.
@@ -707,7 +859,7 @@ pub struct ProjectLookup<'a> {
     pub default_seg: Option<usize>,
 }
 
-impl crate::SymbolLookup for ProjectLookup<'_> {
+impl SymbolLookup for ProjectLookup<'_> {
     fn lookup_direct(&self, seg: u16, ofs: u16, _width: crate::DataWidth) -> Option<&str> {
         let idx = self.project.segment_index_for(seg)?;
         self.project.name_at(idx, ofs as u32)
@@ -722,8 +874,12 @@ impl crate::SymbolLookup for ProjectLookup<'_> {
         width: crate::DataWidth,
     ) -> Option<&str> {
         let rf = self.register_file.as_ref();
-        let base_val = base.and_then(|b| rf.map(|rf| rf.get_base_reg(b))).unwrap_or(0);
-        let idx_val = index.and_then(|i| rf.map(|rf| rf.get_index_reg(i))).unwrap_or(0);
+        let base_val = base
+            .and_then(|b| rf.map(|rf| rf.get_base_reg(b)))
+            .unwrap_or(0);
+        let idx_val = index
+            .and_then(|i| rf.map(|rf| rf.get_index_reg(i)))
+            .unwrap_or(0);
         let ofs = base_val.wrapping_add(idx_val).wrapping_add(disp);
 
         if let Some(seg_idx) = self.sreg_map.get(seg) {
