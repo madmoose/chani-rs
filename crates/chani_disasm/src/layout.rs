@@ -428,12 +428,12 @@ pub fn render_widgets(widgets: &[Widget], buf: &mut String, y: u32) {
 }
 
 fn read_u8(bytes: &[u8]) -> u32 {
-    bytes.get(0).copied().unwrap_or_default() as u32
+    bytes.first().copied().unwrap_or_default() as u32
 }
 
 fn read_u16(bytes: &[u8]) -> u32 {
     let bytes = [
-        bytes.get(0).copied().unwrap_or_default(),
+        bytes.first().copied().unwrap_or_default(),
         bytes.get(1).copied().unwrap_or_default(),
     ];
     u16::from_le_bytes(bytes) as u32
@@ -441,7 +441,7 @@ fn read_u16(bytes: &[u8]) -> u32 {
 
 fn read_u32(bytes: &[u8]) -> u32 {
     let bytes = [
-        bytes.get(0).copied().unwrap_or_default(),
+        bytes.first().copied().unwrap_or_default(),
         bytes.get(1).copied().unwrap_or_default(),
         bytes.get(2).copied().unwrap_or_default(),
         bytes.get(3).copied().unwrap_or_default(),
@@ -479,7 +479,7 @@ fn format_string_value(bytes: &[u8], n: usize) -> SmallString {
     let mut s = SmallString::from("db '");
 
     for &b in slice {
-        if b >= 0x20 && b < 0x7f && b != b'\'' && b != b'\\' {
+        if (0x20..0x7f).contains(&b) && b != b'\'' && b != b'\\' {
             let _ = write!(s, "{}", b as char);
         } else if b == b'\\' {
             let _ = write!(s, "\\");

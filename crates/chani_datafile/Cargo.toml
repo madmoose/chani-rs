@@ -3,6 +3,9 @@ name = "chani_datafile"
 version = "0.0.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 nom.workspace = true
 smallstr.workspace = true

@@ -4,6 +4,9 @@ members = ["crates/*"]
 
 [workspace.lints.clippy]
 collapsible-if = "allow"
+collapsible-match = "allow"
+manual-is-multiple-of = "allow"
+new-without-default = "allow"
 
 [workspace.dependencies]
 bytes_ext = { path = "crates/bytes_ext" }

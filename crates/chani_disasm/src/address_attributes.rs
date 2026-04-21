@@ -87,13 +87,13 @@ impl AddressAttributes {
 
     pub fn stops_flow(&self, ofs: u32) -> bool {
         self.idx(ofs)
-            .map_or(false, |i| self.attrs[i] & ATTR_OP_STOPS_FLOW != 0)
+            .is_some_and(|i| self.attrs[i] & ATTR_OP_STOPS_FLOW != 0)
     }
 
     pub fn is_unmarked(&self, ofs: u32, len: u32) -> bool {
         (0..len).all(|k| {
             self.idx(ofs.wrapping_add(k))
-                .map_or(true, |i| self.attrs[i] == 0)
+                .is_none_or(|i| self.attrs[i] == 0)
         })
     }
 
@@ -103,17 +103,17 @@ impl AddressAttributes {
 
     pub fn is_op(&self, ofs: u32) -> bool {
         self.idx(ofs)
-            .map_or(false, |i| self.attrs[i] & ATTR_OP != 0)
+            .is_some_and(|i| self.attrs[i] & ATTR_OP != 0)
     }
 
     pub fn is_op_cont(&self, ofs: u32) -> bool {
         self.idx(ofs)
-            .map_or(false, |i| self.attrs[i] & ATTR_OP_CONT != 0)
+            .is_some_and(|i| self.attrs[i] & ATTR_OP_CONT != 0)
     }
 
     pub fn is_flow(&self, ofs: u32) -> bool {
         self.idx(ofs)
-            .map_or(false, |i| self.attrs[i] & ATTR_FLOW != 0)
+            .is_some_and(|i| self.attrs[i] & ATTR_FLOW != 0)
     }
 
     /// Find next offset that is op or data or unmarked
@@ -159,7 +159,7 @@ impl AddressAttributes {
 
     pub fn is_data(&self, ofs: u32) -> bool {
         self.idx(ofs)
-            .map_or(false, |i| self.attrs[i] & (ATTR_DATA | ATTR_DATA_CONT) != 0)
+            .is_some_and(|i| self.attrs[i] & (ATTR_DATA | ATTR_DATA_CONT) != 0)
     }
 
     pub fn mark_as_block_start(&mut self, ofs: u32) {
@@ -170,7 +170,7 @@ impl AddressAttributes {
 
     pub fn is_block_start(&self, ofs: u32) -> bool {
         self.idx(ofs)
-            .map_or(false, |i| self.attrs[i] & ATTR_BLOCK_START != 0)
+            .is_some_and(|i| self.attrs[i] & ATTR_BLOCK_START != 0)
     }
 
     pub fn base(&self) -> u32 {

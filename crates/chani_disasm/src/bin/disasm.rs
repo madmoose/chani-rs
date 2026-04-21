@@ -37,7 +37,7 @@ fn main() {
 
     project.analyze();
 
-    let listing = build_listing(&project);
+    let _listing = build_listing(&project);
 
     // let mut stdout = io::BufWriter::new(io::stdout().lock());
     // if let Err(e) = print_listing(&listing, &mut stdout)

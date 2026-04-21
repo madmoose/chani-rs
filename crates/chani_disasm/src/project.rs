@@ -240,9 +240,9 @@ impl Project {
                 BinaryFormat::Bin | BinaryFormat::Com => {
                     let (seg_idx, load_offset) = project.binaries[i].load.unwrap();
                     let seg = &mut project.segments[seg_idx];
-                    seg.start.get_or_insert(load_offset as u32);
+                    seg.start.get_or_insert(load_offset);
                     seg.end
-                        .get_or_insert(load_offset as u32 + data.len() as u32);
+                        .get_or_insert(load_offset + data.len() as u32);
                     let size = seg.end.unwrap() - seg.start.unwrap();
                     seg.addr_attributes =
                         AddressAttributes::new_with_base(load_offset, size as usize);
@@ -539,7 +539,7 @@ impl Project {
             let bin_def = self
                 .binaries
                 .iter()
-                .find(|b| b.load.map_or(false, |(si, _)| si == img.seg_idx));
+                .find(|b| b.load.is_some_and(|(si, _)| si == img.seg_idx));
             if matches!(bin_def.map(|b| &b.format), Some(BinaryFormat::Com)) {
                 seeds.push((img.seg_idx, img.load_offset + 0x100));
             }
@@ -749,10 +749,10 @@ impl Project {
         // paragraph base — the offset itself is the meaningful address.
         let label_addr = |seg_idx: usize, ofs: u32| -> u32 {
             if self.images.iter().any(|img| img.seg_idx == seg_idx) {
-                ofs as u32
+                ofs
             } else {
-                let seg = (self.segments[seg_idx].start.unwrap_or(0) / 16) as u32;
-                seg * 16 + ofs as u32
+                let seg = (self.segments[seg_idx].start.unwrap_or(0) / 16);
+                seg * 16 + ofs
             }
         };
 
@@ -1133,8 +1133,8 @@ fn parse_segment(dict: &Dict) -> Result<Segment, String> {
         if let Item::Property { key, value } = item {
             match key.as_str() {
                 "type" => seg_type = Some(value.clone()),
-                "start" => start = Some(parse_u32(&value)?),
-                "end" => end = Some(parse_u32(&value)?),
+                "start" => start = Some(parse_u32(value)?),
+                "end" => end = Some(parse_u32(value)?),
                 _ => return Err(format!("unknown key '{}' in segment '{}'", key, name)),
             }
         }

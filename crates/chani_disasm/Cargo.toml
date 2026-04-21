@@ -3,6 +3,9 @@ name = "chani_disasm"
 version = "0.0.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [dependencies]
 bytes_ext.workspace = true
 chani_datafile.workspace = true
