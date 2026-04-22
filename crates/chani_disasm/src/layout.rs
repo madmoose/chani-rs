@@ -19,6 +19,7 @@ pub enum WidgetKind {
     ArrayIndex { base_ofs: u32, index: usize },
     StructField { base_ofs: u32, field_index: usize },
     SegmentHeader,
+    Comment,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,7 @@ pub struct LayoutBuilder<'a> {
     ofs: u32,
     label_x0: u32,
     text_x0: u32,
+    comment_x0: u32,
     y: u32,
     line_state: LineState,
     ctx: &'a DisplayContext<'a>,
@@ -64,6 +66,7 @@ impl<'a> LayoutBuilder<'a> {
         let widgets = Widgets::new();
         let label_x0 = project.segments[seg_idx].name.len() as u32 + 1 + 4 + 1;
         let text_x0 = label_x0 + 16;
+        let comment_x0 = text_x0 + 40;
         let y = 0;
         Self {
             project,
@@ -73,6 +76,7 @@ impl<'a> LayoutBuilder<'a> {
             ofs,
             label_x0,
             text_x0,
+            comment_x0,
             y,
             line_state: LineState::StartOfLine,
             ctx,
@@ -145,6 +149,26 @@ impl<'a> LayoutBuilder<'a> {
         self.line_state = LineState::InLine;
     }
 
+    fn layout_block_comment(&mut self, lines: &[&str]) {
+        for line in lines {
+            let text = format!("; {line}").into();
+            self.add(self.label_x0, WidgetKind::Comment, text);
+            self.new_line();
+        }
+    }
+
+    fn layout_inline_comment(&mut self, comment: &str) {
+        let x = self.comment_x0;
+        self.widgets.push(Widget {
+            kind: WidgetKind::Comment,
+            seg_idx: self.seg_idx,
+            ofs: self.base_ofs,
+            x,
+            y: self.y,
+            text: format!("; {comment}").into(),
+        });
+    }
+
     fn make_address(&mut self) -> SmallString {
         let mut address = SmallString::new();
         let _ = write!(
@@ -159,8 +183,11 @@ impl<'a> LayoutBuilder<'a> {
     pub fn layout(&mut self) {
         let attr = self.project.attr_at(self.seg_idx, self.base_ofs);
         let label = attr.and_then(|attr| attr.name.as_deref());
+        let comment = attr.and_then(|attr| attr.comment.as_deref());
         let seg = &self.project.segments[self.seg_idx];
         let is_code = seg.addr_attributes.is_op(self.base_ofs);
+
+        let comment_lines: Vec<&str> = comment.map(|c| c.lines().collect()).unwrap_or_default();
 
         let prev_ofs = seg.addr_attributes.prev(self.base_ofs);
         let prev_is_code = prev_ofs
@@ -177,7 +204,7 @@ impl<'a> LayoutBuilder<'a> {
                 .map(|ofs| seg.addr_attributes.stops_flow(ofs))
                 .unwrap_or_default();
 
-            self.layout_instruction(label, &inst, prev_stops_flow);
+            self.layout_instruction(label, &comment_lines, &inst, prev_stops_flow);
         } else {
             let prev_data_type = prev_ofs
                 .and_then(|prev_ofs| self.project.attr_at(self.seg_idx, prev_ofs))
@@ -197,8 +224,16 @@ impl<'a> LayoutBuilder<'a> {
                 })
                 .unwrap_or(&default_data_type);
 
-            if prev_is_code || data_type.is_composite() || prev_is_composite {
+            if prev_is_code
+                || data_type.is_composite()
+                || prev_is_composite
+                || comment_lines.len() > 1
+            {
                 self.blank_line();
+            }
+
+            if comment_lines.len() > 1 {
+                self.layout_block_comment(&comment_lines);
             }
 
             if let Some(label) = label {
@@ -212,6 +247,10 @@ impl<'a> LayoutBuilder<'a> {
             }
 
             self.layout_data(self.text_x0, data_type);
+
+            if let [single] = comment_lines.as_slice() {
+                self.layout_inline_comment(single);
+            }
         }
 
         self.widgets.sort_by_key(|w| (w.y, w.x));
@@ -220,6 +259,7 @@ impl<'a> LayoutBuilder<'a> {
     fn layout_instruction(
         &mut self,
         label: Option<&str>,
+        comment_lines: &[&str],
         inst: &DecodedInstruction,
         prev_stops_flow: bool,
     ) {
@@ -234,8 +274,15 @@ impl<'a> LayoutBuilder<'a> {
             self.blank_line();
         }
 
-        if let Some(label) = label {
+        if label.is_some() || comment_lines.len() > 1 {
             self.blank_line();
+        }
+
+        if comment_lines.len() > 1 {
+            self.layout_block_comment(comment_lines);
+        }
+
+        if let Some(label) = label {
             self.add(self.label_x0, WidgetKind::Label, format!("{label}:").into());
             self.new_line();
         }
@@ -258,6 +305,10 @@ impl<'a> LayoutBuilder<'a> {
             self.add(x, WidgetKind::Operand { index: i }, s);
 
             x += w;
+        }
+
+        if let [single] = comment_lines {
+            self.layout_inline_comment(single);
         }
 
         self.new_line();
@@ -500,13 +551,6 @@ pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
     let mut global_y = 0u32;
 
     for seg_idx in 0..project.segments.len() {
-        let lookup = project::ProjectLookup {
-            project,
-            sreg_map: crate::SRegMap { cs: Some(seg_idx), ..Default::default() },
-            register_file: None,
-            default_seg: None,
-        };
-        let ctx = DisplayContext { lookup: &lookup };
         let seg = &project.segments[seg_idx];
         let seg_start = seg.start.unwrap_or(0);
         let seg_end = seg.end.unwrap_or(0);
@@ -542,6 +586,23 @@ pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
         let seg_len = seg_end - seg_start;
         let mut ofs = 0u32;
         while ofs < seg_len {
+            let sreg_map = project
+                .seg_dataflow
+                .state_at(project, seg_idx, ofs + seg_start)
+                .map(|s| s.to_sreg_map())
+                .unwrap_or(crate::SRegMap {
+                    cs: Some(seg_idx),
+                    ..Default::default()
+                });
+
+            let lookup = project::ProjectLookup {
+                project,
+                sreg_map,
+                register_file: None,
+                default_seg: None,
+            };
+            let ctx = DisplayContext { lookup: &lookup };
+
             let mut builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
             builder.layout();
             let local_widgets = builder.widgets();

@@ -9,11 +9,14 @@ pub mod layout;
 mod memory_reference;
 mod opcode_table;
 pub mod project;
+pub mod seg_dataflow;
 pub mod work_queue;
 
 use std::fmt::Display;
 
-pub use decoded_instruction::{DecodedInstruction, DisplayContext, RegisterFile, SRegMap, SymbolLookup};
+pub use decoded_instruction::{
+    DecodedInstruction, DisplayContext, RegisterFile, SRegMap, SymbolLookup,
+};
 pub use disassemble::decode;
 pub use memory_reference::*;
 pub use opcode_table::Opcode;

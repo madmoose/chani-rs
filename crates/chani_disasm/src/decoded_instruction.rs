@@ -400,9 +400,13 @@ impl DecodedInstruction {
         {
             let name = match mem_ref {
                 MemRef::Direct { seg, ofs, width } => ctx.lookup.lookup_direct(seg, ofs, width),
-                MemRef::Indirect { seg, base, index, disp, width } => {
-                    ctx.lookup.lookup_indirect(seg, base, index, disp, width)
-                }
+                MemRef::Indirect {
+                    seg,
+                    base,
+                    index,
+                    disp,
+                    width,
+                } => ctx.lookup.lookup_indirect(seg, base, index, disp, width),
             };
             if let Some(name) = name {
                 return write!(w, "{name}");
@@ -463,7 +467,8 @@ impl DecodedInstruction {
                     .wrapping_add(inc);
                 let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
                 if in_cs {
-                    if let Some(name) = ctx.lookup.lookup_direct(self.op_seg, ofs, DataWidth::Word) {
+                    if let Some(name) = ctx.lookup.lookup_direct(self.op_seg, ofs, DataWidth::Word)
+                    {
                         return write!(w, "{name}");
                     }
                 }
@@ -477,7 +482,8 @@ impl DecodedInstruction {
                     .wrapping_add(inc);
                 let in_cs = !matches!(self.seg_ovr, Some(s) if s != SReg::CS);
                 if in_cs {
-                    if let Some(name) = ctx.lookup.lookup_direct(self.op_seg, ofs, DataWidth::Word) {
+                    if let Some(name) = ctx.lookup.lookup_direct(self.op_seg, ofs, DataWidth::Word)
+                    {
                         return write!(w, "{name}");
                     }
                 }
@@ -491,7 +497,8 @@ impl DecodedInstruction {
                     DataWidth::Word
                 };
                 if let Some(name) =
-                    ctx.lookup.lookup_indirect(seg, None, None, self.imm[i] as u16, width)
+                    ctx.lookup
+                        .lookup_indirect(seg, None, None, self.imm[i] as u16, width)
                 {
                     return write!(w, "{name}");
                 }
@@ -661,6 +668,11 @@ impl SymbolLookup for NullLookup {
 
 impl Display for DecodedInstruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.format(f, DisplayContext { lookup: &NullLookup })
+        self.format(
+            f,
+            DisplayContext {
+                lookup: &NullLookup,
+            },
+        )
     }
 }

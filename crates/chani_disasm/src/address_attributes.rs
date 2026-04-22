@@ -91,9 +91,10 @@ impl AddressAttributes {
     }
 
     pub fn is_unmarked(&self, ofs: u32, len: u32) -> bool {
+        const CLASSIFICATION_BITS: u8 = ATTR_OP | ATTR_OP_CONT | ATTR_DATA | ATTR_DATA_CONT;
         (0..len).all(|k| {
             self.idx(ofs.wrapping_add(k))
-                .is_none_or(|i| self.attrs[i] == 0)
+                .is_none_or(|i| self.attrs[i] & CLASSIFICATION_BITS == 0)
         })
     }
 
@@ -102,8 +103,7 @@ impl AddressAttributes {
     }
 
     pub fn is_op(&self, ofs: u32) -> bool {
-        self.idx(ofs)
-            .is_some_and(|i| self.attrs[i] & ATTR_OP != 0)
+        self.idx(ofs).is_some_and(|i| self.attrs[i] & ATTR_OP != 0)
     }
 
     pub fn is_op_cont(&self, ofs: u32) -> bool {
