@@ -105,6 +105,8 @@ pub struct Segment {
     pub start: Option<u32>,
     pub end: Option<u32>,
     pub addr_attributes: AddressAttributes,
+    /// Assumed segment register values: indexed by SReg (ES=0, CS=1, SS=2, DS=3).
+    pub assume: [Option<usize>; 4],
 }
 
 impl Segment {
@@ -190,6 +192,8 @@ pub struct Attr {
     pub name: Option<SmallString>,
     pub ofs_seg: Option<SegmentIdx>,
     pub comment: Option<String>,
+    /// Assumed segment register values at this address: indexed by SReg (ES=0, CS=1, SS=2, DS=3).
+    pub assume: [Option<usize>; 4],
     /// True if this attr was auto-generated and should not be saved.
     pub auto_label: bool,
 }
@@ -334,8 +338,22 @@ impl Project {
 
         // Pass 1.5: build Segment vec.
         let mut segments: Vec<Segment> = Vec::new();
+        let mut unresolved_assumes: Vec<(usize, Vec<(usize, SmallString)>)> = Vec::new();
         for d in &segment_dicts {
-            segments.push(parse_segment(d)?);
+            let (seg, assumes) = parse_segment(d)?;
+            if !assumes.is_empty() {
+                unresolved_assumes.push((segments.len(), assumes));
+            }
+            segments.push(seg);
+        }
+        for (seg_idx, assumes) in unresolved_assumes {
+            for (sreg_idx, target_name) in assumes {
+                let target_idx = segments
+                    .iter()
+                    .position(|s| s.name == target_name)
+                    .ok_or_else(|| format!("unknown segment '{target_name}' in assume"))?;
+                segments[seg_idx].assume[sreg_idx] = Some(target_idx);
+            }
         }
 
         // Resolve binary dicts (needs segments for `load` references).
@@ -414,6 +432,15 @@ impl Project {
                         props.push(format!("end = {}", fmt_u32(end)));
                     }
                 }
+                let sreg_names = ["es", "cs", "ss", "ds"];
+                for (i, target) in seg.assume.iter().enumerate() {
+                    if let Some(target_idx) = target {
+                        props.push(format!(
+                            "assume {} = {}",
+                            sreg_names[i], self.segments[*target_idx].name
+                        ));
+                    }
+                }
                 write!(w, "segment[{}]:", seg.name)?;
                 if !props.is_empty() {
                     write!(w, " {}", props.join("; "))?;
@@ -446,6 +473,7 @@ impl Project {
                     && attr.r#type.is_none()
                     && attr.ofs_seg.is_none()
                     && attr.comment.is_none()
+                    && attr.assume.iter().all(|a| a.is_none())
                 {
                     continue;
                 }
@@ -466,6 +494,15 @@ impl Project {
                 }
                 if let Some(comment) = &attr.comment {
                     props.push(format!("comment = {comment}"));
+                }
+                let sreg_names = ["es", "cs", "ss", "ds"];
+                for (i, target) in attr.assume.iter().enumerate() {
+                    if let Some(target_idx) = target {
+                        props.push(format!(
+                            "assume {} = {}",
+                            sreg_names[i], self.segments[*target_idx].name
+                        ));
+                    }
                 }
                 if !props.is_empty() {
                     write!(
@@ -898,6 +935,7 @@ impl Project {
             name: None,
             ofs_seg: None,
             comment: None,
+            assume: [None; 4],
             auto_label: true,
         });
         attr.name = Some(label);
@@ -948,7 +986,11 @@ impl SymbolLookup for ProjectLookup<'_> {
         }
 
         let seg_val = rf?.get_sreg(seg);
-        self.lookup_direct(seg_val, ofs, width)
+        let name = self.lookup_direct(seg_val, ofs, width);
+
+        println!("{seg:?} {name:?}");
+
+        name
     }
 
     fn lookup_offset(&self, ofs: u16) -> Option<&str> {
@@ -987,6 +1029,7 @@ fn make_segments(exe: &ExeMz) -> Vec<Segment> {
                 start: Some(start),
                 end: Some(end),
                 addr_attributes: AddressAttributes::new((end - start) as usize),
+                assume: [None; 4],
             }
         })
         .collect()
@@ -1181,7 +1224,7 @@ fn resolve_binary_def(
 
 // ── Segment dict parsing ──────────────────────────────────────────────────────
 
-fn parse_segment(dict: &Dict) -> Result<Segment, String> {
+fn parse_segment(dict: &Dict) -> Result<(Segment, Vec<(usize, SmallString)>), String> {
     let name = dict.key.clone();
     if name.is_empty() {
         return Err("segment name cannot be empty".to_string());
@@ -1189,6 +1232,7 @@ fn parse_segment(dict: &Dict) -> Result<Segment, String> {
     let mut seg_type = None;
     let mut start: Option<u32> = None;
     let mut end: Option<u32> = None;
+    let mut assume_names: Vec<(usize, SmallString)> = Vec::new();
 
     for item in &dict.items {
         if let Item::Property { key, value } = item {
@@ -1196,19 +1240,33 @@ fn parse_segment(dict: &Dict) -> Result<Segment, String> {
                 "type" => seg_type = Some(value.clone()),
                 "start" => start = Some(parse_u32(value)?),
                 "end" => end = Some(parse_u32(value)?),
+                key if key.starts_with("assume ") => {
+                    let sreg_idx = match key["assume ".len()..].to_ascii_lowercase().as_str() {
+                        "es" => 0,
+                        "cs" => 1,
+                        "ss" => 2,
+                        "ds" => 3,
+                        r => return Err(format!("unknown segment register '{r}' in assume")),
+                    };
+                    assume_names.push((sreg_idx, value.clone()));
+                }
                 _ => return Err(format!("unknown key '{}' in segment '{}'", key, name)),
             }
         }
     }
 
     let size = end.unwrap_or(0).saturating_sub(start.unwrap_or(0)) as usize;
-    Ok(Segment {
-        name,
-        r#type: seg_type,
-        start,
-        end,
-        addr_attributes: AddressAttributes::new(size),
-    })
+    Ok((
+        Segment {
+            name,
+            r#type: seg_type,
+            start,
+            end,
+            addr_attributes: AddressAttributes::new(size),
+            assume: [None; 4],
+        },
+        assume_names,
+    ))
 }
 
 // ── Struct dict parsing ───────────────────────────────────────────────────────
@@ -1415,6 +1473,7 @@ fn parse_attr(
     let mut name: Option<SmallString> = None;
     let mut ofs_seg: Option<SegmentIdx> = None;
     let mut comment: Option<String> = None;
+    let mut assume = [None; 4];
 
     for item in &dict.items {
         if let Item::Property { key, value } = item {
@@ -1439,6 +1498,26 @@ fn parse_attr(
                     ofs_seg = Some(idx);
                 }
                 "comment" => comment = Some(value.to_string()),
+                key if key.starts_with("assume ") => {
+                    let sreg_idx = match key["assume ".len()..].to_ascii_lowercase().as_str() {
+                        "es" => 0,
+                        "cs" => 1,
+                        "ss" => 2,
+                        "ds" => 3,
+                        r => return Err(format!("unknown segment register '{r}' in assume")),
+                    };
+                    let seg_name = value.trim();
+                    let target_idx = segments
+                        .iter()
+                        .position(|s| s.name == seg_name)
+                        .ok_or_else(|| {
+                            format!(
+                                "unknown segment '{}' in assume of attr '{}'",
+                                seg_name, dict.key
+                            )
+                        })?;
+                    assume[sreg_idx] = Some(target_idx);
+                }
                 _ => return Err(format!("unknown key '{}' in attr '{}'", key, dict.key)),
             }
         }
@@ -1450,6 +1529,7 @@ fn parse_attr(
         name,
         ofs_seg,
         comment,
+        assume,
         auto_label: false,
     })
 }

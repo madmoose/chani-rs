@@ -221,6 +221,8 @@ fn transfer_block_until(
     let mut ofs = block.start;
 
     while ofs < block.end && ofs < stop_before {
+        apply_attr_assumes(&mut state, project, block.seg_idx, ofs);
+
         let bytes = project.bytes_at_seg(block.seg_idx, ofs);
         let Some(inst) = decode(seg_val, ofs as u16, bytes.iter().copied()) else {
             break;
@@ -346,7 +348,19 @@ fn transfer_block_until(
         ofs += len;
     }
 
+    apply_attr_assumes(&mut state, project, block.seg_idx, stop_before);
+
     state
+}
+
+fn apply_attr_assumes(state: &mut AbstractState, project: &Project, seg_idx: usize, ofs: u32) {
+    if let Some(attr) = project.attr_at(seg_idx, ofs) {
+        for (i, target) in attr.assume.iter().enumerate() {
+            if let Some(target_seg) = *target {
+                state.sregs[i] = SegVal::Known(target_seg);
+            }
+        }
+    }
 }
 
 fn transfer_block(project: &Project, block: &BasicBlock, entry: &AbstractState) -> AbstractState {
@@ -438,11 +452,16 @@ pub fn compute(project: &Project) -> SegDataflow {
     let mut worklist: VecDeque<(usize, u32)> = VecDeque::new();
 
     // Seed: every block that has no CFG predecessors gets an initial state
-    // with CS = Known(seg_idx) — it is executing in that segment.
+    // with CS = Known(seg_idx) and any segment-level `assume` values applied.
     for block in project.blocks.blocks() {
         if block.predecessors.is_empty() {
             let mut state = AbstractState::all_unknown();
             state.set_sreg(SReg::CS, SegVal::Known(block.seg_idx));
+            for (sreg_idx, target) in project.segments[block.seg_idx].assume.iter().enumerate() {
+                if let Some(target_seg) = target {
+                    state.sregs[sreg_idx] = SegVal::Known(*target_seg);
+                }
+            }
             df.block_entry
                 .entry((block.seg_idx, block.start))
                 .and_modify(|e| *e = e.join(&state))

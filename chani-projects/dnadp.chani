@@ -1,4 +1,4 @@
-project[cryo-dune-3.7-cd-dnapd]:
+project[cryo-dune-3.7-cd-dnadp]:
 
 arch = 8086
 
@@ -13,7 +13,7 @@ struct[ModCarOffset]:
     carrier_offset   = u8
 end
 
-segment[dnadp]: type = code
+segment[dnadp]: type = code; assume ds = dnadp; assume ss = dnadp
 
 // ── Public API jump table ─────────────────────────────────────────────────────
 
@@ -100,6 +100,53 @@ ADPTickHandler rotates this byte left each tick; when a 1-bit rotates into carry
 ADPFadeStep is called.  0xFF = fade every tick; 0x80 = fade every 8 ticks.
 Set to 0xFFFF by ADPSetVolume; set to a sparser pattern by ADPSetDynamicsCurve.]]]
 
+// ── Per-channel state table (struct-of-arrays) ───────────────────────────────
+// DI = 0x01a2 + channel_index*2. Each field is an array of 9 word-slots (0x12 bytes).
+// Byte-pair fields pack two per-channel bytes into one word-slot (L = first, H = second).
+
+attr[dnadp:01a2]: type = [u16; 9]; name = ch_timer; comment = [[[Per-channel event countdown timer.
+Decremented each tick; when it reaches 0 the next event is dispatched.
+0xFFFF marks an inactive or finished channel.]]]
+
+attr[dnadp:01b4]: type = [u16; 9]; name = ch_read_ptr; comment = Per-channel current event stream read offset within the song segment.
+
+attr[dnadp:01c6]: type = [u16; 9]; name = ch_init_ptr; comment = Per-channel event stream start offset (copied to ch_read_ptr when rewinding).
+
+attr[dnadp:01d8]: type = [u16; 9]; name = ch_program_note; comment = [[[Packed byte pair per channel: L = ch_program (instrument index, 0xFF = none loaded),
+H = ch_note (currently playing MIDI note after transposition, 0 = silent).]]]
+
+attr[dnadp:01ea]: type = [u16; 9]; name = ch_bend_transpose; comment = [[[Packed byte pair per channel: L = ch_bend_mode (0 = fine ±1/32 semitone, non-zero = wide ±1/5 semitone),
+H = ch_transpose (signed note offset added to every NoteOn).]]]
+
+attr[dnadp:01fc]: type = [u16; 9]; name = ch_glide_count_steps; comment = [[[Packed byte pair per channel: L = ch_glide_countdown (ticks remaining in glide, 0 = no active glide),
+H = ch_glide_steps (initial countdown loaded at glide start).]]]
+
+attr[dnadp:020e]: type = [u16; 9]; name = ch_glide_state; comment = [[[Packed byte pair per channel: L = ch_glide_accum (pitch accumulator, 0x40 = center/no bend),
+H = ch_glide_step (signed pitch delta added to ch_glide_accum each glide tick).]]]
+
+attr[dnadp:0220]: type = [u16; 9]; name = ch_mod_vel_sens; comment = [[[Modulator velocity sensitivity word per channel.
+Loaded from the instrument record by ProgramChange; used by ApplyVelocity to
+scale the modulator total-level register (OPL2 0x40+op) with note velocity.]]]
+
+attr[dnadp:0232]: type = [u16; 9]; name = ch_op_base_levels; comment = [[[Packed base total-level pair per channel: L = modulator, H = carrier.
+Copied from the instrument record by ProgramChange; used as the attenuation
+baseline before velocity and volume-modulation are applied.]]]
+
+attr[dnadp:0244]: type = [u16; 9]; name = ch_op_cur_levels; comment = [[[Packed current total-level pair per channel: L = modulator, H = carrier.
+Computed by ApplyVelocity (base level + velocity scaling).
+Written to OPL2 registers 0x40+op (mod) and 0x43+op (car) on NoteOn.]]]
+
+attr[dnadp:0256]: type = [u16; 9]; name = ch_car_vel_sens; comment = [[[Carrier velocity sensitivity per channel: L = sensitivity factor, H = base level.
+Used by ApplyVelocity to compute the post-velocity carrier total-level.]]]
+
+attr[dnadp:0268]: type = [u16; 9]; name = ch_mod_vol_sens; comment = [[[Modulator volume-modulation sensitivity per channel.
+Used by VolumeModulation to mix master volume into the modulator total-level.
+Higher values make the modulator track the global FM volume more strongly.]]]
+
+attr[dnadp:027a]: type = [u16; 9]; name = ch_vol_fb; comment = [[[Packed byte pair per channel: L = ch_car_vol_sens (carrier volume-modulation sensitivity),
+H = ch_fb_conn (OPL2 feedback/connection register value for reg 0xC0+ch;
+encodes operator feedback depth and series/parallel topology).]]]
+
 // ── Saved song pointer (buffer-move sentinels) ────────────────────────────────
 
 attr[dnadp:03a8]: type = u16; name = song_ptr_ofs; comment = [[[ES:SI snapshot of the song data pointer saved at ADPOpen time.
@@ -134,10 +181,7 @@ Initialises the OPL2 chip:
 Silences all channels via ADPReset (far-called with push cs trick).
 Returns BX = 0x0F00.]]]
 
-attr[dnadp:02fe]: name = ADPReset; comment = [[[Silence all OPL2 voices and clear the playing status flag.
-Disables interrupts (CLI/STI via pushf/popf) around the call to ADPSilenceAllChannels
-to prevent a tick interrupt from seeing the partially reset state.
-Clears status to 0 (not playing). Returns nothing. Far call.]]]
+attr[dnadp:02fe]: name = ADPReset; comment = CLI-protected: calls ADPSilenceAllChannels, clears status byte.
 
 attr[dnadp:030b]: name = ADPVolumeToAttenuation; comment = [[[Converts a linear volume value in AX to a packed OPL2 attenuation byte.
 The high byte limits the coarse range; the result byte is clamped to [0, 0x78].
@@ -158,10 +202,7 @@ AX selects the fade_pattern bit density:
   else       -> 0x8000 (every 16th)
 If status bit 7 is set (playing), also sets status bit 6 (fade active).]]]
 
-attr[dnadp:039c]: name = ADPEnablePlayback; comment = [[[Re-enable music playback processing.
-Sets active_ch_count = 1, which allows ADPTickHandler to call ADPProcessTick.
-Typically called after ADPReset to restart an already-loaded song.
-Returns AL = current status byte. Far call.]]]
+attr[dnadp:039c]: name = ADPEnablePlayback; comment = Sets active_ch_count = 1, re-enabling tick processing after a song end.
 
 attr[dnadp:03b2]: name = ADPOpen; comment = [[[Starts playback. AL = active channel count, ES:SI = song data pointer.
 Saves three sentinel words for buffer-move detection.
@@ -171,33 +212,44 @@ to prime the first tick, and sets status bit 7 (playing).]]]
 
 attr[dnadp:03bb]: ofs_seg = dnadp
 
-attr[dnadp:0413]: name = ADPBuildChannelTable; comment = [[[Reads 9 channel-data offsets from the song header (song_hdr[+0 .. +11]).
+attr[dnadp:03f5]: assume ds = dnadp
+attr[dnadp:03fe]: assume ds = dnadp
+attr[dnadp:040c]: assume ds = dnadp
+
+attr[dnadp:0413]: name = ADPBuildChannelTable; assume ds = dnadp; comment = [[[Reads 9 channel-data offsets from the song header (song_hdr[+0 .. +11]).
 Converts each from a header-relative offset to an absolute song-segment offset
 and stores it in ch_init_ptr[0..8].
-Initialises ch_program[] to 0xFF (no instrument loaded) and ch_bend[] to 0.
+Initialises ch_program_note to 0xFF00 (no instrument, no note) and ch_bend_transpose to 0.
 Falls through into ADPRewindAllChannels.]]]
 
-attr[dnadp:0444]: name = ADPRewindAllChannels; comment = [[[Resets measure = 1, tick = 96. For each channel: copies ch_init_ptr
+attr[dnadp:0444]: name = ADPRewindAllChannels; assume ds = dnadp; comment = [[[Resets measure = 1, tick = 96. For each channel: copies ch_init_ptr
 to ch_read_ptr, primes ch_timer by reading the first wait value from the
 stream (ADPReadWaitValue), then increments ch_timer by 1 to stagger
 channel start times slightly.]]]
 
-attr[dnadp:0473]: name = ADPTickHandler; comment = [[[Called from the hardware timer ISR. Only acts when status bit 7 is set.
+attr[dnadp:0473]: name = ADPTickHandler; assume ds = dnadp; comment = [[[Called from the hardware timer ISR. Only acts when status bit 7 is set.
   - Decrements high byte of subtick_accum; when negative, calls ADPProcessTick.
   - Rotates low byte of fade_pattern left; when carry set, calls ADPFadeStep.
 Returns AL = status, BX = measure, CX = tick (used for game-side sync).]]]
 
-attr[dnadp:04ad]: name = ADPCheckSongBuffer; comment = [[[Re-reads the three sentinel words via song_ptr_ofs/song_ptr_seg and
+attr[dnadp:0497]: assume ds = dnadp
+attr[dnadp:04a0]: assume ds = dnadp
+
+attr[dnadp:04ad]: name = ADPCheckSongBuffer; assume ds = dnadp; comment = [[[Re-reads the three sentinel words via song_ptr_ofs/song_ptr_seg and
 compares to song_sentinel1/2/3. Returns ZF=1 if unchanged (valid),
 ZF=0 if moved. Called each music tick; aborts playback on mismatch.]]]
 
-attr[dnadp:04d3]: name = ADPProcessTick; comment = [[[Core music playback engine. Adds tempo increment (song_hdr[+0x30]) to subtick_accum.
+attr[dnadp:04d3]: name = ADPProcessTick; assume ds = dnadp; comment = [[[Core music playback engine. Adds tempo increment (song_hdr[+0x30]) to subtick_accum.
 For each of 9 channels: decrements ch_timer; when it reaches 0, reads the
 next event word (lodsw -> AL=event, AH=parameter), dispatches through op_dispatch
 on bits[6:4] of the event byte. Updates measure/tick counters.
 Calls ADPLoopPointCheck before processing channels.]]]
 
-attr[dnadp:0553]: name = ADPLoopPointCheck; comment = [[[Checks current measure against loop points from the song header.
+attr[dnadp:04df]: ofs_seg = dnadp
+
+attr[dnadp:0515]: assume ds = dnadp
+
+attr[dnadp:0553]: name = ADPLoopPointCheck; assume ds = dnadp; comment = [[[Checks current measure against loop points from the song header.
   song_hdr[+0x2A] = loop_start_measure: on first arrival, saves 36 bytes
     of channel state (ch_timer + ch_read_ptr for all 9 channels) to a buffer
     at ch_timer[0] + 0xEA, and loads loop_countdown from song_hdr[+0x2E].
@@ -211,47 +263,45 @@ attr[dnadp:0553]: name = ADPLoopPointCheck; comment = [[[Checks current measure 
 //   DX     = channel index (0..8)
 // Each handler calls ADPReadWaitValue to consume the trailing wait bytes.
 
-attr[dnadp:05aa]: type = code; name = ADP_OP_ProgramChange; comment = [[[AH = patch number. Skips if patch already loaded.
+attr[dnadp:05aa]: type = code; name = ADP_OP_ProgramChange; assume ds = dnadp; comment = [[[AH = patch number. Skips if patch already loaded.
 Looks up the 40-byte instrument record at song_track + patch*40.
 Extracts OPL2 operator parameters and calls ADPInstrumentWrite.
 Stores pitch-bend mode ([DI+0x48]) and bend sensitivity ([DI+0x5B],[DI+0x6D]).]]]
 
-attr[dnadp:062c]: type = code; name = ADP_OP_NoteOn; comment = [[[AH = MIDI note; next stream byte = velocity.
+attr[dnadp:062c]: type = code; name = ADP_OP_NoteOn; assume ds = dnadp; comment = [[[AH = MIDI note; next stream byte = velocity.
 Calls ADPApplyVelocity to set OPL2 operator levels for this velocity.
 Applies channel transposition ([DI+0x49]), resets pitch-bend state,
 and calls ADPOplNoteOn.]]]
 
-attr[dnadp:065b]: type = code; name = ADP_OP_NoteOff; comment = [[[AH = MIDI note. Silences the voice only if the note (+ transposition)
+attr[dnadp:065b]: type = code; name = ADP_OP_NoteOff; assume ds = dnadp; comment = [[[AH = MIDI note. Silences the voice only if the note (+ transposition)
 matches the currently playing note in [DI+0x37].
 Calls ADPOplNoteOff.]]]
 
-attr[dnadp:066f]: type = code; name = ADP_OP_EndOfTrack; comment = [[[Marks this channel as idle. Decrements active_ch_count.
+attr[dnadp:066f]: type = code; name = ADP_OP_EndOfTrack; assume ds = dnadp; comment = [[[Marks this channel as idle. Decrements active_ch_count.
 If active_ch_count reaches 0: fills all ch_timer[] with 0xFFFF and calls ADPReset.
 Otherwise calls ADPRewindAllChannels then ADPLoopPointCheck to continue looping.]]]
 
-attr[dnadp:06a8]: type = code; name = ADP_OP_VolumeModulation; comment = [[[AH = volume (0x00 = loudest, 0x80 = silent).
+attr[dnadp:06a8]: type = code; name = ADP_OP_VolumeModulation; assume ds = dnadp; comment = [[[AH = volume (0x00 = loudest, 0x80 = silent).
 Independently adjusts modulator and carrier total-level registers, scaling the
 change by per-channel sensitivity bytes ([DI+0xC6] mod, [DI+0xD8] car).
 A sensitivity of 0 means the operator ignores volume modulation.]]]
 
-attr[dnadp:0740]: type = code; name = ADPApplyVelocity; comment = [[[Applies note velocity to both OPL2 operators before key-on.
+attr[dnadp:0740]: type = code; name = ADPApplyVelocity; assume ds = dnadp; comment = [[[Applies note velocity to both OPL2 operators before key-on.
 AL on entry = 0x80 - velocity (0 = loudest, 0x80 = silent).
 Reads per-channel sensitivity bytes ([DI+0x7E] mod, [DI+0xB4] car):
 a 4-bit sensitivity shifts the velocity contribution; sensitivity 0 = no scaling.
 Also writes the feedback/connection register ([DI+0xD8] sensitivity -> reg 0xC0+ch).]]]
 
-attr[dnadp:07ea]: type = code; name = ADP_OP_PitchBend; comment = [[[Event handler stub for pitch-bend events (opcode bits[6:4] = 6).
-Moves AH (bend amount, 0x40 = centre) into AL, reads the wait value,
-then falls through into ADPPitchBend to apply the bend to the OPL2 frequency.]]]
+attr[dnadp:07ea]: type = code; name = ADP_OP_PitchBend; assume ds = dnadp; comment = AH = bend amount (0x40 = centre). Reads wait then falls into ADPPitchBend.
 
-attr[dnadp:07ef]: name = ADPPitchBend; comment = [[[Applies a pitch bend to the currently playing note ([DI+0x37]).
+attr[dnadp:07ef]: name = ADPPitchBend; assume ds = dnadp; comment = [[[Applies a pitch bend to the currently playing note ([DI+0x37]).
 Bend value is relative to centre 0x40: values below bend down, above bend up.
 Mode 0 (normal): 1 unit = 1/32 semitone; uses semitone_scale for interpolation.
 Mode 1 ([DI+0x48] != 0, wide): 1 unit = 1/5 semitone; uses pitch_frac.
 Result is the OPL2 frequency word, stored in ch_freq[channel] and written
 to registers 0xA0+ch (F-number low) and 0xB0+ch (octave + key-on).]]]
 
-attr[dnadp:08e1]: type = code; name = ADPReadWaitValue; comment = [[[Reads a variable-length wait value from the event stream at ES:SI.
+attr[dnadp:08e1]: type = code; name = ADPReadWaitValue; assume ds = dnadp; comment = [[[Reads a variable-length wait value from the event stream at ES:SI.
   Single byte  (bit7=0): wait = byte (0-127 ticks).
   Multi-byte (bit7=1): accumulate 7 bits per byte until bit7=0; pack into
     14-bit result. Saturates to 0xFFFF if more than two continuation bytes.
@@ -260,51 +310,51 @@ Also serves directly as the handler for opcodes 2 and 3 (rest/wait events).]]]
 
 // ── OPL2 utilities ────────────────────────────────────────────────────────────
 
-attr[dnadp:091b]: name = ADPSilenceAllChannels; comment = [[[Send OPL2 note-off to all 9 melodic channels.
-Loops DX = 0..8 and calls ADPOplNoteOff for each channel.
-Used by ADPReset and ADPFadeStep (when fade reaches silence).]]]
+attr[dnadp:091b]: name = ADPSilenceAllChannels; assume ds = dnadp; comment = Calls ADPOplNoteOff for each of the 9 OPL2 melodic channels.
 
-attr[dnadp:092d]: name = ADPFadeStep; comment = [[[Steps vol_current one increment toward vol_target.
+attr[dnadp:092d]: name = ADPFadeStep; assume ds = dnadp; comment = [[[Steps vol_current one increment toward vol_target.
 Both bytes encode coarse (high nibble) and fine (low nibble) levels;
 fine is adjusted first, then coarse when fine levels match.
 When vol_current reaches 0: calls ADPSilenceAllChannels, clears status bit 7.
 Calls ADPWriteMasterVolume to apply the new level to the SB Pro mixer.]]]
 
-attr[dnadp:0982]: name = ADPWriteMasterVolume; comment = [[[Writes vol_current to SB Pro mixer register 0x26 (FM music volume)
+attr[dnadp:097d]: assume ds = dnadp; 
+
+attr[dnadp:0982]: name = ADPWriteMasterVolume; assume ds = dnadp; comment = [[[Writes vol_current to SB Pro mixer register 0x26 (FM music volume)
 via I/O ports sb_port+4 (register select) and sb_port+5 (data).
 Mixer reg 0x26: bits[7:4]=left level, bits[3:0]=right level (0=min, F=max).
 Returns AL = vol_current.]]]
 
-attr[dnadp:099a]: name = ADPMuteAllOperators; comment = [[[Writes maximum attenuation (0x3F) to all 18 OPL2 total-level registers
+attr[dnadp:099a]: name = ADPMuteAllOperators; assume ds = dnadp; comment = [[[Writes maximum attenuation (0x3F) to all 18 OPL2 total-level registers
 (0x40 through 0x55). Called at song open to ensure a silent starting state
 before instruments are programmed.]]]
 
-attr[dnadp:09ab]: name = ADPInstrumentWrite; comment = [[[Programs both OPL2 operators for a channel from a 40-byte instrument record.
+attr[dnadp:09ab]: name = ADPInstrumentWrite; assume ds = dnadp; comment = [[[Programs both OPL2 operators for a channel from a 40-byte instrument record.
 DX = channel index. DS:SI+2 = start of instrument data.
 Calls ADPInstrumentWriteLoop twice (modulator then carrier), writing
 OPL2 registers: 0xC0 (feedback/connection), 0xE0 (waveform),
 0x40 (total level), 0x60 (attack/decay), 0x80 (sustain/release), 0x20 (flags/mult).]]]
 
-attr[dnadp:09c3]: name = ADPInstrumentWriteLoop; comment = [[[Inner loop shared by ADPInstrumentWrite. Programs one OPL2 operator
+attr[dnadp:09c3]: name = ADPInstrumentWriteLoop; assume ds = dnadp; comment = [[[Inner loop shared by ADPInstrumentWrite. Programs one OPL2 operator
 (modulator or carrier) from consecutive bytes in the instrument record.
 DL = operator register offset, BL = channel index.
 Packs the instrument fields into OPL2 register format and writes 6 registers.]]]
 
-attr[dnadp:0a58]: name = ADPOplNoteOn; comment = [[[Converts MIDI note in AX to an OPL2 frequency word.
+attr[dnadp:0a58]: name = ADPOplNoteOn; assume ds = dnadp; comment = [[[Converts MIDI note in AX to an OPL2 frequency word.
 AX += 0x30 (raise by 4 octaves from MIDI standard), wraps at 0x60.
 Divides by 12 -> octave (CL) + semitone index (AH);
 looks up F-number in FrequencyTable, packs with octave and key-on bit (0x20).
 Stores in ch_freq[channel], then calls ADPOplFrequencyWrite.]]]
 
-attr[dnadp:0a87]: name = ADPOplNoteOff; comment = [[[Loads ch_freq[channel] and falls into ADPOplFrequencyWrite
+attr[dnadp:0a87]: name = ADPOplNoteOff; assume ds = dnadp; comment = [[[Loads ch_freq[channel] and falls into ADPOplFrequencyWrite
 with the key-on bit (0x20 in AH) cleared, silencing the voice.]]]
 
-attr[dnadp:0a8f]: name = ADPOplFrequencyWrite; comment = [[[Writes a frequency word to OPL2 registers for channel DX.
+attr[dnadp:0a8f]: name = ADPOplFrequencyWrite; assume ds = dnadp; comment = [[[Writes a frequency word to OPL2 registers for channel DX.
 AH[7:5] = octave, AH[4:2] = F-number high bits, AH[5] = key-on.
 Writes AL to reg 0xA0+ch (F-number low byte), AH to reg 0xB0+ch (octave/key-on).
 Calls ADPOplRegisterWrite twice.]]]
 
-attr[dnadp:0aa2]: name = ADPOplRegisterWrite; comment = [[[Writes one OPL2 register: AL = register number, AH = value.
+attr[dnadp:0aa2]: name = ADPOplRegisterWrite; assume ds = dnadp; comment = [[[Writes one OPL2 register: AL = register number, AH = value.
 Outputs AL to port 0x388 (register select), reads port 6 times (35 µs delay),
 outputs AH to port 0x389 (data), reads port 23 times (105 µs delay).
 These are the minimum timing requirements for the OPL2 chip.]]]

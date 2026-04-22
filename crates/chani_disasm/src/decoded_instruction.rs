@@ -47,6 +47,7 @@ fn write_imm<W: Write>(w: &mut W, v: u32) -> std::fmt::Result {
 fn is_mem_ref_arg(arg_type: ArgType, modrm: u8) -> bool {
     match arg_type {
         ArgType::IMem8 | ArgType::IMem16 | ArgType::IMem32 => true,
+        ArgType::Mem16 | ArgType::Mem32 => true,
         ArgType::RM8 | ArgType::RM16 => modrm < 0xc0,
         _ => false,
     }
@@ -186,7 +187,7 @@ impl DecodedInstruction {
             .find(|(_, arg_type)| is_mem_ref_arg(*arg_type, self.modrm))?;
 
         let mem_ref = match arg_type {
-            ArgType::IMem8 | ArgType::IMem16 => MemRef::Indirect {
+            ArgType::IMem8 | ArgType::IMem16 | ArgType::Mem16 => MemRef::Indirect {
                 seg: self.seg_ovr.unwrap_or(SReg::DS),
                 base: None,
                 index: None,
@@ -194,6 +195,7 @@ impl DecodedInstruction {
                 width: match self.arg_type[i] {
                     ArgType::IMem8 => DataWidth::Byte,
                     ArgType::IMem16 => DataWidth::Word,
+                    ArgType::Mem16 => DataWidth::Word,
                     _ => unreachable!(),
                 },
             },
@@ -394,6 +396,12 @@ impl DecodedInstruction {
     ) -> std::fmt::Result {
         let needs_width_specifier =
             self.has_mem_arg && self.arg_type.iter().any(ArgType::needs_width_specifier);
+
+        // println!(
+        //     "\t{:?} {}",
+        //     self.arg_type[i],
+        //     is_mem_ref_arg(self.arg_type[i], self.modrm)
+        // );
 
         if is_mem_ref_arg(self.arg_type[i], self.modrm)
             && let Some(mem_ref) = self.mem_ref()

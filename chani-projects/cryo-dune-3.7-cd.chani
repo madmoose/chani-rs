@@ -20,6 +20,17 @@ struct[IntroPart]:
     wait       = u16
 end
 
+struct[CmdArg]:
+    name  = char(3)
+    flags = u16
+    field = ofs16(seg001)
+end
+
+struct[ResTableEntry]:
+    unk0 = u16
+    name = cstr
+end
+
 attr[seg000:0000]: type = code; name = start
 attr[seg000:003a]: name = exit_with_error
 attr[seg000:0098]: type = code; name = adjust_sub_resource_pointers
@@ -39,6 +50,7 @@ attr[seg000:02fb]: type = code; name = intro_26_baron
 attr[seg000:02fe]: type = code
 attr[seg000:0301]: type = code
 attr[seg000:0309]: type = code; name = play_CREDITS_HNM
+attr[seg000:031b]: ofs_seg = seg000
 attr[seg000:0337]: type = [IntroPart; 48]; ofs_seg = seg000; name = word_10337_intro_script
 attr[seg000:0577]: type = u16; name = word_10577_intro_script_end
 attr[seg000:0579]: type = code; name = clear_global_y_offset
@@ -742,7 +754,7 @@ attr[seg000:e387]: type = code; name = wait_a_bit
 attr[seg000:e3a0]: type = code; name = wait_processing_frame_tasks
 attr[seg000:e3b7]: type = code; name = rand_masked
 attr[seg000:e3cc]: type = code; name = rand
-attr[seg000:e40c]: name = stru_1E40C_cmd_arg_list
+attr[seg000:e40c]: type = [CmdArg; 23]; name = cmd_arg_list
 attr[seg000:e4ad]: type = code; name = parse_command_line
 attr[seg000:e56b]: type = code; name = parse_cmd_is_end_of_arg
 attr[seg000:e57b]: type = code; name = load_driver_ax_with_vtable_at_si
@@ -822,5 +834,262 @@ attr[seg000:f3a7]: type = code; name = res_locate_in_lookup_table
 attr[seg000:f3d3]: type = code; name = check_hsq_checksum
 attr[seg000:f403]: type = code; name = hsq_decomp_skip_header_dssi_to_esdi
 attr[seg000:f40d]: type = code; name = hsq_decomp_no_header
+
+attr[seg001:22cd]: type = char(12)
+attr[seg001:22fc]: type = cstr
+attr[seg001:294f]: type = ResTableEntry; name = RES_TABLAT_BIN
+attr[seg001:295c]: type = ResTableEntry; name = RES_DNCHAR_BIN
+attr[seg001:2969]: type = ResTableEntry; name = RES_DNCHAR2_BIN
+attr[seg001:2977]: type = ResTableEntry; name = RES_DIALOGUE_HSQ
+attr[seg001:2986]: type = ResTableEntry; name = RES_VER_BIN
+attr[seg001:2990]: type = ResTableEntry; name = RES_SIET_SAL
+attr[seg001:299b]: type = ResTableEntry; name = RES_PALACE_SAL
+attr[seg001:29a8]: type = ResTableEntry; name = RES_VILG_SAL
+attr[seg001:29b3]: type = ResTableEntry; name = RES_HARK_SAL
+attr[seg001:29be]: type = ResTableEntry; name = RES_GLOBDATA_HSQ
+attr[seg001:29cd]: type = ResTableEntry; name = RES_PHRASE11_HSQ
+attr[seg001:29dc]: type = ResTableEntry; name = RES_PHRASE21_HSQ
+attr[seg001:29eb]: type = ResTableEntry; name = RES_PHRASE31_HSQ
+attr[seg001:29fa]: type = ResTableEntry; name = RES_PHRASE41_HSQ
+attr[seg001:2a09]: type = ResTableEntry; name = RES_PHRASE51_HSQ
+attr[seg001:2a18]: type = ResTableEntry; name = RES_PHRASE61_HSQ
+attr[seg001:2a27]: type = ResTableEntry; name = RES_PHRASE71_HSQ
+attr[seg001:2a36]: type = ResTableEntry; name = RES_PHRASE12_HSQ
+attr[seg001:2a45]: type = ResTableEntry; name = RES_PHRASE22_HSQ
+attr[seg001:2a54]: type = ResTableEntry; name = RES_PHRASE32_HSQ
+attr[seg001:2a63]: type = ResTableEntry; name = RES_PHRASE42_HSQ
+attr[seg001:2a72]: type = ResTableEntry; name = RES_PHRASE52_HSQ
+attr[seg001:2a81]: type = ResTableEntry; name = RES_PHRASE62_HSQ
+attr[seg001:2a90]: type = ResTableEntry; name = RES_PHRASE72_HSQ
+attr[seg001:2a9f]: type = ResTableEntry; name = RES_COMMAND1_HSQ
+attr[seg001:2aae]: type = ResTableEntry; name = RES_COMMAND2_HSQ
+attr[seg001:2abd]: type = ResTableEntry; name = RES_COMMAND3_HSQ
+attr[seg001:2acc]: type = ResTableEntry; name = RES_COMMAND4_HSQ
+attr[seg001:2adb]: type = ResTableEntry; name = RES_COMMAND5_HSQ
+attr[seg001:2aea]: type = ResTableEntry; name = RES_COMMAND6_HSQ
+attr[seg001:2af9]: type = ResTableEntry; name = RES_COMMAND7_HSQ
+attr[seg001:2b08]: type = ResTableEntry; name = RES_DNVGA_HSQ
+attr[seg001:2b14]: type = ResTableEntry; name = RES_DN386_HSQ
+attr[seg001:2b20]: type = ResTableEntry; name = RES_DNPCS_HSQ
+attr[seg001:2b2c]: type = ResTableEntry; name = RES_DNADL_HSQ
+attr[seg001:2b38]: type = ResTableEntry; name = RES_DNADP_HSQ
+attr[seg001:2b44]: type = ResTableEntry; name = RES_DNADG_HSQ
+attr[seg001:2b50]: type = ResTableEntry; name = RES_DNMID_HSQ
+attr[seg001:2b5c]: type = ResTableEntry; name = RES_DNPCS2_HSQ
+attr[seg001:2b69]: type = ResTableEntry; name = RES_DNSDB_HSQ
+attr[seg001:2b75]: type = ResTableEntry; name = RES_DNSBP_HSQ
+attr[seg001:2b81]: type = ResTableEntry; name = RES_CONDIT_HSQ
+attr[seg001:2b8e]: type = ResTableEntry; name = RES_MAP_HSQ
+attr[seg001:2b98]: type = ResTableEntry; name = RES_ICONES_HSQ
+attr[seg001:2ba5]: type = ResTableEntry; name = RES_FRESK_HSQ
+attr[seg001:2bb1]: type = ResTableEntry; name = RES_LETO_HSQ
+attr[seg001:2bbc]: type = ResTableEntry; name = RES_JESS_HSQ
+attr[seg001:2bc7]: type = ResTableEntry; name = RES_HAWA_HSQ
+attr[seg001:2bd2]: type = ResTableEntry; name = RES_IDAH_HSQ
+attr[seg001:2bdd]: type = ResTableEntry; name = RES_GURN_HSQ
+attr[seg001:2be8]: type = ResTableEntry; name = RES_STIL_HSQ
+attr[seg001:2bf3]: type = ResTableEntry; name = RES_KYNE_HSQ
+attr[seg001:2bfe]: type = ResTableEntry; name = RES_CHAN_HSQ
+attr[seg001:2c09]: type = ResTableEntry; name = RES_HARA_HSQ
+attr[seg001:2c14]: type = ResTableEntry; name = RES_BARO_HSQ
+attr[seg001:2c1f]: type = ResTableEntry; name = RES_FEYD_HSQ
+attr[seg001:2c2a]: type = ResTableEntry; name = RES_EMPR_HSQ
+attr[seg001:2c35]: type = ResTableEntry; name = RES_HARK_HSQ_0
+attr[seg001:2c40]: type = ResTableEntry; name = RES_SMUG_HSQ_0
+attr[seg001:2c4b]: type = ResTableEntry; name = RES_FRM1_HSQ
+attr[seg001:2c56]: type = ResTableEntry; name = RES_FRM2_HSQ
+attr[seg001:2c61]: type = ResTableEntry; name = RES_FRM3_HSQ
+attr[seg001:2c6c]: type = ResTableEntry; name = RES_GENERIC_HSQ
+attr[seg001:2c7a]: type = ResTableEntry; name = RES_PROGUE_HSQ
+attr[seg001:2c87]: type = ResTableEntry; name = RES_COMM_HSQ
+attr[seg001:2c92]: type = ResTableEntry; name = RES_EQUI_HSQ
+attr[seg001:2c9d]: type = ResTableEntry; name = RES_BALCON_HSQ
+attr[seg001:2caa]: type = ResTableEntry; name = RES_CORR_HSQ
+attr[seg001:2cb5]: type = ResTableEntry; name = RES_POR_HSQ
+attr[seg001:2cbf]: type = ResTableEntry; name = RES_SIET1_HSQ
+attr[seg001:2ccb]: type = ResTableEntry; name = RES_XPLAIN9_HSQ
+attr[seg001:2cd9]: type = ResTableEntry; name = RES_libre
+attr[seg001:2ce1]: type = ResTableEntry; name = RES_BUNK_HSQ
+attr[seg001:2cec]: type = ResTableEntry; name = RES_FINAL_HSQ
+attr[seg001:2cf8]: type = ResTableEntry; name = RES_SERRE_HSQ
+attr[seg001:2d04]: type = ResTableEntry; name = RES_BOTA_HSQ
+attr[seg001:2d0f]: type = ResTableEntry; name = RES_PALPLAN_HSQ
+attr[seg001:2d1d]: type = ResTableEntry; name = RES_SUN_HSQ
+attr[seg001:2d27]: type = ResTableEntry; name = RES_VIS_HSQ
+attr[seg001:2d31]: type = ResTableEntry; name = RES_ORNYPAN_HSQ
+attr[seg001:2d3f]: type = ResTableEntry; name = RES_ONMAP_HSQ
+attr[seg001:2d4b]: type = ResTableEntry; name = RES_PERS_HSQ
+attr[seg001:2d56]: type = ResTableEntry; name = RES_CHANKISS_HSQ
+attr[seg001:2d65]: type = ResTableEntry; name = RES_SKY_HSQ
+attr[seg001:2d6f]: type = ResTableEntry; name = RES_SKYDN_HSQ
+attr[seg001:2d7b]: type = ResTableEntry; name = RES_ORNYTK_HSQ
+attr[seg001:2d88]: type = ResTableEntry; name = RES_ATTACK_HSQ
+attr[seg001:2d95]: type = ResTableEntry; name = RES_STARS_HSQ
+attr[seg001:2da1]: type = ResTableEntry; name = RES_INTDS_HSQ
+attr[seg001:2dad]: type = ResTableEntry; name = RES_SUNRS_HSQ
+attr[seg001:2db9]: type = ResTableEntry; name = RES_PAUL_HSQ
+attr[seg001:2dc4]: type = ResTableEntry; name = RES_BACK_HSQ
+attr[seg001:2dcf]: type = ResTableEntry; name = RES_MOIS_HSQ
+attr[seg001:2dda]: type = ResTableEntry; name = RES_BOOK_HSQ
+attr[seg001:2de5]: type = ResTableEntry; name = RES_ORNY_HSQ
+attr[seg001:2df0]: type = ResTableEntry; name = RES_ORNYCAB_HSQ
+attr[seg001:2dfe]: type = ResTableEntry; name = RES_LIBRE_HSQ
+attr[seg001:2e0a]: type = ResTableEntry; name = RES_LIBRE_HSQ_0
+attr[seg001:2e16]: type = ResTableEntry; name = RES_LIBRE_HSQ_1
+attr[seg001:2e22]: type = ResTableEntry; name = RES_LIBRE_HSQ_2
+attr[seg001:2e2a]: type = ResTableEntry; name = RES_VER_HSQ
+attr[seg001:2e34]: type = ResTableEntry; name = RES_MAP2_HSQ
+attr[seg001:2e3f]: type = ResTableEntry; name = RES_MIRROR_HSQ
+attr[seg001:2e4c]: type = ResTableEntry; name = RES_DS0_HSQ
+attr[seg001:2e56]: type = ResTableEntry; name = RES_DS1_HSQ
+attr[seg001:2e60]: type = ResTableEntry; name = RES_DS2_HSQ
+attr[seg001:2e6a]: type = ResTableEntry; name = RES_DS3_HSQ
+attr[seg001:2e74]: type = ResTableEntry; name = RES_DS4_HSQ
+attr[seg001:2e7e]: type = ResTableEntry; name = RES_LIBRE
+attr[seg001:2e86]: type = ResTableEntry; name = RES_DN20_HSQ
+attr[seg001:2e91]: type = ResTableEntry; name = RES_DN21_HSQ
+attr[seg001:2e9c]: type = ResTableEntry; name = RES_DN22_HSQ
+attr[seg001:2ea7]: type = ResTableEntry; name = RES_DN23_HSQ
+attr[seg001:2eb2]: type = ResTableEntry; name = RES_DN24_HSQ
+attr[seg001:2ebd]: type = ResTableEntry; name = RES_DN25_HSQ
+attr[seg001:2ec8]: type = ResTableEntry; name = RES_DN26_HSQ
+attr[seg001:2ed3]: type = ResTableEntry; name = RES_DN27_HSQ
+attr[seg001:2ede]: type = ResTableEntry; name = RES_DN28_HSQ
+attr[seg001:2ee9]: type = ResTableEntry; name = RES_DN29_HSQ
+attr[seg001:2ef4]: type = ResTableEntry; name = RES_DN30_HSQ
+attr[seg001:2eff]: type = ResTableEntry; name = RES_DN31_HSQ
+attr[seg001:2f0a]: type = ResTableEntry; name = RES_DN32_HSQ
+attr[seg001:2f15]: type = ResTableEntry; name = RES_DN33_HSQ
+attr[seg001:2f20]: type = ResTableEntry; name = RES_DN34_HSQ
+attr[seg001:2f2b]: type = ResTableEntry; name = RES_DN35_HSQ
+attr[seg001:2f36]: type = ResTableEntry; name = RES_DN36_HSQ
+attr[seg001:2f41]: type = ResTableEntry; name = RES_DN37_HSQ
+attr[seg001:2f4c]: type = ResTableEntry; name = RES_DN38_HSQ
+attr[seg001:2f57]: type = ResTableEntry; name = RES_MIXR_HSQ
+attr[seg001:2f62]: type = ResTableEntry; name = RES_INT02_HSQ
+attr[seg001:2f6e]: type = ResTableEntry; name = RES_INT04_HSQ
+attr[seg001:2f7a]: type = ResTableEntry; name = RES_INT05_HSQ
+attr[seg001:2f86]: type = ResTableEntry; name = RES_INT06_HSQ
+attr[seg001:2f92]: type = ResTableEntry; name = RES_INT07_HSQ
+attr[seg001:2f9e]: type = ResTableEntry; name = RES_INT08_HSQ
+attr[seg001:2faa]: type = ResTableEntry; name = RES_INT09_HSQ
+attr[seg001:2fb6]: type = ResTableEntry; name = RES_INT10_HSQ
+attr[seg001:2fc2]: type = ResTableEntry; name = RES_INT11_HSQ
+attr[seg001:2fce]: type = ResTableEntry; name = RES_INT13_HSQ
+attr[seg001:2fda]: type = ResTableEntry; name = RES_INT14_HSQ
+attr[seg001:2fe6]: type = ResTableEntry; name = RES_INT15_HSQ
+attr[seg001:2ff2]: type = ResTableEntry; name = RES_PALAIS_HSQ
+attr[seg001:2fff]: type = ResTableEntry; name = RES_MNT1_LOP
+attr[seg001:300a]: type = ResTableEntry; name = RES_MNT2_LOP
+attr[seg001:3015]: type = ResTableEntry; name = RES_MNT3_LOP
+attr[seg001:3020]: type = ResTableEntry; name = RES_MNT4_LOP
+attr[seg001:302b]: type = ResTableEntry; name = RES_SIET_LOP
+attr[seg001:3036]: type = ResTableEntry; name = RES_PALACE_LOP
+attr[seg001:3043]: type = ResTableEntry; name = RES_IRUL1_HSQ
+attr[seg001:304f]: type = ResTableEntry; name = RES_IRUL2_HSQ
+attr[seg001:305b]: type = ResTableEntry; name = RES_IRUL3_HSQ
+attr[seg001:3067]: type = ResTableEntry; name = RES_IRUL4_HSQ
+attr[seg001:3073]: type = ResTableEntry; name = RES_IRUL5_HSQ
+attr[seg001:307f]: type = ResTableEntry; name = RES_IRUL6_HSQ
+attr[seg001:308b]: type = ResTableEntry; name = RES_IRUL7_HSQ
+attr[seg001:3097]: type = ResTableEntry; name = RES_IRUL8_HSQ
+attr[seg001:30a3]: type = ResTableEntry; name = RES_IRUL9_HSQ
+attr[seg001:30af]: type = ResTableEntry; name = RES_DP1_HSQ
+attr[seg001:30b9]: type = ResTableEntry; name = RES_DP0_HSQ
+attr[seg001:30c3]: type = ResTableEntry; name = RES_DP2_HSQ
+attr[seg001:30cd]: type = ResTableEntry; name = RES_DP3_HSQ
+attr[seg001:30d7]: type = ResTableEntry; name = RES_DF1_HSQ
+attr[seg001:30e1]: type = ResTableEntry; name = RES_DF2_HSQ
+attr[seg001:30eb]: type = ResTableEntry; name = RES_DF3_HSQ
+attr[seg001:30f5]: type = ResTableEntry; name = RES_DF4_HSQ
+attr[seg001:30ff]: type = ResTableEntry; name = RES_VIL1_HSQ
+attr[seg001:310a]: type = ResTableEntry; name = RES_VIL2_HSQ
+attr[seg001:3115]: type = ResTableEntry; name = RES_VIL3_HSQ
+attr[seg001:3120]: type = ResTableEntry; name = RES_VIL4_HSQ
+attr[seg001:312b]: type = ResTableEntry; name = RES_VIL5_HSQ
+attr[seg001:3136]: type = ResTableEntry; name = RES_VIL6_HSQ
+attr[seg001:3141]: type = ResTableEntry; name = RES_DV1_HSQ
+attr[seg001:314b]: type = ResTableEntry; name = RES_DV2_HSQ
+attr[seg001:3155]: type = ResTableEntry; name = RES_DV3_HSQ
+attr[seg001:315f]: type = ResTableEntry; name = RES_DV4_HSQ
+attr[seg001:3169]: type = ResTableEntry; name = RES_DH0_HSQ
+attr[seg001:3173]: type = ResTableEntry; name = RES_DH1_HSQ
+attr[seg001:317d]: type = ResTableEntry; name = RES_DH2_HSQ
+attr[seg001:3187]: type = ResTableEntry; name = RES_DH3_HSQ
+attr[seg001:3191]: type = ResTableEntry; name = RES_VG01_HSQ
+attr[seg001:319c]: type = ResTableEntry; name = RES_VG02_HSQ
+attr[seg001:31a7]: type = ResTableEntry; name = RES_VG03_HSQ
+attr[seg001:31b2]: type = ResTableEntry; name = RES_VG04_HSQ
+attr[seg001:31bd]: type = ResTableEntry; name = RES_VG05_HSQ
+attr[seg001:31c8]: type = ResTableEntry; name = RES_VG06_HSQ
+attr[seg001:31d3]: type = ResTableEntry; name = RES_VG07_HSQ
+attr[seg001:31de]: type = ResTableEntry; name = RES_VG08_HSQ
+attr[seg001:31e9]: type = ResTableEntry; name = RES_VG09_HSQ
+attr[seg001:31f4]: type = ResTableEntry; name = RES_VG10_HSQ
+attr[seg001:33ed]: type = ResTableEntry; name = RES_BLANK_ENTRY
+attr[seg001:33f0]: type = ResTableEntry; name = RES_DFL2_HNM
+attr[seg001:3403]: type = ResTableEntry; name = RES_MNT1_HNM
+attr[seg001:3416]: type = ResTableEntry; name = RES_MNT2_HNM
+attr[seg001:3429]: type = ResTableEntry; name = RES_MNT3_HNM
+attr[seg001:343c]: type = ResTableEntry; name = RES_MNT4_HNM
+attr[seg001:344f]: type = ResTableEntry; name = RES_SIET_HNM
+attr[seg001:3462]: type = ResTableEntry; name = RES_PALACE_HNM
+attr[seg001:346f]: type = ResTableEntry; name = RES_FORT_HNM
+attr[seg001:347a]: type = ResTableEntry; name = RES_MTG1_HNM
+attr[seg001:3485]: type = ResTableEntry; name = RES_MTG2_HNM
+attr[seg001:3490]: type = ResTableEntry; name = RES_MTG3_HNM
+attr[seg001:349b]: type = ResTableEntry; name = RES_PLANT_HNM
+attr[seg001:34a7]: type = ResTableEntry; name = RES_CREDITS_HNM
+attr[seg001:34b5]: type = ResTableEntry; name = RES_VIRGIN_HNM
+attr[seg001:34c2]: type = ResTableEntry; name = RES_CRYO_HNM
+attr[seg001:34cd]: type = ResTableEntry; name = RES_CRYO2_HNM
+attr[seg001:34d9]: type = ResTableEntry; name = RES_PRESENT_HNM
+attr[seg001:34e7]: type = ResTableEntry; name = RES_IRULAN_HNM
+attr[seg001:34f4]: type = ResTableEntry; name = RES_SEQA_HNM
+attr[seg001:34ff]: type = ResTableEntry; name = RES_SEQL_HNM
+attr[seg001:350a]: type = ResTableEntry; name = RES_SEQM_HNM
+attr[seg001:3515]: type = ResTableEntry; name = RES_SEQP_HNM
+attr[seg001:3520]: type = ResTableEntry; name = RES_SEQQ_HNM
+attr[seg001:352b]: type = ResTableEntry; name = RES_SEQJ_HNM
+attr[seg001:3536]: type = ResTableEntry; name = RES_SEQK_HNM
+attr[seg001:3541]: type = ResTableEntry; name = RES_SEQI_HNM
+attr[seg001:354c]: type = ResTableEntry; name = RES_SEQD_HNM
+attr[seg001:3557]: type = ResTableEntry; name = RES_SEQN_HNM
+attr[seg001:3562]: type = ResTableEntry; name = RES_SEQR_HNM
+attr[seg001:356d]: type = ResTableEntry; name = RES_DEAD_HNM
+attr[seg001:3578]: type = ResTableEntry; name = RES_DEAD2_HNM
+attr[seg001:3584]: type = ResTableEntry; name = RES_DEAD3_HNM
+attr[seg001:3590]: type = ResTableEntry; name = RES_VER_HNM
+attr[seg001:359a]: type = ResTableEntry; name = RES_TITLE_HNM
+attr[seg001:36d1]: type = ResTableEntry; name = RES_SEKENCE_HSQ
+attr[seg001:36df]: type = ResTableEntry; name = RES_WATER_HSQ
+attr[seg001:36eb]: type = ResTableEntry; name = RES_WORMSUIT_HSQ
+attr[seg001:36fa]: type = ResTableEntry; name = RES_WORMINTR_HSQ
+attr[seg001:3709]: type = ResTableEntry; name = RES_WARSONG_HSQ
+attr[seg001:3717]: type = ResTableEntry; name = RES_MORNING_HSQ
+attr[seg001:3725]: type = ResTableEntry; name = RES_SIETCHM_HSQ
+attr[seg001:3733]: type = ResTableEntry; name = RES_BAGDAD_HSQ
+attr[seg001:3740]: type = ResTableEntry; name = RES_ARRAKIS_HSQ
+attr[seg001:374e]: type = ResTableEntry; name = RES_CRYOMUS_HSQ
+attr[seg001:376b]: type = ResTableEntry; name = RES_SN1_HSQ
+attr[seg001:3775]: type = ResTableEntry; name = RES_SN2_HSQ
+attr[seg001:377f]: type = ResTableEntry; name = RES_SN3_HSQ
+attr[seg001:3789]: type = ResTableEntry; name = RES_SN4_HSQ
+attr[seg001:3793]: type = ResTableEntry; name = RES_SN5_HSQ
+attr[seg001:379d]: type = ResTableEntry; name = RES_SN6_HSQ
+attr[seg001:37a7]: type = ResTableEntry; name = RES_SN7_HSQ
+attr[seg001:37b1]: type = ResTableEntry; name = RES_SN8_HSQ
+attr[seg001:37bb]: type = ResTableEntry; name = RES_SN9_HSQ
+attr[seg001:37c5]: type = ResTableEntry; name = RES_SNA_HSQ
+attr[seg001:37cf]: type = ResTableEntry; name = RES_FREQ_HSQ
+attr[seg001:31ff]: type = [ofs16(seg001); 247]
+attr[seg001:3624]: type = cstr
+attr[seg001:364b]: type = cstr
+attr[seg001:368d]: type = cstr
+attr[seg001:36b4]: type = cstr
+attr[seg001:37da]: type = cstr
+attr[seg001:37e9]: type = cstr
+attr[seg001:37f2]: type = cstr
+attr[seg001:38a8]: type = char(12)
 
 end
