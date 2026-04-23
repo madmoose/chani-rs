@@ -59,7 +59,7 @@ attr[dnadp:0135]: type = [ModCarOffset; 9]; name = opl_op_offsets; comment = [[[
 Add modulator_offset or carrier_offset to a register base (0x20/0x40/0x60/0x80/0xE0)
 to address the correct operator.  Mirrors the standard OPL2 operator layout.]]]
 
-attr[dnadp:0147]: type = [u16; 12]; name = FrequencyTable; comment = [[[OPL2 F-numbers for one chromatic octave (C=0x157 through B=0x28A).
+attr[dnadp:0147]: type = [u16; 12]; name = freq_table; comment = [[[OPL2 F-numbers for one chromatic octave (C=0x157 through B=0x28A).
 ADPOplNoteOn divides the MIDI note by 12, looks up the semitone here,
 then encodes the octave into OPL2 register 0xBx bits[4:2].]]]
 
@@ -216,6 +216,7 @@ attr[dnadp:03f5]: assume ds = dnadp
 attr[dnadp:03fe]: assume ds = dnadp
 attr[dnadp:040c]: assume ds = dnadp
 
+attr[dnadp:0440]: assume ds = dnadp
 attr[dnadp:0413]: name = ADPBuildChannelTable; assume ds = dnadp; comment = [[[Reads 9 channel-data offsets from the song header (song_hdr[+0 .. +11]).
 Converts each from a header-relative offset to an absolute song-segment offset
 and stores it in ch_init_ptr[0..8].
@@ -263,6 +264,7 @@ attr[dnadp:0553]: name = ADPLoopPointCheck; assume ds = dnadp; comment = [[[Chec
 //   DX     = channel index (0..8)
 // Each handler calls ADPReadWaitValue to consume the trailing wait bytes.
 
+attr[dnadp:05b9]: assume ds = dnadp
 attr[dnadp:05aa]: type = code; name = ADP_OP_ProgramChange; assume ds = dnadp; comment = [[[AH = patch number. Skips if patch already loaded.
 Looks up the 40-byte instrument record at song_track + patch*40.
 Extracts OPL2 operator parameters and calls ADPInstrumentWrite.
@@ -277,6 +279,7 @@ attr[dnadp:065b]: type = code; name = ADP_OP_NoteOff; assume ds = dnadp; comment
 matches the currently playing note in [DI+0x37].
 Calls ADPOplNoteOff.]]]
 
+attr[dnadp:068a]: assume ds = dnadp
 attr[dnadp:066f]: type = code; name = ADP_OP_EndOfTrack; assume ds = dnadp; comment = [[[Marks this channel as idle. Decrements active_ch_count.
 If active_ch_count reaches 0: fills all ch_timer[] with 0xFFFF and calls ADPReset.
 Otherwise calls ADPRewindAllChannels then ADPLoopPointCheck to continue looping.]]]
@@ -343,7 +346,7 @@ Packs the instrument fields into OPL2 register format and writes 6 registers.]]]
 attr[dnadp:0a58]: name = ADPOplNoteOn; assume ds = dnadp; comment = [[[Converts MIDI note in AX to an OPL2 frequency word.
 AX += 0x30 (raise by 4 octaves from MIDI standard), wraps at 0x60.
 Divides by 12 -> octave (CL) + semitone index (AH);
-looks up F-number in FrequencyTable, packs with octave and key-on bit (0x20).
+looks up F-number in freq_table, packs with octave and key-on bit (0x20).
 Stores in ch_freq[channel], then calls ADPOplFrequencyWrite.]]]
 
 attr[dnadp:0a87]: name = ADPOplNoteOff; assume ds = dnadp; comment = [[[Loads ch_freq[channel] and falls into ADPOplFrequencyWrite
