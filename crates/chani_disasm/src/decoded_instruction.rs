@@ -2,7 +2,7 @@ use std::fmt::{Display, Write};
 
 use smallvec::SmallVec;
 
-use crate::{BaseReg, DataWidth, IndexReg, MemRef, SReg};
+use crate::{BaseReg, DataWidth, IndexReg, MemRef, SReg, project::SegmentIdx};
 
 use super::opcode_table::{ArgDir, ArgType, Opcode};
 
@@ -270,7 +270,7 @@ impl DecodedInstruction {
 
 pub trait SymbolLookup {
     /// For `MemRef::Direct { seg, ofs, width }`.
-    fn lookup_direct(&self, seg: u16, ofs: u16, width: DataWidth) -> Option<&str>;
+    fn lookup_direct(&self, seg: u16, ofs: u16, width: DataWidth) -> Option<String>;
 
     /// For `MemRef::Indirect { seg, base, index, disp, width }`.
     /// Resolves base/index registers and the segment register internally.
@@ -281,10 +281,10 @@ pub trait SymbolLookup {
         index: Option<IndexReg>,
         disp: u16,
         width: DataWidth,
-    ) -> Option<&str>;
+    ) -> Option<String>;
 
     /// For `Imm8`/`Imm16` — resolves using a pre-configured default segment.
-    fn lookup_offset(&self, ofs: u16) -> Option<&str>;
+    fn lookup_offset(&self, ofs: u16) -> Option<String>;
 }
 
 pub struct DisplayContext<'a> {
@@ -296,14 +296,14 @@ pub struct DisplayContext<'a> {
 /// register file. Fields are `None` when the mapping is unknown.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SRegMap {
-    pub es: Option<usize>,
-    pub cs: Option<usize>,
-    pub ss: Option<usize>,
-    pub ds: Option<usize>,
+    pub es: Option<SegmentIdx>,
+    pub cs: Option<SegmentIdx>,
+    pub ss: Option<SegmentIdx>,
+    pub ds: Option<SegmentIdx>,
 }
 
 impl SRegMap {
-    pub fn get(&self, r: SReg) -> Option<usize> {
+    pub fn get(&self, r: SReg) -> Option<SegmentIdx> {
         match r {
             SReg::ES => self.es,
             SReg::CS => self.cs,
@@ -396,12 +396,6 @@ impl DecodedInstruction {
     ) -> std::fmt::Result {
         let needs_width_specifier =
             self.has_mem_arg && self.arg_type.iter().any(ArgType::needs_width_specifier);
-
-        // println!(
-        //     "\t{:?} {}",
-        //     self.arg_type[i],
-        //     is_mem_ref_arg(self.arg_type[i], self.modrm)
-        // );
 
         if is_mem_ref_arg(self.arg_type[i], self.modrm)
             && let Some(mem_ref) = self.mem_ref()
@@ -656,7 +650,7 @@ impl DecodedInstruction {
 struct NullLookup;
 
 impl SymbolLookup for NullLookup {
-    fn lookup_direct(&self, _seg: u16, _ofs: u16, _width: DataWidth) -> Option<&str> {
+    fn lookup_direct(&self, _seg: u16, _ofs: u16, _width: DataWidth) -> Option<String> {
         None
     }
     fn lookup_indirect(
@@ -666,10 +660,10 @@ impl SymbolLookup for NullLookup {
         _index: Option<IndexReg>,
         _disp: u16,
         _width: DataWidth,
-    ) -> Option<&str> {
+    ) -> Option<String> {
         None
     }
-    fn lookup_offset(&self, _ofs: u16) -> Option<&str> {
+    fn lookup_offset(&self, _ofs: u16) -> Option<String> {
         None
     }
 }

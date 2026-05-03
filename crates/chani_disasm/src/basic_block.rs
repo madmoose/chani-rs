@@ -2,20 +2,20 @@ use std::collections::BTreeMap;
 
 use smallvec::SmallVec;
 
-pub type Addr = (usize, u32); // (segment index, offset)
+use crate::{Address, project::SegmentIdx};
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
-    pub seg_idx: usize,
+    pub seg_idx: SegmentIdx,
     pub start: u32,
     pub end: u32, // exclusive — first byte past last instruction
-    pub successors: SmallVec<[Addr; 2]>,
-    pub predecessors: Vec<Addr>,
+    pub successors: SmallVec<[Address; 2]>,
+    pub predecessors: Vec<Address>,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct BasicBlockMap {
-    blocks: BTreeMap<Addr, BasicBlock>,
+    blocks: BTreeMap<Address, BasicBlock>,
 }
 
 impl BasicBlockMap {
@@ -27,16 +27,16 @@ impl BasicBlockMap {
         self.blocks.insert((block.seg_idx, block.start), block);
     }
 
-    pub fn block_at(&self, seg_idx: usize, ofs: u32) -> Option<&BasicBlock> {
+    pub fn block_at(&self, seg_idx: SegmentIdx, ofs: u32) -> Option<&BasicBlock> {
         self.blocks.get(&(seg_idx, ofs))
     }
 
-    pub fn block_at_mut(&mut self, seg_idx: usize, ofs: u32) -> Option<&mut BasicBlock> {
+    pub fn block_at_mut(&mut self, seg_idx: SegmentIdx, ofs: u32) -> Option<&mut BasicBlock> {
         self.blocks.get_mut(&(seg_idx, ofs))
     }
 
     /// Returns the block whose range `[start, end)` contains `ofs`.
-    pub fn block_containing(&self, seg_idx: usize, ofs: u32) -> Option<&BasicBlock> {
+    pub fn block_containing(&self, seg_idx: SegmentIdx, ofs: u32) -> Option<&BasicBlock> {
         self.blocks
             .range((seg_idx, 0)..=(seg_idx, ofs))
             .next_back()

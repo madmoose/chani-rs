@@ -1,4 +1,7 @@
 pub mod ast;
 pub mod parser;
+pub mod writer;
 
-pub type SmallString = smallstr::SmallString<[u8; 55]>;
+pub use writer::{BlockDict, InlineDict};
+
+pub type SmallString = String; //smallstr::SmallString<[u8; 55]>;

@@ -26,8 +26,8 @@ use std::mem::swap;
 struct NameMapLookup<'a>(&'a HashMap<(u16, u16), String>);
 
 impl SymbolLookup for NameMapLookup<'_> {
-    fn lookup_direct(&self, seg: u16, ofs: u16, _width: DataWidth) -> Option<&str> {
-        self.0.get(&(seg, ofs)).map(String::as_str)
+    fn lookup_direct(&self, seg: u16, ofs: u16, _width: DataWidth) -> Option<String> {
+        self.0.get(&(seg, ofs)).map(String::from)
     }
 
     fn lookup_indirect(
@@ -37,11 +37,11 @@ impl SymbolLookup for NameMapLookup<'_> {
         _index: Option<IndexReg>,
         _disp: u16,
         _width: DataWidth,
-    ) -> Option<&str> {
+    ) -> Option<String> {
         None
     }
 
-    fn lookup_offset(&self, _ofs: u16) -> Option<&str> {
+    fn lookup_offset(&self, _ofs: u16) -> Option<String> {
         None
     }
 }
@@ -65,7 +65,9 @@ pub struct Cpu {
     pub callback_base_address: Address,
     pub callbacks: HashMap<Address, Callback>,
 
-    logging: bool,
+    pub logging: bool,
+    pub dump_mem_writes: bool,
+    pub dump_port_writes: bool,
     names: HashMap<(u16, u16), String>,
     // pub pal: Pal888,
     globdata_log: bool,
@@ -147,6 +149,8 @@ impl Cpu {
             instruction_count: Default::default(),
             callbacks: Default::default(),
             logging: false,
+            dump_mem_writes: false,
+            dump_port_writes: false,
             names,
             globdata_log: false,
             ppm_cnt: 0,
@@ -914,6 +918,11 @@ impl Cpu {
 
     fn mem_write8(&mut self, memory: &mut Memory, seg: u16, ofs: u16, v: u8) {
         memory.write_u8(addr(seg, ofs), v);
+
+        if self.dump_mem_writes {
+            let csip = self.get_instruction_address();
+            println!("LOG {csip} WRITE BYTE {seg:04X}:[{ofs:04x}] = 0x{v:02x}");
+        }
         if self.logging {
             let csip = self.get_instruction_address();
 
@@ -947,6 +956,12 @@ impl Cpu {
 
     fn mem_write16(&mut self, memory: &mut Memory, seg: u16, ofs: u16, v: u16) {
         memory.write_u16(addr(seg, ofs), v);
+
+        if self.dump_mem_writes {
+            let csip = self.get_instruction_address();
+            println!("LOG {csip} WRITE WORD {seg:04X}:[{ofs:04x}] = 0x{v:04x}");
+        }
+
         if self.logging {
             let csip = self.get_instruction_address();
 
@@ -2340,12 +2355,20 @@ impl Cpu {
     fn op_out_al_imm8<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let port = self.fetch8(ctx) as u16;
         let v = self.get_al();
+        if self.dump_port_writes {
+            let csip = self.get_instruction_address();
+            println!("LOG {csip} OUT BYTE {port:04X} = 0x{v:02x}");
+        }
         ctx.io_write_u8(port, v);
     }
 
     fn op_out_ax_imm8<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let port = self.fetch8(ctx) as u16;
         let v = self.get_ax();
+        if self.dump_port_writes {
+            let csip = self.get_instruction_address();
+            println!("LOG {csip} OUT WORD {port:04X} = 0x{v:04x}");
+        }
         ctx.io_write_u16(port, v);
     }
 
@@ -2395,12 +2418,20 @@ impl Cpu {
     fn op_out_al_dx<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let port = self.get_dx();
         let v = self.get_al();
+        if self.dump_port_writes {
+            let csip = self.get_instruction_address();
+            println!("LOG {csip} OUT BYTE {port:04X} = 0x{v:02x}");
+        }
         ctx.io_write_u8(port, v);
     }
 
     fn op_out_ax_dx<Context: CpuContext>(&mut self, ctx: &mut Context) {
         let port = self.get_dx();
         let v = self.get_ax();
+        if self.dump_port_writes {
+            let csip = self.get_instruction_address();
+            println!("LOG {csip} OUT WORD {port:04X} = 0x{v:04x}");
+        }
         ctx.io_write_u16(port, v);
     }
 

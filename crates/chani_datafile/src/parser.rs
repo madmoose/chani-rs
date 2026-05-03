@@ -15,14 +15,22 @@ pub enum Token {
     DictStart {
         name: SmallString,
         key: SmallString,
+        line: u32,
     },
     DictEnd {
         name: SmallString,
+        line: u32,
     },
     KeyValue {
         key: SmallString,
         value: SmallString,
+        line: u32,
     },
+}
+
+fn line_of(original: &str, current: &str) -> u32 {
+    let offset = current.as_ptr() as usize - original.as_ptr() as usize;
+    original[..offset].bytes().filter(|&b| b == b'\n').count() as u32 + 1
 }
 
 fn ws(i: &str) -> IResult<&str, &str> {
@@ -86,26 +94,36 @@ fn multiline_value(i: &str) -> IResult<&str, &str> {
     delimited(tag("[[["), take_until("]]]"), tag("]]]")).parse(i)
 }
 
-fn kv_value(i: &str) -> IResult<&str, &str> {
-    alt((multiline_value, single_line_value)).parse(i)
+fn trim_multiline_lines(s: &str) -> String {
+    s.trim()
+        .lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-fn key_value(i: &str) -> IResult<&str, Token> {
+fn key_value<'a>(original: &str, i: &'a str) -> IResult<&'a str, Token> {
+    let line = line_of(original, i);
     let (i, key) = map(key_name, str::trim).parse(i)?;
     let (i, _) = (ws, char('='), ws).parse(i)?;
-    let (i, val) = map(kv_value, str::trim).parse(i)?;
+    let (i, val) = alt((
+        map(multiline_value, trim_multiline_lines),
+        map(single_line_value, |s: &str| s.trim().to_owned()),
+    ))
+    .parse(i)?;
     Ok((
         i,
         Token::KeyValue {
             key: key.into(),
-            value: val.into(),
+            value: val.as_str().into(),
+            line,
         },
     ))
 }
 
-fn single_line_pairs(i: &str) -> IResult<&str, Vec<Token>> {
-    let (i, first) = key_value(i)?;
-    let (i, rest) = many0(preceded((ws, char(';'), ws), key_value)).parse(i)?;
+fn single_line_pairs<'a>(original: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
+    let (i, first) = key_value(original, i)?;
+    let (i, rest) = many0(preceded((ws, char(';'), ws), move |i| key_value(original, i))).parse(i)?;
     let (i, _) = opt((ws, char(';'))).parse(i)?; // optional trailing semicolon
     let mut pairs = vec![first];
     pairs.extend(rest);
@@ -117,7 +135,7 @@ fn end_keyword(i: &str) -> IResult<&str, ()> {
 }
 
 // Parse dict body items until we see 'end'
-fn dict_body<'a>(name: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
+fn dict_body<'a>(original: &str, name: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
     let mut tokens = Vec::new();
     let mut input = i;
 
@@ -127,14 +145,15 @@ fn dict_body<'a>(name: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
 
         // Check for end keyword
         if let Ok((rest, _)) = end_keyword(input) {
+            let line = line_of(original, input);
             let (rest, _) = skip_blanks(rest)?;
-            tokens.push(Token::DictEnd { name: name.into() });
+            tokens.push(Token::DictEnd { name: name.into(), line });
             return Ok((rest, tokens));
         }
 
         // Try nested dict
         let (rest, _) = ws(input)?;
-        if let Ok((rest, nested)) = dict_block(rest) {
+        if let Ok((rest, nested)) = dict_block(original, rest) {
             tokens.extend(nested);
             input = rest;
             continue;
@@ -142,11 +161,11 @@ fn dict_body<'a>(name: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
 
         // Try key-value(s) - may have multiple semicolon-separated pairs on one line
         let (rest, _) = ws(input)?;
-        if let Ok((mut rest, kv)) = key_value(rest) {
+        if let Ok((mut rest, kv)) = key_value(original, rest) {
             tokens.push(kv);
             // Consume any additional semicolon-separated pairs on same line
             while let Ok((r, _)) = (ws, char(';'), ws).parse(rest) {
-                if let Ok((r, kv)) = key_value(r) {
+                if let Ok((r, kv)) = key_value(original, r) {
                     tokens.push(kv);
                     rest = r;
                 } else {
@@ -159,16 +178,17 @@ fn dict_body<'a>(name: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
             continue;
         }
 
-        // Nothing matched - error
-        return Err(nom::Err::Error(nom::error::Error::new(
+        // Nothing matched - unrecoverable: we're inside a dict body that we committed to
+        return Err(nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Alt,
         )));
     }
 }
 
-fn dict_block(i: &str) -> IResult<&str, Vec<Token>> {
+fn dict_block<'a>(original: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
     let (i, _) = ws(i)?;
+    let line = line_of(original, i);
     let (i, (name, key)) = dict_header(i)?;
     let (i, _) = char(':').parse(i)?;
     let (i, _) = ws(i)?;
@@ -180,34 +200,70 @@ fn dict_block(i: &str) -> IResult<&str, Vec<Token>> {
         let mut tokens = vec![Token::DictStart {
             name: name.into(),
             key: key.into(),
+            line,
         }];
-        let (i, body) = dict_body(name, i)?;
+        let (i, body) = dict_body(original, name, i)?;
         tokens.extend(body);
         Ok((i, tokens))
     } else {
         // Single-line: has pairs on same line
-        let (i, pairs) = single_line_pairs(i)?;
+        let (i, pairs) = single_line_pairs(original, i)?;
         let (i, _) = skip_blanks(i)?;
         let mut tokens = vec![Token::DictStart {
             name: name.into(),
             key: key.into(),
+            line,
         }];
         tokens.extend(pairs);
-        tokens.push(Token::DictEnd { name: name.into() });
+        tokens.push(Token::DictEnd { name: name.into(), line });
         Ok((i, tokens))
     }
 }
 
-fn file(i: &str) -> IResult<&str, Vec<Token>> {
+fn file<'a>(original: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
+    let (mut i, _) = skip_blanks(i)?;
+    let mut tokens = Vec::new();
+    loop {
+        let (rest, _) = skip_blanks(i)?;
+        match dict_block(original, rest) {
+            Ok((rest, block_tokens)) => {
+                tokens.extend(block_tokens);
+                i = rest;
+            }
+            Err(nom::Err::Error(_)) => {
+                // No dict block at this position — end of top-level dicts
+                i = rest;
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
     let (i, _) = skip_blanks(i)?;
-    let (i, blocks) = many0(preceded(skip_blanks, dict_block)).parse(i)?;
-    let (i, _) = skip_blanks(i)?;
-    Ok((i, blocks.into_iter().flatten().collect()))
+    Ok((i, tokens))
 }
 
 pub fn parse(input: &str) -> Result<Vec<Token>, String> {
-    match all_consuming(file).parse(input) {
+    match all_consuming(|i| file(input, i)).parse(input) {
         Ok((_, tokens)) => Ok(tokens),
-        Err(e) => Err(format!("parse error: {}", e)),
+        Err(e) => {
+            let remaining = match &e {
+                nom::Err::Error(e) | nom::Err::Failure(e) => e.input,
+                nom::Err::Incomplete(_) => input,
+            };
+            Err(parse_error_message(input, remaining))
+        }
     }
+}
+
+fn parse_error_message(original: &str, remaining: &str) -> String {
+    let offset = remaining.as_ptr() as usize - original.as_ptr() as usize;
+    let prefix = &original[..offset];
+    let line_num = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let col = prefix.rfind('\n').map_or(offset, |p| offset - p - 1);
+    let line_text = remaining.lines().next().unwrap_or("(end of input)");
+    format!(
+        "parse error at line {line_num}, column {}: unexpected input\n  {line_text}\n  {arrow}",
+        col + 1,
+        arrow = " ".repeat(col) + "^",
+    )
 }

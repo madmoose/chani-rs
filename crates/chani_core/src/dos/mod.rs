@@ -228,7 +228,7 @@ impl Dos {
 
     pub fn validate_mcb_chain(&self, memory: &Memory) -> bool {
         let mut seg = self.initial_mcb_seg;
-        println!("\nValidating MCB chain starting from segment {seg:#06X}");
+        // println!("\nValidating MCB chain starting from segment {seg:#06X}");
 
         loop {
             let Some(mcb) = mcb::read(memory, seg) else {

@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-pub type Addr = (usize, u32); // (segment index, offset)
+use crate::Address;
 
 #[derive(Debug, Default, Clone)]
 pub struct BranchMap {
-    forward: BTreeMap<Addr, BTreeSet<Addr>>,
-    backward: BTreeMap<Addr, BTreeSet<Addr>>,
+    forward: BTreeMap<Address, BTreeSet<Address>>,
+    backward: BTreeMap<Address, BTreeSet<Address>>,
 }
 
 impl BranchMap {
@@ -13,13 +13,13 @@ impl BranchMap {
         Self::default()
     }
 
-    pub fn add(&mut self, from: Addr, to: Addr) {
+    pub fn add(&mut self, from: Address, to: Address) {
         self.forward.entry(from).or_default().insert(to);
         self.backward.entry(to).or_default().insert(from);
     }
 
     /// Addresses this instruction branches to.
-    pub fn targets(&self, from: Addr) -> impl Iterator<Item = Addr> + '_ {
+    pub fn targets(&self, from: Address) -> impl Iterator<Item = Address> + '_ {
         self.forward
             .get(&from)
             .into_iter()
@@ -27,7 +27,7 @@ impl BranchMap {
     }
 
     /// Addresses that branch to this address.
-    pub fn sources(&self, to: Addr) -> impl Iterator<Item = Addr> + '_ {
+    pub fn sources(&self, to: Address) -> impl Iterator<Item = Address> + '_ {
         self.backward
             .get(&to)
             .into_iter()
@@ -35,15 +35,15 @@ impl BranchMap {
     }
 
     /// All unique branch target addresses across all edges.
-    pub fn all_targets(&self) -> impl Iterator<Item = Addr> + '_ {
+    pub fn all_targets(&self) -> impl Iterator<Item = Address> + '_ {
         self.backward.keys().copied()
     }
 
-    pub fn has_target(&self, from: Addr) -> bool {
+    pub fn has_target(&self, from: Address) -> bool {
         self.forward.contains_key(&from)
     }
 
-    pub fn has_source(&self, to: Addr) -> bool {
+    pub fn has_source(&self, to: Address) -> bool {
         self.backward.contains_key(&to)
     }
 }

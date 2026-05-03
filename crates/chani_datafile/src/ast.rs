@@ -12,6 +12,7 @@ pub struct Dict {
     pub name: SmallString,
     pub key: SmallString,
     pub items: Vec<Item>,
+    pub line: u32,
 }
 
 /// An item within a dictionary - either a property or nested dict
@@ -20,6 +21,7 @@ pub enum Item {
     Property {
         key: SmallString,
         value: SmallString,
+        line: u32,
     },
     Dict(Dict),
 }
@@ -31,28 +33,31 @@ impl Document {
 
         for token in tokens {
             match token {
-                Token::DictStart { name, key } => {
+                Token::DictStart { name, key, line } => {
                     stack.push(Dict {
                         name,
                         key,
                         items: Vec::new(),
+                        line,
                     });
                 }
-                Token::KeyValue { key, value } => {
-                    let current = stack.last_mut().ok_or("KeyValue outside of dictionary")?;
+                Token::KeyValue { key, value, line } => {
+                    let current = stack.last_mut().ok_or_else(|| {
+                        format!("line {line}: key-value '{}' outside of any dictionary", key)
+                    })?;
                     // Last wins: remove existing property with same key
                     current
                         .items
                         .retain(|item| !matches!(item, Item::Property { key: k, .. } if k == &key));
-                    current.items.push(Item::Property { key, value });
+                    current.items.push(Item::Property { key, value, line });
                 }
-                Token::DictEnd { name } => {
-                    let dict = stack
-                        .pop()
-                        .ok_or_else(|| format!("unexpected end for '{}'", name))?;
+                Token::DictEnd { name, line } => {
+                    let dict = stack.pop().ok_or_else(|| {
+                        format!("line {line}: unexpected 'end' for '{}' with no open dictionary", name)
+                    })?;
                     if dict.name != name {
                         return Err(format!(
-                            "mismatched end: expected '{}', got '{}'",
+                            "line {line}: mismatched 'end': expected '{}', got '{}'",
                             dict.name, name
                         ));
                     }
@@ -66,9 +71,10 @@ impl Document {
         }
 
         if !stack.is_empty() {
+            let dict = stack.last().unwrap();
             return Err(format!(
-                "unclosed dictionary: '{}'",
-                stack.last().unwrap().name
+                "line {}: unclosed dictionary '{}'",
+                dict.line, dict.name
             ));
         }
 

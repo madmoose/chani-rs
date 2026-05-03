@@ -139,7 +139,7 @@ impl Vga {
     pub fn set_mode(&mut self, mode: i32) {
         // TODO: Implement full mode setting logic
 
-        println!("Vga::set_mode: Setting mode {mode}");
+        // println!("Vga::set_mode: Setting mode {mode}");
 
         match mode {
             2 | 3 => {

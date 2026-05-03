@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
-    SReg, SRegMap,
+    Address, SReg, SRegMap, SmallString,
     basic_block::BasicBlock,
     decode,
     opcode_table::{ArgDir, ArgType, Opcode},
-    project::Project,
+    project::{Project, SegmentIdx},
 };
 
 // ── Abstract value ────────────────────────────────────────────────────────────
@@ -13,7 +13,7 @@ use crate::{
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SegVal {
     /// A specific project segment index is known.
-    Known(usize),
+    Known(SegmentIdx),
     /// No information — could be anything.
     Unknown,
 }
@@ -121,6 +121,16 @@ impl AbstractState {
         }
     }
 
+    fn sreg_idx_from_str(s: &SmallString) -> Option<usize> {
+        match s.as_str() {
+            "es" => Some(0),
+            "cs" => Some(1),
+            "ss" => Some(2),
+            "ds" => Some(3),
+            _ => None,
+        }
+    }
+
     pub fn get_sreg(&self, r: SReg) -> &SegVal {
         &self.sregs[Self::sreg_idx(r)]
     }
@@ -138,7 +148,7 @@ impl AbstractState {
     }
 
     pub fn to_sreg_map(&self) -> SRegMap {
-        fn known(v: &SegVal) -> Option<usize> {
+        fn known(v: &SegVal) -> Option<SegmentIdx> {
             if let SegVal::Known(idx) = v {
                 Some(*idx)
             } else {
@@ -159,7 +169,7 @@ impl AbstractState {
 
 #[derive(Clone, Debug)]
 pub struct SegDataflow {
-    pub block_entry: BTreeMap<(usize, u32), AbstractState>,
+    pub block_entry: BTreeMap<Address, AbstractState>,
 }
 
 impl SegDataflow {
@@ -169,13 +179,18 @@ impl SegDataflow {
         }
     }
 
-    pub fn entry_state(&self, seg_idx: usize, block_start: u32) -> Option<&AbstractState> {
+    pub fn entry_state(&self, seg_idx: SegmentIdx, block_start: u32) -> Option<&AbstractState> {
         self.block_entry.get(&(seg_idx, block_start))
     }
 
     /// Abstract state immediately before the instruction at `(seg_idx, ofs)`.
     /// Re-runs the transfer function from the containing block's entry state up to `ofs`.
-    pub fn state_at(&self, project: &Project, seg_idx: usize, ofs: u32) -> Option<AbstractState> {
+    pub fn state_at(
+        &self,
+        project: &Project,
+        seg_idx: SegmentIdx,
+        ofs: u32,
+    ) -> Option<AbstractState> {
         let block = project.blocks.block_containing(seg_idx, ofs)?;
         let entry = self.entry_state(block.seg_idx, block.start)?;
         Some(transfer_block_until(project, block, entry, ofs))
@@ -353,12 +368,17 @@ fn transfer_block_until(
     state
 }
 
-fn apply_attr_assumes(state: &mut AbstractState, project: &Project, seg_idx: usize, ofs: u32) {
-    if let Some(attr) = project.attr_at(seg_idx, ofs) {
-        for (i, target) in attr.assume.iter().enumerate() {
-            if let Some(target_seg) = *target {
-                state.sregs[i] = SegVal::Known(target_seg);
-            }
+fn apply_attr_assumes(state: &mut AbstractState, project: &Project, seg_idx: SegmentIdx, ofs: u32) {
+    let Some(attr) = project.attr_at(seg_idx, ofs) else {
+        return;
+    };
+
+    for (sreg_name, seg_name) in &attr.assume {
+        let Some(sreg) = AbstractState::sreg_idx_from_str(sreg_name) else {
+            continue;
+        };
+        if let Some(target_idx) = project.segments.iter().position(|s| &s.name == seg_name) {
+            state.sregs[sreg] = SegVal::Known(SegmentIdx::from(target_idx));
         }
     }
 }
@@ -449,7 +469,7 @@ fn write_arg_val(state: &mut AbstractState, arg: ArgType, dir: ArgDir, modrm: u8
 
 pub fn compute(project: &Project) -> SegDataflow {
     let mut df = SegDataflow::new();
-    let mut worklist: VecDeque<(usize, u32)> = VecDeque::new();
+    let mut worklist: VecDeque<Address> = VecDeque::new();
 
     // Seed: every block that has no CFG predecessors gets an initial state
     // with CS = Known(seg_idx) and any segment-level `assume` values applied.
@@ -457,9 +477,12 @@ pub fn compute(project: &Project) -> SegDataflow {
         if block.predecessors.is_empty() {
             let mut state = AbstractState::all_unknown();
             state.set_sreg(SReg::CS, SegVal::Known(block.seg_idx));
-            for (sreg_idx, target) in project.segments[block.seg_idx].assume.iter().enumerate() {
-                if let Some(target_seg) = target {
-                    state.sregs[sreg_idx] = SegVal::Known(*target_seg);
+            for (sreg_name, seg_name) in project.segments[block.seg_idx].assume.iter() {
+                let Some(sreg) = AbstractState::sreg_idx_from_str(sreg_name) else {
+                    continue;
+                };
+                if let Some(target_idx) = project.segments.iter().position(|s| &s.name == seg_name) {
+                    state.sregs[sreg] = SegVal::Known(SegmentIdx::from(target_idx));
                 }
             }
             df.block_entry
@@ -484,7 +507,7 @@ pub fn compute(project: &Project) -> SegDataflow {
 
         let exit = transfer_block(project, block, &entry);
 
-        let successors: Vec<(usize, u32)> = block.successors.to_vec();
+        let successors: Vec<Address> = block.successors.to_vec();
         for (succ_seg, succ_ofs) in successors {
             let changed = match df.block_entry.get_mut(&(succ_seg, succ_ofs)) {
                 Some(old) => {

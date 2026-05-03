@@ -1,10 +1,12 @@
 use std::fmt::Write;
 
+use std::path::Path;
+
 use crate::{
     DecodedInstruction, DisplayContext, SmallString,
     data_type::{CompositeDataType, DataType, ScalarDataType},
     disassemble,
-    project::{self, AttrType, Project},
+    project::{self, AttrType, FileFormat, Project, Segment, SegmentIdx},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,14 +20,17 @@ pub enum WidgetKind {
     Data,
     ArrayIndex { base_ofs: u32, index: usize },
     StructField { base_ofs: u32, field_index: usize },
+    FileHeader,
     SegmentHeader,
+    SegmentDecl,
+    AssumeDir,
     Comment,
 }
 
 #[derive(Debug, Clone)]
 pub struct Widget {
     pub kind: WidgetKind,
-    pub seg_idx: usize,
+    pub seg_idx: SegmentIdx,
     pub ofs: u32,
     pub x: u32,
     pub y: u32,
@@ -37,7 +42,7 @@ pub type Widgets = Vec<Widget>;
 pub struct LayoutBuilder<'a> {
     project: &'a Project,
     widgets: Widgets,
-    seg_idx: usize,
+    seg_idx: SegmentIdx,
     base_ofs: u32,
     ofs: u32,
     label_x0: u32,
@@ -59,7 +64,7 @@ enum LineState {
 impl<'a> LayoutBuilder<'a> {
     pub fn new(
         project: &'a Project,
-        seg_idx: usize,
+        seg_idx: SegmentIdx,
         ofs: u32,
         ctx: &'a DisplayContext<'a>,
     ) -> Self {
@@ -151,7 +156,7 @@ impl<'a> LayoutBuilder<'a> {
 
     fn layout_block_comment(&mut self, lines: &[&str]) {
         for line in lines {
-            let text = format!("; {line}").into();
+            let text = format!("; {line}");
             self.add(self.label_x0, WidgetKind::Comment, text);
             self.new_line();
         }
@@ -165,7 +170,7 @@ impl<'a> LayoutBuilder<'a> {
             ofs: self.base_ofs,
             x,
             y: self.y,
-            text: format!("; {comment}").into(),
+            text: format!("; {comment}"),
         });
     }
 
@@ -237,7 +242,7 @@ impl<'a> LayoutBuilder<'a> {
             }
 
             if let Some(label) = label {
-                self.add(self.label_x0, WidgetKind::Label, format!("{label}:").into());
+                self.add(self.label_x0, WidgetKind::Label, format!("{label}:"));
 
                 let long_label = self.label_x0 + label.len() as u32 + 1 >= self.text_x0;
 
@@ -283,7 +288,7 @@ impl<'a> LayoutBuilder<'a> {
         }
 
         if let Some(label) = label {
-            self.add(self.label_x0, WidgetKind::Label, format!("{label}:").into());
+            self.add(self.label_x0, WidgetKind::Label, format!("{label}:"));
             self.new_line();
         }
 
@@ -346,7 +351,7 @@ impl<'a> LayoutBuilder<'a> {
                 self.add(
                     x,
                     WidgetKind::Data,
-                    format!("dw {}", format_numeric_value(read_u8(bytes))).into(),
+                    format!("dw {}", format_numeric_value(read_u8(bytes))),
                 );
                 self.ofs += 1;
             }
@@ -354,7 +359,7 @@ impl<'a> LayoutBuilder<'a> {
                 self.add(
                     x,
                     WidgetKind::Data,
-                    format!("dw {}", format_numeric_value(read_u16(bytes))).into(),
+                    format!("dw {}", format_numeric_value(read_u16(bytes))),
                 );
                 self.ofs += 2;
             }
@@ -362,7 +367,7 @@ impl<'a> LayoutBuilder<'a> {
                 self.add(
                     x,
                     WidgetKind::Data,
-                    format!("dd {}", format_numeric_value(read_u32(bytes))).into(),
+                    format!("dd {}", format_numeric_value(read_u32(bytes))),
                 );
                 self.ofs += 4;
             }
@@ -370,7 +375,7 @@ impl<'a> LayoutBuilder<'a> {
                 self.add(
                     x,
                     WidgetKind::Data,
-                    format!("db {}", format_string_value(bytes, *n)).into(),
+                    format!("db {}", format_string_value(bytes, *n)),
                 );
                 self.ofs += *n as u32;
             }
@@ -396,12 +401,12 @@ impl<'a> LayoutBuilder<'a> {
                 if let Some(ofs_seg_idx) = ofs_seg_idx
                     && let Some(name) = self.project.name_at(ofs_seg_idx, v)
                 {
-                    self.add(x, WidgetKind::Data, format!("dw {}", name).into());
+                    self.add(x, WidgetKind::Data, format!("dw {}", name));
                 } else {
                     self.add(
                         x,
                         WidgetKind::Data,
-                        format!("dw {}", format_numeric_value(v)).into(),
+                        format!("dw {}", format_numeric_value(v)),
                     );
                 }
                 self.ofs += 2;
@@ -420,7 +425,7 @@ impl<'a> LayoutBuilder<'a> {
                 self.add(
                     x,
                     WidgetKind::ArrayIndex { base_ofs, index: i },
-                    format!("[{0:>1$}]", i, index_w as usize).into(),
+                    format!("[{0:>1$}]", i, index_w as usize),
                 );
                 self.layout_data(x + index_w + 3, elem);
                 self.new_line();
@@ -432,7 +437,7 @@ impl<'a> LayoutBuilder<'a> {
             self.add(
                 x,
                 WidgetKind::ArrayIndex { base_ofs, index: i },
-                format!("[{0:>1$}] {{", i, index_w as usize).into(),
+                format!("[{0:>1$}] {{", i, index_w as usize),
             );
             self.new_line();
             self.layout_data(x + 2, elem);
@@ -544,48 +549,276 @@ fn format_string_value(bytes: &[u8], n: usize) -> SmallString {
     s
 }
 
+fn push_addr_widget(
+    widgets: &mut Vec<Widget>,
+    seg_idx: SegmentIdx,
+    seg_name: &str,
+    ofs: u32,
+    y: u32,
+) {
+    let mut text = SmallString::new();
+    let _ = write!(text, "{seg_name}:{ofs:04x}");
+    widgets.push(Widget {
+        kind: WidgetKind::Address,
+        seg_idx,
+        ofs,
+        x: 0,
+        y,
+        text,
+    });
+}
+
+fn push_header_line(
+    widgets: &mut Vec<Widget>,
+    kind: WidgetKind,
+    seg_idx: SegmentIdx,
+    seg_name: &str,
+    ofs: u32,
+    x: u32,
+    y: &mut u32,
+    text: &str,
+) {
+    push_addr_widget(widgets, seg_idx, seg_name, ofs, *y);
+    let mut s = SmallString::new();
+    let _ = write!(s, "{text}");
+    widgets.push(Widget {
+        kind,
+        seg_idx,
+        ofs,
+        x,
+        y: *y,
+        text: s,
+    });
+    *y += 1;
+}
+
+fn push_header_blank(
+    widgets: &mut Vec<Widget>,
+    seg_idx: SegmentIdx,
+    seg_name: &str,
+    ofs: u32,
+    y: &mut u32,
+) {
+    push_addr_widget(widgets, seg_idx, seg_name, ofs, *y);
+    *y += 1;
+}
+
+fn labeled_item_lines(items: &[(&str, &str)]) -> Vec<String> {
+    let width = items.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    items
+        .iter()
+        .map(|(k, v)| format!("; {k:<width$}: {v}"))
+        .collect()
+}
+
+fn centered_box_lines(titles: &[&str]) -> Vec<String> {
+    const BOX_INNER: usize = 73;
+    let border = format!("; +{}+", "-".repeat(BOX_INNER));
+    let mut lines = vec![border.clone()];
+    for &title in titles {
+        let pad = BOX_INNER.saturating_sub(title.len());
+        let lpad = pad / 2;
+        let rpad = pad - lpad;
+        lines.push(format!(
+            "; |{}{title}{}|",
+            " ".repeat(lpad),
+            " ".repeat(rpad)
+        ));
+    }
+    lines.push(border);
+    lines
+}
+
+fn generate_file_header(
+    project: &Project,
+    seg_idx: SegmentIdx,
+    seg_name: &str,
+    widgets: &mut Vec<Widget>,
+    global_y: &mut u32,
+) {
+    let label_x0 = seg_name.len() as u32 + 6;
+
+    let hl = |w: &mut Vec<Widget>, y: &mut u32, text: &str| {
+        push_header_line(
+            w,
+            WidgetKind::FileHeader,
+            seg_idx,
+            seg_name,
+            0,
+            label_x0,
+            y,
+            text,
+        );
+    };
+
+    hl(widgets, global_y, ";");
+    for line in &centered_box_lines(&[
+        "",
+        "This file is generated by Chani Disassembler",
+        // "",
+        // "~ thomas.fach-pedersen.net ~",
+        "",
+    ]) {
+        hl(widgets, global_y, line);
+    }
+    hl(widgets, global_y, ";");
+
+    let mut items: Vec<(&str, String)> = Vec::new();
+
+    if let Some(file) = project.files.first() {
+        let file_name = Path::new(&file.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&file.path)
+            .to_owned();
+        items.push(("File Name", file_name));
+
+        let fmt = match file.format {
+            FileFormat::Exe => "MS-DOS executable (EXE)",
+            FileFormat::Com => "MS-DOS COM executable",
+            FileFormat::Bin => "Binary",
+        };
+        items.push(("Format", fmt.to_owned()));
+
+        if let Some(hash) = &file.hash {
+            let hex = hash.bytes.iter().map(|b| format!("{b:02x}")).collect();
+            items.push(("Input SHA1", hex));
+        }
+    }
+
+    if let Some(exe) = &project.exe {
+        items.push((
+            "Loaded length",
+            format_numeric_value(exe.image.len() as u32).to_string(),
+        ));
+
+        let entry_str = match project.segment_index_for(exe.head.cs) {
+            Some(idx) => format!("{}:{:04x}", project.segments[idx].name, exe.head.ip),
+            None => format!("{:04X}h:{:04X}h", exe.head.cs, exe.head.ip),
+        };
+        items.push(("Entry Point", entry_str));
+    }
+
+    let item_refs: Vec<(&str, &str)> = items.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    for line in &labeled_item_lines(&item_refs) {
+        hl(widgets, global_y, line);
+    }
+
+    hl(widgets, global_y, ";");
+    push_header_blank(widgets, seg_idx, seg_name, 0, global_y);
+}
+
+fn generate_segment_header(
+    seg: &Segment,
+    seg_idx: SegmentIdx,
+    widgets: &mut Vec<Widget>,
+    global_y: &mut u32,
+) {
+    let seg_name = seg.name.as_str();
+    let label_x0 = seg_name.len() as u32 + 6;
+    let text_x0 = label_x0 + 16;
+
+    let sh = |w: &mut Vec<Widget>, y: &mut u32, text: &str| {
+        push_header_line(
+            w,
+            WidgetKind::SegmentHeader,
+            seg_idx,
+            seg_name,
+            0,
+            label_x0,
+            y,
+            text,
+        );
+    };
+
+    sh(widgets, global_y, &format!("; {}", "-".repeat(75)));
+    sh(widgets, global_y, ";");
+
+    let type_str = match seg.r#type.as_deref() {
+        Some("code") => "Pure code",
+        Some("data") => "Pure data",
+        Some("stack") => "Stack",
+        Some(other) => other,
+        None => "Unknown",
+    };
+    sh(widgets, global_y, &format!("; Segment type: {type_str}"));
+    sh(widgets, global_y, ";");
+
+    let class = match seg.r#type.as_deref() {
+        Some("data") => "DATA",
+        Some("stack") => "STACK",
+        _ => "CODE",
+    };
+    push_header_line(
+        widgets,
+        WidgetKind::SegmentDecl,
+        seg_idx,
+        seg_name,
+        0,
+        label_x0,
+        global_y,
+        &format!("{seg_name:<16}segment byte public '{class}' use16"),
+    );
+
+    if seg.r#type.as_deref() == Some("code") || seg.r#type.is_none() {
+        push_header_line(
+            widgets,
+            WidgetKind::AssumeDir,
+            seg_idx,
+            seg_name,
+            0,
+            text_x0,
+            global_y,
+            &format!("assume cs:{seg_name}"),
+        );
+    }
+    for (reg, assume_seg) in &seg.assume {
+        push_header_line(
+            widgets,
+            WidgetKind::AssumeDir,
+            seg_idx,
+            seg_name,
+            0,
+            text_x0,
+            global_y,
+            &format!("assume {reg}:{assume_seg}"),
+        );
+    }
+
+    sh(widgets, global_y, ";");
+}
+
 /// Build a globally-y-positioned flat widget list for the entire project.
 /// Returns the widgets and the total number of rows.
 pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
     let mut all_widgets: Vec<Widget> = Vec::new();
     let mut global_y = 0u32;
 
-    for seg_idx in 0..project.segments.len() {
-        let seg = &project.segments[seg_idx];
+    let (first_seg_idx, first_seg_name) = project
+        .segments
+        .indexed_iter()
+        .next()
+        .map(|(idx, seg)| (idx, seg.name.as_str().to_owned()))
+        .unwrap_or_else(|| (SegmentIdx::from(0usize), String::new()));
+
+    for (i, (seg_idx, seg)) in project.segments.indexed_iter().enumerate() {
+        if i == 0 {
+            generate_file_header(
+                project,
+                first_seg_idx,
+                &first_seg_name,
+                &mut all_widgets,
+                &mut global_y,
+            );
+        }
+
+        generate_segment_header(seg, seg_idx, &mut all_widgets, &mut global_y);
+
         let seg_start = seg.start.unwrap_or(0);
         let seg_end = seg.end.unwrap_or(0);
 
-        let mut header_text = SmallString::new();
-        let _ = write!(
-            header_text,
-            "; Segment: {} ({})  {:05x}..{:05x}",
-            seg.name,
-            seg.r#type.as_deref().unwrap_or("?"),
-            seg_start,
-            seg_end,
-        );
-        all_widgets.push(Widget {
-            kind: WidgetKind::SegmentHeader,
-            seg_idx,
-            ofs: 0,
-            x: 0,
-            y: global_y,
-            text: header_text,
-        });
-        global_y += 1;
-        all_widgets.push(Widget {
-            kind: WidgetKind::Address,
-            seg_idx,
-            ofs: 0,
-            x: 0,
-            y: global_y,
-            text: SmallString::new(),
-        });
-        global_y += 1;
-
-        let seg_len = seg_end - seg_start;
-        let mut ofs = 0u32;
-        while ofs < seg_len {
+        let mut ofs = seg_start;
+        while ofs < seg_end {
             let sreg_map = project
                 .seg_dataflow
                 .state_at(project, seg_idx, ofs + seg_start)

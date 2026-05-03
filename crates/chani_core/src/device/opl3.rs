@@ -35,11 +35,16 @@ impl Device for OPL3 {
             self.write_index[addr as usize / 2] = v;
         } else if addr % 2 == 1 {
             println!(
-                "\tOPL3: I/O write [{}][{:02X}] = {:02X}",
-                addr as usize / 2,
+                "WRITE {:02X}: {:02X}",
                 self.write_index[addr as usize / 2],
                 v
             );
+            // println!(
+            //     "\tOPL3: I/O write [{}][{:02X}] = {:02X}",
+            //     addr as usize / 2,
+            //     self.write_index[addr as usize / 2],
+            //     v
+            // );
         }
     }
 

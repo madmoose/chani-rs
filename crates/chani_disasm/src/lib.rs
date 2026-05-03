@@ -21,7 +21,11 @@ pub use disassemble::decode;
 pub use memory_reference::*;
 pub use opcode_table::Opcode;
 
-type SmallString = smallstr::SmallString<[u8; 55]>;
+use crate::project::SegmentIdx;
+
+type SmallString = String; //smallstr::SmallString<[u8; 55]>;
+
+pub type Address = (SegmentIdx, u32);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SReg {

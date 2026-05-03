@@ -1,6 +1,6 @@
 use crate::{
     SmallString,
-    project::{Segment, Structs},
+    project::{SegmentIdx, Segments, Structs},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -13,7 +13,7 @@ pub enum ScalarDataType {
     Char(usize),
     /// Null-terminated C string; byte size is variable (0 is returned as a sentinel).
     CStr,
-    Ofs16(Option<usize>),
+    Ofs16(Option<SegmentIdx>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -41,7 +41,7 @@ pub struct StructField {
 }
 
 impl DataType {
-    pub fn type_str(&self, segments: &[Segment], structs: &Structs) -> String {
+    pub fn type_str(&self, segments: &Segments, structs: &Structs) -> String {
         match self {
             DataType::Scalar(s) => s.type_str(segments),
             DataType::Composite(c) => c.type_str(segments, structs),
@@ -56,31 +56,19 @@ impl DataType {
     }
 
     pub fn is_scalar(&self) -> bool {
-        match self {
-            DataType::Scalar(_) => true,
-            _ => false,
-        }
+        matches!(self, DataType::Scalar(_))
     }
 
     pub fn is_composite(&self) -> bool {
-        match self {
-            DataType::Composite(_) => true,
-            _ => false,
-        }
+        matches!(self, DataType::Composite(_))
     }
 
     pub fn is_array(&self) -> bool {
-        match self {
-            DataType::Composite(CompositeDataType::Array { .. }) => true,
-            _ => false,
-        }
+        matches!(self, DataType::Composite(CompositeDataType::Array { .. }))
     }
 
     pub fn is_struct(&self) -> bool {
-        match self {
-            DataType::Composite(CompositeDataType::Struct(_)) => true,
-            _ => false,
-        }
+        matches!(self, DataType::Composite(CompositeDataType::Struct(_)))
     }
 
     pub fn as_scalar(&self) -> Option<&ScalarDataType> {
@@ -106,13 +94,13 @@ impl DataType {
 }
 
 impl ScalarDataType {
-    pub fn type_str(&self, segments: &[Segment]) -> String {
+    pub fn type_str(&self, segments: &Segments) -> String {
         match self {
             ScalarDataType::Unknown => "unknown".to_owned(),
             ScalarDataType::U8 => "u8".to_owned(),
             ScalarDataType::U16 => "u16".to_owned(),
             ScalarDataType::U32 => "u32".to_owned(),
-            ScalarDataType::Char(n) => format!("char[{n}]"),
+            ScalarDataType::Char(n) => format!("char({n})"),
             ScalarDataType::Ofs16(None) => "ofs16".to_owned(),
             ScalarDataType::Ofs16(Some(idx)) => format!("ofs16({})", segments[*idx].name),
             ScalarDataType::CStr => "cstr".to_owned(),
@@ -136,7 +124,7 @@ impl ScalarDataType {
 }
 
 impl CompositeDataType {
-    pub fn type_str(&self, segments: &[Segment], structs: &Structs) -> String {
+    pub fn type_str(&self, segments: &Segments, structs: &Structs) -> String {
         match self {
             CompositeDataType::Struct(idx) => structs[*idx].name.to_string(),
             CompositeDataType::Array { elem, count } => {

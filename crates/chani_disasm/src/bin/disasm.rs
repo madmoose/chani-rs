@@ -1,12 +1,10 @@
 use std::{
-    collections::BTreeMap,
     io::{self, Write},
     path::Path,
 };
 
 use chani_disasm::{
-    DisplayContext, SRegMap,
-    layout::{LayoutBuilder, Widget, Widgets, render_widgets},
+    layout::{generate_widgets, render_widgets},
     project::Project,
     seg_dataflow::SegVal,
 };
@@ -38,10 +36,19 @@ fn main() {
         }
     };
 
+    if false {
+        let mut stdout = io::BufWriter::new(io::stdout().lock());
+        if let Err(e) = project.write_to(&mut stdout) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
+
     project.analyze();
 
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
+
     if show_dataflow {
-        let mut stdout = io::BufWriter::new(io::stdout().lock());
         if let Err(e) = print_dataflow(&project, &mut stdout)
             && e.kind() != io::ErrorKind::BrokenPipe
         {
@@ -51,15 +58,34 @@ fn main() {
         return;
     }
 
-    let listing = build_listing(&project);
-
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
-    if let Err(e) = print_listing(&listing, &mut stdout)
+    if let Err(e) = print_listing(&project, &mut stdout)
         && e.kind() != io::ErrorKind::BrokenPipe
     {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn print_listing<W: Write>(project: &Project, w: &mut W) -> io::Result<()> {
+    let t0 = std::time::Instant::now();
+    let (widgets, total_rows) = generate_widgets(project);
+    let t1 = std::time::Instant::now();
+
+    let mut buf = String::with_capacity(120);
+    for y in 0..total_rows {
+        buf.clear();
+        render_widgets(&widgets, &mut buf, y);
+        writeln!(w, "{buf}")?;
+    }
+    let t2 = std::time::Instant::now();
+
+    eprintln!(
+        "generate: {:?}  render: {:?}  total: {:?}",
+        t1 - t0,
+        t2 - t1,
+        t2 - t0,
+    );
+    Ok(())
 }
 
 // ── Dataflow summary ──────────────────────────────────────────────────────────
@@ -71,7 +97,7 @@ fn fmt_seg_val<'a>(v: &SegVal, project: &'a Project) -> &'a str {
     }
 }
 
-fn print_dataflow(project: &Project, w: &mut impl Write) -> io::Result<()> {
+fn print_dataflow<W: Write>(project: &Project, w: &mut W) -> io::Result<()> {
     let gp_names = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"];
 
     let total_blocks = project.seg_dataflow.block_entry.len();
@@ -88,11 +114,10 @@ fn print_dataflow(project: &Project, w: &mut impl Write) -> io::Result<()> {
         return Ok(());
     }
 
-    // Compute column width for the address prefix.
     let addr_width = project
         .segments
         .iter()
-        .map(|s| s.name.len() + 5) // "name:xxxx"
+        .map(|s| s.name.len() + 5)
         .max()
         .unwrap_or(12);
 
@@ -124,68 +149,6 @@ fn print_dataflow(project: &Project, w: &mut impl Write) -> io::Result<()> {
             w,
             "{addr:<addr_width$}  {cs:<8} {ds:<8} {es:<8} {ss:<8}  {gp}"
         )?;
-    }
-
-    Ok(())
-}
-
-// ── Listing ───────────────────────────────────────────────────────────────────
-
-type Listing = BTreeMap<(usize, u32), Vec<Widget>>;
-
-fn build_listing(project: &Project) -> Listing {
-    let mut listing: Listing = BTreeMap::<(usize, u32), Widgets>::new();
-
-    for seg_idx in 0..project.segments.len() {
-        let seg = &project.segments[seg_idx];
-        let seg_start = seg.start.unwrap_or(0);
-        let seg_end = seg.end.unwrap_or(0);
-
-        let mut ofs = seg_start;
-        while ofs < seg_end {
-            let sreg_map = project
-                .seg_dataflow
-                .state_at(project, seg_idx, ofs)
-                .map(|s| s.to_sreg_map())
-                .unwrap_or(SRegMap {
-                    cs: Some(seg_idx),
-                    ..Default::default()
-                });
-
-            let lookup = chani_disasm::project::ProjectLookup {
-                project,
-                sreg_map,
-                register_file: None,
-                default_seg: None,
-            };
-            let ctx = DisplayContext { lookup: &lookup };
-
-            let mut layout_builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
-
-            layout_builder.layout();
-            let widgets = layout_builder.widgets();
-
-            listing.insert((seg_idx, ofs), widgets);
-
-            let Some(next_ofs) = project.segments[seg_idx].addr_attributes.next(ofs) else {
-                break;
-            };
-            ofs = next_ofs;
-        }
-    }
-
-    listing
-}
-
-fn print_listing(listing: &Listing, w: &mut impl Write) -> io::Result<()> {
-    let mut buf = String::with_capacity(120);
-    for widgets in listing.values() {
-        let lines = widgets.iter().map(|w| w.y).max().unwrap_or_default() + 1;
-        for y in 0..lines {
-            buf.clear();
-            render_widgets(widgets, &mut buf, y);
-            writeln!(w, "{buf}")?;
-        }
     }
 
     Ok(())
