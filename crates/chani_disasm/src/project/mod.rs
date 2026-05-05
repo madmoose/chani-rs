@@ -998,6 +998,46 @@ impl Project {
         self.attr_at(seg_idx, ofs)?.name.as_deref()
     }
 
+    /// Resolve an address to a label, preferring structured paths over flat names.
+    ///
+    /// Priority:
+    /// 1. Exact user-supplied label at `(seg_idx, ofs)`
+    /// 2. Array/struct path from a named typed attr that covers the address
+    ///    (e.g. `locations[45]` or `locations[45].status`)
+    /// 3. Exact auto-label at `(seg_idx, ofs)`
+    pub fn resolve_label(&self, seg_idx: SegmentIdx, ofs: u32) -> Option<String> {
+        if let Some(attr) = self.attr_at(seg_idx, ofs) {
+            if let Some(name) = &attr.name {
+                if !attr.is_auto_label {
+                    return Some(name.clone());
+                }
+            }
+        }
+        if let Some(label) = self.resolve_typed_label(seg_idx, ofs) {
+            return Some(label);
+        }
+        self.name_at(seg_idx, ofs).map(String::from)
+    }
+
+    fn resolve_typed_label(&self, seg_idx: SegmentIdx, ofs: u32) -> Option<String> {
+        for (&(_, attr_ofs), attr) in self.attrs.range((seg_idx, 0)..=(seg_idx, ofs)).rev() {
+            let rel = (ofs - attr_ofs) as usize;
+            if rel == 0 {
+                continue; // exact match already handled by resolve_label
+            }
+            let Some(name) = attr.name.as_deref().filter(|_| !attr.is_auto_label) else {
+                continue;
+            };
+            let Some(dt) = attr.r#type.as_ref().and_then(|t| t.as_data()) else {
+                continue;
+            };
+            if let Some(label) = path_in_type(dt, rel, name, &self.structs) {
+                return Some(label);
+            }
+        }
+        None
+    }
+
     fn ensure_auto_label(
         attrs: &mut BTreeMap<Address, Attr>,
         seg_idx: SegmentIdx,
@@ -1049,6 +1089,72 @@ impl Project {
     }
 }
 
+// ── Structured label resolution helpers ──────────────────────────────────────
+
+/// Returns the byte size of `dt` without reading any binary data.
+/// Returns `None` for variable-size types (`cstr`, `unknown`).
+fn fixed_size(dt: &DataType, structs: &Structs) -> Option<usize> {
+    match dt {
+        DataType::Scalar(ScalarDataType::CStr | ScalarDataType::Unknown) => None,
+        DataType::Scalar(s) => Some(s.byte_size(&[])),
+        DataType::Composite(CompositeDataType::Array { elem, count }) => {
+            Some(fixed_size(elem, structs)? * count)
+        }
+        DataType::Composite(CompositeDataType::Struct(idx)) => {
+            let def = &structs[*idx];
+            let mut total = 0usize;
+            for field in &def.fields {
+                total += fixed_size(&field.r#type, structs)?;
+            }
+            Some(total)
+        }
+        DataType::Formatted(_, inner) => fixed_size(inner, structs),
+    }
+}
+
+/// Build a label path for byte offset `rel` into type `dt` starting at `prefix`.
+/// Returns `None` if `rel` is out of range or the type is variable-size.
+fn path_in_type(dt: &DataType, rel: usize, prefix: &str, structs: &Structs) -> Option<String> {
+    match dt {
+        DataType::Composite(CompositeDataType::Array { elem, count }) => {
+            let elem_size = fixed_size(elem, structs).filter(|&s| s > 0)?;
+            let index = rel / elem_size;
+            if index >= *count {
+                return None;
+            }
+            let inner_rel = rel % elem_size;
+            let indexed = format!("{prefix}[{index}]");
+            if inner_rel == 0 {
+                Some(indexed)
+            } else {
+                path_in_type(elem, inner_rel, &indexed, structs)
+            }
+        }
+        DataType::Composite(CompositeDataType::Struct(idx)) => {
+            let def = &structs[*idx];
+            let mut cursor = 0usize;
+            for field in &def.fields {
+                let field_size = fixed_size(&field.r#type, structs)?;
+                if rel >= cursor && rel < cursor + field_size {
+                    let inner_rel = rel - cursor;
+                    let field_path = format!("{prefix}.{}", field.name);
+                    return if inner_rel == 0 {
+                        Some(field_path)
+                    } else {
+                        path_in_type(&field.r#type, inner_rel, &field_path, structs)
+                    };
+                }
+                cursor += field_size;
+            }
+            None
+        }
+        DataType::Formatted(_, inner) => path_in_type(inner, rel, prefix, structs),
+        DataType::Scalar(_) => {
+            if rel == 0 { Some(prefix.to_string()) } else { None }
+        }
+    }
+}
+
 // ── Symbol lookup ─────────────────────────────────────────────────────────────
 
 pub struct ProjectLookup<'a> {
@@ -1060,9 +1166,8 @@ pub struct ProjectLookup<'a> {
 
 impl SymbolLookup for ProjectLookup<'_> {
     fn lookup_direct(&self, seg: u16, ofs: u16, _width: crate::DataWidth) -> Option<String> {
-        // println!("lookup_direct: {:04x}:{:04x}", seg, ofs);
         let idx = self.project.segment_index_for(seg)?;
-        self.project.name_at(idx, ofs as u32).map(String::from)
+        self.project.resolve_label(idx, ofs as u32)
     }
 
     fn lookup_indirect(
@@ -1098,33 +1203,26 @@ impl SymbolLookup for ProjectLookup<'_> {
         // let idx = index.map(|i| rf.get_index_reg(i));
 
         let name = match (base, index) {
-            (None, None) => self.project.name_at(seg, disp as u32).map(String::from),
+            (None, None) => self.project.resolve_label(seg, disp as u32),
             (None, Some(index)) => Some({
-                let name = self.project.name_at(seg, disp as u32)?;
-                // println!("lookup = {name}[{index}]");
+                let name = self.project.resolve_label(seg, disp as u32)?;
                 format!("{name}[{index}]")
             }),
             (Some(base), None) => Some({
-                let name = self.project.name_at(seg, disp as u32)?;
-                // println!("lookup = {name}[{base}]");
+                let name = self.project.resolve_label(seg, disp as u32)?;
                 format!("{name}[{base}]")
             }),
             (Some(base), Some(index)) => Some({
-                let name = self.project.name_at(seg, disp as u32)?;
-                // println!("lookup = {name}[{base}+{index}]");
+                let name = self.project.resolve_label(seg, disp as u32)?;
                 format!("{name}[{base}+{index}]")
             }),
         };
-
-        // println!("{seg:?} {name:?}");
 
         name
     }
 
     fn lookup_offset(&self, ofs: u16) -> Option<String> {
-        self.project
-            .name_at(self.default_seg?, ofs as u32)
-            .map(String::from)
+        self.project.resolve_label(self.default_seg?, ofs as u32)
     }
 }
 

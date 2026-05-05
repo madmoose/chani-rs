@@ -425,7 +425,7 @@ impl<'a> LayoutBuilder<'a> {
                 let v = read_u16(bytes);
 
                 if let Some(ofs_seg_idx) = ofs_seg_idx
-                    && let Some(name) = self.project.name_at(ofs_seg_idx, v)
+                    && let Some(name) = self.project.resolve_label(ofs_seg_idx, v)
                 {
                     self.add(x, WidgetKind::Data, format!("dw {}", name));
                 } else {
