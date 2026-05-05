@@ -39,6 +39,16 @@ pub enum DataWidth {
     Dword, // 32-bit data
 }
 
+impl DataWidth {
+    pub fn sign_extend(self, v: u32) -> i32 {
+        match self {
+            DataWidth::Byte => v as u8 as i8 as i32,
+            DataWidth::Word => v as u16 as i16 as i32,
+            DataWidth::Dword => v as i32,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Offset {
     Offset8(i8),   // 8-bit signed displacement

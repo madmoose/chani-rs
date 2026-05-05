@@ -405,6 +405,7 @@ impl Cpu {
             if let Some(inst) = chani_disasm::decode(csip.seg, csip.ofs, bytes) {
                 let inst_str = inst.to_string_opts(DisplayContext {
                     lookup: &NameMapLookup(&self.names),
+                    arg_fmts: [None; 2],
                 });
                 let mem_value = if inst.reads_from_mem()
                     && let Some(mem_ref) = inst.mem_ref()

@@ -2,7 +2,7 @@ use std::fmt::{Display, Write};
 
 use smallvec::SmallVec;
 
-use crate::{BaseReg, DataWidth, IndexReg, MemRef, SReg, project::SegmentIdx};
+use crate::{BaseReg, DataWidth, IndexReg, MemRef, SReg, data_type::DisplayFmt, project::SegmentIdx};
 
 use super::opcode_table::{ArgDir, ArgType, Opcode};
 
@@ -21,6 +21,23 @@ pub struct DecodedInstruction {
     pub flag_f3: bool,
     pub imm: [u32; 2],
     pub has_mem_arg: bool,
+}
+
+fn write_imm_fmt<W: Write>(w: &mut W, v: u32, width: DataWidth, fmt: DisplayFmt) -> std::fmt::Result {
+    match fmt {
+        DisplayFmt::Default | DisplayFmt::Hex => write_imm(w, v),
+        DisplayFmt::Dec => write!(w, "{v}"),
+        DisplayFmt::SignedDec => write!(w, "{}", width.sign_extend(v)),
+        DisplayFmt::Bin => write!(w, "0b{v:b}"),
+        DisplayFmt::Char => {
+            let b = v as u8;
+            if b.is_ascii_graphic() && b != b'\'' {
+                write!(w, "'{}'", b as char)
+            } else {
+                write_imm(w, v)
+            }
+        }
+    }
 }
 
 fn write_imm<W: Write>(w: &mut W, v: u32) -> std::fmt::Result {
@@ -286,9 +303,10 @@ pub trait SymbolLookup {
     /// For `Imm8`/`Imm16` — resolves using a pre-configured default segment.
     fn lookup_offset(&self, ofs: u16) -> Option<String>;
 }
-
 pub struct DisplayContext<'a> {
     pub lookup: &'a dyn SymbolLookup,
+    /// Per-operand display format hints (index 0 and 1).
+    pub arg_fmts: [Option<DisplayFmt>; 2],
 }
 
 /// Static mapping from segment registers to known project segment indices.
@@ -455,11 +473,17 @@ impl DecodedInstruction {
                 let s = ["es", "cs", "ss", "ds"];
                 write!(w, "{}", s[reg as usize])?;
             }
-            ArgType::Imm8 | ArgType::Imm16 => {
+            ArgType::Imm8 => {
                 if let Some(name) = ctx.lookup.lookup_offset(self.imm[i] as u16) {
                     return write!(w, "{name}");
                 }
-                write_imm(w, self.imm[i])?;
+                write_imm_fmt(w, self.imm[i], DataWidth::Byte, ctx.arg_fmts[i].unwrap_or_default())?;
+            }
+            ArgType::Imm16 => {
+                if let Some(name) = ctx.lookup.lookup_offset(self.imm[i] as u16) {
+                    return write!(w, "{name}");
+                }
+                write_imm_fmt(w, self.imm[i], DataWidth::Word, ctx.arg_fmts[i].unwrap_or_default())?;
             }
             ArgType::Rel8 => {
                 let inc = self.imm[i] as i8 as i16 as u16;
@@ -638,6 +662,7 @@ impl DecodedInstruction {
                     f,
                     DisplayContext {
                         lookup: self.ctx.lookup,
+                        arg_fmts: self.ctx.arg_fmts,
                     },
                 )
             }
@@ -674,6 +699,7 @@ impl Display for DecodedInstruction {
             f,
             DisplayContext {
                 lookup: &NullLookup,
+                arg_fmts: [None; 2],
             },
         )
     }

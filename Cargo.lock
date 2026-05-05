@@ -692,6 +692,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chani_idc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chani_disasm",
+ "clap",
+ "encoding_rs",
+]
+
+[[package]]
 name = "chani_tui"
 version = "0.0.0"
 dependencies = [
@@ -1138,6 +1148,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a05cd8bdf3b598488c627ca97c7fe8909448ffa26278dd3c7e535cdb554d721"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]

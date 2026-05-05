@@ -12,7 +12,7 @@ use chani_datafile::{SmallString, parser};
 
 use crate::basic_block::{BasicBlock, BasicBlockMap};
 use crate::branch_map::BranchMap;
-use crate::data_type::{CompositeDataType, DataType, ScalarDataType, StructDef};
+use crate::data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType, StructDef};
 use crate::project::architecure::Architecture;
 use crate::project::loadexpr::LoadExpr;
 use crate::seg_dataflow::SegDataflow;
@@ -21,8 +21,8 @@ use crate::{Address, MemRef, SymbolLookup, decode};
 use crate::{address_attributes::AddressAttributes, exe_mz::ExeMz};
 
 use parse::{
-    UnresolvedStructDef, fmt_load_expr, fmt_u32, parse_attr, parse_file_def, parse_load_expr,
-    parse_segment, parse_struct, resolve_structs, validate_no_struct_cycles,
+    UnresolvedStructDef, fmt_load_expr, fmt_u32, parse_attr, parse_attr_type_str, parse_file_def,
+    parse_load_expr, parse_segment, parse_struct, resolve_structs, validate_no_struct_cycles,
 };
 
 pub use segments::{Segment, SegmentIdx, Segments};
@@ -154,6 +154,8 @@ pub struct Attr {
     pub comment: Option<String>,
     /// Assumed segment register values at this address.
     pub assume: Vec<(SmallString, SmallString)>,
+    /// Per-operand display format for code instructions (operand 0 and 1).
+    pub arg_fmts: [Option<DisplayFmt>; 2],
 }
 
 // ── Project implementation ────────────────────────────────────────────────────
@@ -215,6 +217,14 @@ impl Project {
             .as_ref()
             .and_then(|e| e.image.get(start + ofs as usize..))
             .unwrap_or(&[])
+    }
+
+    /// Parse a project from a string without loading any binary files.
+    /// Segments and structs are fully resolved; `images`, `exe`, and binary bytes are empty.
+    pub fn from_str(content: &str) -> std::result::Result<Self, String> {
+        let tokens = parser::parse(content)?;
+        let doc = ast::Document::from_tokens(tokens)?;
+        Project::from_document(doc)
     }
 
     pub fn from_project_file(path: &str) -> std::result::Result<Self, String> {
@@ -539,6 +549,11 @@ impl Project {
                         .join(" ");
                     attr_dict.prop("assume", &assume_str);
                 }
+                for (i, fmt) in attr.arg_fmts.iter().enumerate() {
+                    if let Some(fmt) = fmt {
+                        attr_dict.prop(format!("arg[{i}]"), fmt.as_str());
+                    }
+                }
                 if let Some(comment) = &attr.comment {
                     attr_dict.prop_encoded("comment", comment.as_str());
                 }
@@ -562,35 +577,24 @@ impl Project {
 
     /// Mark all data-typed attributes in `addr_attributes` with their byte extents.
     pub fn mark_data_attributes(&mut self) {
-        // Phase 1: collect (seg_idx, ofs, DataType) — clone to release the attrs borrow.
-        let attrs: Vec<(SegmentIdx, u32, DataType)> = self
+        let addr_data_sizes: Vec<(Address, usize)> = self
             .attrs
-            .values()
-            .filter_map(|attr| {
-                if let Some(AttrType::Data(ref d)) = attr.r#type {
-                    let (seg_idx, ofs) = attr.addr;
-                    Some((seg_idx, ofs, d.clone()))
-                } else {
-                    None
-                }
+            .iter()
+            .filter_map(|(&addr, attr)| {
+                let data_type = attr.r#type.as_ref().and_then(|typ| typ.as_data())?;
+                Some((addr, data_type))
             })
-            .collect();
-
-        // Phase 2: compute actual byte sizes from real file data (all immutable borrows).
-        let spans: Vec<(SegmentIdx, u32, usize)> = attrs
-            .into_iter()
-            .map(|(seg_idx, ofs, data_type)| {
-                let bytes = self.bytes_at_seg(seg_idx, ofs);
+            .map(|(addr, data_type)| {
+                let bytes = self.bytes_at_seg(addr.0, addr.1);
                 let size = data_type.byte_size(bytes, &self.structs).max(1);
-                (seg_idx, ofs, size)
+                (addr, size)
             })
             .collect();
 
-        // Phase 3: mark (mutable borrow).
-        for (seg_idx, ofs, size) in spans {
-            self.segments[seg_idx]
+        for (addr, size) in addr_data_sizes {
+            self.segments[addr.0]
                 .addr_attributes
-                .mark_as_data(ofs, size as u32);
+                .mark_as_data(addr.1, size as u32);
         }
     }
 
@@ -599,7 +603,6 @@ impl Project {
         let mut queue: WorkQueue<Address> = WorkQueue::new();
         let mut branches = BranchMap::new();
 
-        // Collect all entry seeds before touching addr_attributes (avoids borrow conflicts).
         let mut seeds: Vec<Address> = Vec::new();
 
         if let Some(exe) = &self.exe {
@@ -608,25 +611,14 @@ impl Project {
             }
         }
 
-        // for img in &self.images {
-        //     let format = self.segments[img.seg_idx]
-        //         .load
-        //         .as_ref()
-        //         .map(|l| &self.files[l.file_idx].format);
-        //     if matches!(format, Some(FileFormat::Com)) {
-        //         seeds.push((img.seg_idx, img.load_offset + 0x100));
-        //     }
-        // }
-
         let code_seeds: Vec<Address> = self
             .attrs
             .values()
             .filter(|a| a.r#type == Some(AttrType::Code))
             .map(|a| a.addr)
             .collect();
-        seeds.extend(code_seeds);
 
-        // dbg!(&seeds);
+        seeds.extend(code_seeds);
 
         for addr in seeds {
             queue.push(addr);
@@ -847,100 +839,154 @@ impl Project {
             Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
         }
 
-        let data_addrs: Vec<Address> = self
-            .attrs
-            .values()
-            .filter(|a| a.name.is_none() && matches!(a.r#type, Some(AttrType::Data(_))))
-            .map(|a| a.addr)
-            .collect();
-        for (seg_idx, ofs) in data_addrs {
-            let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
-            Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
+        {
+            let data_addrs: Vec<Address> = self
+                .attrs
+                .values()
+                .filter(|a| a.name.is_none() && matches!(a.r#type, Some(AttrType::Data(_))))
+                .map(|a| a.addr)
+                .collect();
+            for (seg_idx, ofs) in data_addrs {
+                let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+                Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
+            }
         }
 
         // Collect all ofs16 targets (direct or inside composites) and label them.
-        let ofs16_info: Vec<(SegmentIdx, u32, DataType, Option<SegmentIdx>)> = self
-            .attrs
-            .values()
-            .filter_map(|attr| {
-                if let Some(AttrType::Data(ref d)) = attr.r#type {
-                    Some((attr.addr.0, attr.addr.1, d.clone(), attr.ofs_seg))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let mut ofs16_targets: Vec<Address> = Vec::new();
-        for (seg_idx, ofs, data_type, fallback_seg) in &ofs16_info {
-            let bytes = self.bytes_at_seg(*seg_idx, *ofs);
-            collect_ofs16_targets(
-                data_type,
-                bytes,
-                &self.structs,
-                *fallback_seg,
-                &mut ofs16_targets,
-            );
+        {
+            let ofs16_info: Vec<(SegmentIdx, u32, DataType, Option<SegmentIdx>)> = self
+                .attrs
+                .values()
+                .filter_map(|attr| {
+                    if let Some(AttrType::Data(ref d)) = attr.r#type {
+                        Some((attr.addr.0, attr.addr.1, d.clone(), attr.ofs_seg))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let mut ofs16_targets: Vec<Address> = Vec::new();
+            for (seg_idx, ofs, data_type, fallback_seg) in &ofs16_info {
+                let bytes = self.bytes_at_seg(*seg_idx, *ofs);
+                collect_ofs16_targets(
+                    data_type,
+                    bytes,
+                    &self.structs,
+                    *fallback_seg,
+                    &mut ofs16_targets,
+                );
+            }
+            for (seg_idx, ofs) in ofs16_targets {
+                let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+                Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
+            }
         }
-        for (seg_idx, ofs) in ofs16_targets {
-            let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
-            Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
+
+        // Collect immediate instruction arguments with a specified ofs_seg
+        {
+            let mut imm_targets: Vec<Address> = Vec::new();
+            for (seg_idx, seg) in self.segments.indexed_iter() {
+                let seg_start = seg.start.unwrap_or(0);
+
+                let mut ofs_opt = {
+                    let base = seg.addr_attributes.base();
+                    if seg.addr_attributes.is_op(base) {
+                        Some(base)
+                    } else {
+                        seg.addr_attributes.next(base)
+                    }
+                };
+
+                while let Some(ofs) = ofs_opt {
+                    if !seg.addr_attributes.is_op(ofs) {
+                        ofs_opt = seg.addr_attributes.next(ofs);
+                        continue;
+                    }
+
+                    if let Some(ofs_seg) = self.attrs.get(&(seg_idx, ofs)).and_then(|a| a.ofs_seg)
+                    {
+                        let seg_val = (seg_start / 16) as u16;
+                        let bytes = self.bytes_at_seg(seg_idx, ofs);
+                        if let Some(inst) = decode(seg_val, ofs as u16, bytes.iter().copied()) {
+                            for (i, &arg_type) in inst.arg_type.iter().enumerate() {
+                                if matches!(
+                                    arg_type,
+                                    crate::opcode_table::ArgType::Imm8
+                                        | crate::opcode_table::ArgType::Imm16
+                                ) {
+                                    imm_targets.push((ofs_seg, inst.imm[i] as u32));
+                                }
+                            }
+                        }
+                    }
+
+                    ofs_opt = seg.addr_attributes.next(ofs);
+                }
+            }
+            for (seg_idx, ofs) in imm_targets {
+                let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+                Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
+            }
         }
 
         // Collect auto-label candidates from static memory references in code,
         // resolved via segment dataflow analysis.
-        let mut static_mem_targets: Vec<Address> = Vec::new();
-        for (seg_idx, seg) in self.segments.indexed_iter() {
-            let base = seg.addr_attributes.base();
-            let seg_start = seg.start.unwrap_or(0);
+        {
+            let mut static_mem_targets: Vec<Address> = Vec::new();
+            for (seg_idx, seg) in self.segments.indexed_iter() {
+                let base = seg.addr_attributes.base();
+                let seg_start = seg.start.unwrap_or(0);
 
-            let mut ofs_opt = if seg.addr_attributes.is_op(base) {
-                Some(base)
-            } else {
-                seg.addr_attributes.next(base)
-            };
+                let mut ofs_opt = if seg.addr_attributes.is_op(base) {
+                    Some(base)
+                } else {
+                    seg.addr_attributes.next(base)
+                };
 
-            while let Some(ofs) = ofs_opt {
-                if !seg.addr_attributes.is_op(ofs) {
-                    ofs_opt = seg.addr_attributes.next(ofs);
-                    continue;
-                }
+                while let Some(ofs) = ofs_opt {
+                    if !seg.addr_attributes.is_op(ofs) {
+                        ofs_opt = seg.addr_attributes.next(ofs);
+                        continue;
+                    }
 
-                let seg_val = (seg_start / 16) as u16;
-                let bytes = self.bytes_at_seg(seg_idx, ofs);
-                if let Some(inst) = decode(seg_val, ofs as u16, bytes.iter().copied()) {
-                    match inst.mem_ref() {
-                        Some(MemRef::Indirect {
-                            seg: sreg,
-                            base: None,
-                            index: None,
-                            disp,
-                            ..
-                        }) => {
-                            if let Some(state) = self.seg_dataflow.state_at(self, seg_idx, ofs) {
-                                if let Some(target_seg) = state.to_sreg_map().get(sreg) {
-                                    static_mem_targets.push((target_seg, disp as u32));
+                    let seg_val = (seg_start / 16) as u16;
+                    let bytes = self.bytes_at_seg(seg_idx, ofs);
+                    if let Some(inst) = decode(seg_val, ofs as u16, bytes.iter().copied()) {
+                        match inst.mem_ref() {
+                            Some(MemRef::Indirect {
+                                seg: sreg,
+                                base: None,
+                                index: None,
+                                disp,
+                                ..
+                            }) => {
+                                if let Some(state) = self.seg_dataflow.state_at(self, seg_idx, ofs)
+                                {
+                                    if let Some(target_seg) = state.to_sreg_map().get(sreg) {
+                                        static_mem_targets.push((target_seg, disp as u32));
+                                    }
                                 }
                             }
-                        }
-                        Some(MemRef::Direct {
-                            seg,
-                            ofs: target_ofs,
-                            ..
-                        }) => {
-                            if let Some(target_seg) = self.segment_index_for(seg) {
-                                static_mem_targets.push((target_seg, target_ofs as u32));
+                            Some(MemRef::Direct {
+                                seg,
+                                ofs: target_ofs,
+                                ..
+                            }) => {
+                                if let Some(target_seg) = self.segment_index_for(seg) {
+                                    static_mem_targets.push((target_seg, target_ofs as u32));
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
-                }
 
-                ofs_opt = seg.addr_attributes.next(ofs);
+                    ofs_opt = seg.addr_attributes.next(ofs);
+                }
             }
-        }
-        for (seg_idx, ofs) in static_mem_targets {
-            let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
-            Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
+            for (seg_idx, ofs) in static_mem_targets {
+                let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+                Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
+            }
         }
     }
 
@@ -971,9 +1017,24 @@ impl Project {
             ofs_seg: None,
             comment: None,
             assume: Assumes::default(),
+            arg_fmts: [None; 2],
         });
         attr.name = Some(label);
         attr.is_auto_label = true;
+    }
+
+    /// Parse a type string and resolve it against this project's segments and structs.
+    pub fn parse_type_str(&self, s: &str) -> Result<AttrType, String> {
+        let struct_names: Vec<SmallString> = self.structs.iter().map(|s| s.name.clone()).collect();
+        parse_attr_type_str(s, &self.segments, &struct_names)
+    }
+
+    /// Find a segment by name.
+    pub fn segment_by_name(&self, name: &str) -> Option<SegmentIdx> {
+        self.segments
+            .indexed_iter()
+            .find(|(_, s)| s.name == name)
+            .map(|(idx, _)| idx)
     }
 
     /// Look up an EXE-style segment register value → segment index.
@@ -999,6 +1060,7 @@ pub struct ProjectLookup<'a> {
 
 impl SymbolLookup for ProjectLookup<'_> {
     fn lookup_direct(&self, seg: u16, ofs: u16, _width: crate::DataWidth) -> Option<String> {
+        // println!("lookup_direct: {:04x}:{:04x}", seg, ofs);
         let idx = self.project.segment_index_for(seg)?;
         self.project.name_at(idx, ofs as u32).map(String::from)
     }
@@ -1011,7 +1073,9 @@ impl SymbolLookup for ProjectLookup<'_> {
         disp: u16,
         _width: crate::DataWidth,
     ) -> Option<String> {
-        // println!("seg={seg:?} base={base:?} index={index:?} disp={disp:#04x} w={width:?}\n");
+        // println!(
+        //     "lookup_indirect: seg={seg:?} base={base:?} index={index:?} disp={disp:#04x} w={_width:?}\n"
+        // );
 
         let seg = self.sreg_map.get(seg)?;
         let mut base = base;
@@ -1147,6 +1211,9 @@ fn collect_ofs16_targets(
                 collect_ofs16_targets(elem, elem_bytes, structs, None, targets);
                 cursor += elem.byte_size(elem_bytes, structs);
             }
+        }
+        DataType::Formatted(_, inner) => {
+            collect_ofs16_targets(inner, bytes, structs, fallback_seg, targets);
         }
     }
 }

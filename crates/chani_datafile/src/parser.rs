@@ -3,7 +3,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until, take_while, take_while1},
     character::complete::{char, line_ending, not_line_ending},
-    combinator::{all_consuming, eof, map, opt, peek, value},
+    combinator::{all_consuming, eof, map, not, opt, peek, value},
     multi::many0,
     sequence::{delimited, pair, preceded},
 };
@@ -131,7 +131,20 @@ fn single_line_pairs<'a>(original: &str, i: &'a str) -> IResult<&'a str, Vec<Tok
 }
 
 fn end_keyword(i: &str) -> IResult<&str, ()> {
-    value((), preceded(ws, tag("end"))).parse(i)
+    value(
+        (),
+        preceded(
+            ws,
+            (
+                tag("end"),
+                // not part of a longer identifier (e.g. `endemic`)
+                not(take_while1(|c: char| c.is_alphanumeric() || c == '_')),
+                // not a property assignment (e.g. `end = 0xdd1d`)
+                not(preceded(ws, char('='))),
+            ),
+        ),
+    )
+    .parse(i)
 }
 
 // Parse dict body items until we see 'end'
@@ -252,6 +265,39 @@ pub fn parse(input: &str) -> Result<Vec<Token>, String> {
             };
             Err(parse_error_message(input, remaining))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kv(tokens: &[Token], idx: usize) -> (&str, &str) {
+        if let Token::KeyValue { key, value, .. } = &tokens[idx] {
+            (key.as_str(), value.as_str())
+        } else {
+            panic!("token {idx} is not a KeyValue: {:?}", tokens[idx]);
+        }
+    }
+
+    #[test]
+    fn end_as_property_key() {
+        let input = "segment[seg001]:\n    type  = data\n    start = 0\n    end   = 0xdd1d\nend\n";
+        let tokens = parse(input).expect("should parse");
+        // DictStart, type=data, start=0, end=0xdd1d, DictEnd
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(kv(&tokens, 1), ("type", "data"));
+        assert_eq!(kv(&tokens, 2), ("start", "0"));
+        assert_eq!(kv(&tokens, 3), ("end", "0xdd1d"));
+        assert!(matches!(tokens[4], Token::DictEnd { .. }));
+    }
+
+    #[test]
+    fn end_standalone_closes_block() {
+        let input = "segment[s]:\n    x = 1\nend\n";
+        let tokens = parse(input).expect("should parse");
+        assert_eq!(tokens.len(), 3); // DictStart, x=1, DictEnd
+        assert!(matches!(tokens[2], Token::DictEnd { .. }));
     }
 }
 

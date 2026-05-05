@@ -3,11 +3,7 @@ use std::{
     path::Path,
 };
 
-use chani_disasm::{
-    layout::{generate_widgets, render_widgets},
-    project::Project,
-    seg_dataflow::SegVal,
-};
+use chani_disasm::{layout::generate_widgets, project::Project, seg_dataflow::SegVal};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -72,9 +68,22 @@ fn print_listing<W: Write>(project: &Project, w: &mut W) -> io::Result<()> {
     let t1 = std::time::Instant::now();
 
     let mut buf = String::with_capacity(120);
+    let mut widget_iter = widgets.iter().peekable();
     for y in 0..total_rows {
         buf.clear();
-        render_widgets(&widgets, &mut buf, y);
+        let mut cursor = 0u32;
+        while let Some(widget) = widget_iter.peek() {
+            if widget.y != y {
+                break;
+            }
+            let widget = widget_iter.next().unwrap();
+            while cursor < widget.x {
+                buf.push(' ');
+                cursor += 1;
+            }
+            buf.push_str(&widget.text);
+            cursor += widget.text.len() as u32;
+        }
         writeln!(w, "{buf}")?;
     }
     let t2 = std::time::Instant::now();

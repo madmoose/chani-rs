@@ -3,8 +3,8 @@ use std::fmt::Write;
 use std::path::Path;
 
 use crate::{
-    DecodedInstruction, DisplayContext, SmallString,
-    data_type::{CompositeDataType, DataType, ScalarDataType},
+    DataWidth, DecodedInstruction, DisplayContext, SmallString,
+    data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType},
     disassemble,
     project::{self, AttrType, FileFormat, Project, Segment, SegmentIdx},
 };
@@ -297,6 +297,16 @@ impl<'a> LayoutBuilder<'a> {
         let w = opcode.len() as u32;
         self.add(self.text_x0, WidgetKind::Opcode, opcode);
 
+        let arg_fmts = self
+            .project
+            .attr_at(self.seg_idx, self.base_ofs)
+            .map(|attr| attr.arg_fmts)
+            .unwrap_or([None; 2]);
+        let inst_ctx = DisplayContext {
+            lookup: self.ctx.lookup,
+            arg_fmts,
+        };
+
         let mut x = self.text_x0 + u32::max(w + 1, 8);
         for i in 0..inst.arg_count() {
             if i > 0 {
@@ -304,7 +314,7 @@ impl<'a> LayoutBuilder<'a> {
                 x += 2;
             }
             let mut s = SmallString::new();
-            let _ = inst.format_arg(&mut s, i, self.ctx);
+            let _ = inst.format_arg(&mut s, i, &inst_ctx);
             let w = s.len() as u32;
 
             self.add(x, WidgetKind::Operand { index: i }, s);
@@ -320,17 +330,23 @@ impl<'a> LayoutBuilder<'a> {
     }
 
     fn layout_data(&mut self, x: u32, data: &DataType) {
+        self.layout_data_fmt(x, data, DisplayFmt::Default);
+    }
+
+    fn layout_data_fmt(&mut self, x: u32, data: &DataType, fmt: DisplayFmt) {
         match data {
-            DataType::Scalar(scalar) => self.layout_scalar(x, scalar),
+            DataType::Formatted(inner_fmt, inner) => self.layout_data_fmt(x, inner, *inner_fmt),
+            DataType::Scalar(scalar) => self.layout_scalar(x, scalar, fmt),
             DataType::Composite(CompositeDataType::Array { elem, count }) => {
-                self.layout_array(x, elem, *count)
+                self.layout_array_fmt(x, elem, *count, fmt)
             }
             DataType::Composite(CompositeDataType::Struct(idx)) => self.layout_struct(x, *idx),
         }
     }
 
-    fn layout_scalar(&mut self, x: u32, scalar: &ScalarDataType) {
+    fn layout_scalar(&mut self, x: u32, scalar: &ScalarDataType, fmt: DisplayFmt) {
         let bytes = self.project.bytes_at_seg(self.seg_idx, self.ofs);
+
         match scalar {
             ScalarDataType::Unknown => {
                 let b = read_u8(bytes);
@@ -348,18 +364,25 @@ impl<'a> LayoutBuilder<'a> {
                 self.ofs += 1;
             }
             ScalarDataType::U8 => {
-                self.add(
-                    x,
-                    WidgetKind::Data,
-                    format!("dw {}", format_numeric_value(read_u8(bytes))),
-                );
+                let v = read_u8(bytes);
+                let text = if fmt == DisplayFmt::Char {
+                    let b = v as u8;
+                    if b.is_ascii_graphic() && b != b'\'' {
+                        format!("db '{}'", b as char)
+                    } else {
+                        format!("db {}", format_numeric_value(v))
+                    }
+                } else {
+                    format!("dw {}", format_value(v, DataWidth::Byte, fmt))
+                };
+                self.add(x, WidgetKind::Data, text);
                 self.ofs += 1;
             }
             ScalarDataType::U16 => {
                 self.add(
                     x,
                     WidgetKind::Data,
-                    format!("dw {}", format_numeric_value(read_u16(bytes))),
+                    format!("dw {}", format_value(read_u16(bytes), DataWidth::Word, fmt)),
                 );
                 self.ofs += 2;
             }
@@ -367,11 +390,14 @@ impl<'a> LayoutBuilder<'a> {
                 self.add(
                     x,
                     WidgetKind::Data,
-                    format!("dd {}", format_numeric_value(read_u32(bytes))),
+                    format!(
+                        "dd {}",
+                        format_value(read_u32(bytes), DataWidth::Dword, fmt)
+                    ),
                 );
                 self.ofs += 4;
             }
-            ScalarDataType::Char(n) => {
+            ScalarDataType::Str(n) => {
                 self.add(
                     x,
                     WidgetKind::Data,
@@ -406,7 +432,7 @@ impl<'a> LayoutBuilder<'a> {
                     self.add(
                         x,
                         WidgetKind::Data,
-                        format!("dw {}", format_numeric_value(v)),
+                        format!("dw {}", format_value(v, DataWidth::Word, fmt)),
                     );
                 }
                 self.ofs += 2;
@@ -416,7 +442,7 @@ impl<'a> LayoutBuilder<'a> {
         self.new_line();
     }
 
-    fn layout_array(&mut self, x: u32, elem: &DataType, count: usize) {
+    fn layout_array_fmt(&mut self, x: u32, elem: &DataType, count: usize, fmt: DisplayFmt) {
         let base_ofs = self.ofs;
         let index_w = count.ilog10() + 1;
 
@@ -427,7 +453,7 @@ impl<'a> LayoutBuilder<'a> {
                     WidgetKind::ArrayIndex { base_ofs, index: i },
                     format!("[{0:>1$}]", i, index_w as usize),
                 );
-                self.layout_data(x + index_w + 3, elem);
+                self.layout_data_fmt(x + index_w + 3, elem, fmt);
                 self.new_line();
             }
             return;
@@ -440,7 +466,7 @@ impl<'a> LayoutBuilder<'a> {
                 format!("[{0:>1$}] {{", i, index_w as usize),
             );
             self.new_line();
-            self.layout_data(x + 2, elem);
+            self.layout_data_fmt(x + 2, elem, fmt);
             self.add(x, WidgetKind::Punctuation, "}".into());
             self.new_line();
         }
@@ -530,9 +556,26 @@ fn format_numeric_value(v: u32) -> SmallString {
     s
 }
 
+fn format_value(v: u32, width: DataWidth, fmt: DisplayFmt) -> SmallString {
+    let mut s = SmallString::new();
+    match fmt {
+        DisplayFmt::Default | DisplayFmt::Hex | DisplayFmt::Char => return format_numeric_value(v),
+        DisplayFmt::Dec => {
+            let _ = write!(s, "{v}");
+        }
+        DisplayFmt::SignedDec => {
+            let _ = write!(s, "{}", width.sign_extend(v));
+        }
+        DisplayFmt::Bin => {
+            let _ = write!(s, "0b{v:b}");
+        }
+    }
+    s
+}
+
 fn format_string_value(bytes: &[u8], n: usize) -> SmallString {
     let slice = &bytes[..bytes.len().min(n)];
-    let mut s = SmallString::from("db '");
+    let mut s = SmallString::new();
 
     for &b in slice {
         if (0x20..0x7f).contains(&b) && b != b'\'' && b != b'\\' {
@@ -828,13 +871,18 @@ pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
                     ..Default::default()
                 });
 
+            let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|attr| attr.ofs_seg);
+
             let lookup = project::ProjectLookup {
                 project,
                 sreg_map,
                 register_file: None,
-                default_seg: None,
+                default_seg: ofs_seg,
             };
-            let ctx = DisplayContext { lookup: &lookup };
+            let ctx = DisplayContext {
+                lookup: &lookup,
+                arg_fmts: [None; 2],
+            };
 
             let mut builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
             builder.layout();

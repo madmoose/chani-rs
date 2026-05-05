@@ -4,7 +4,9 @@ use chani_datafile::ast::{Dict, Item};
 
 use crate::SmallString;
 use crate::address_attributes::AddressAttributes;
-use crate::data_type::{CompositeDataType, DataType, ScalarDataType, StructDef, StructField};
+use crate::data_type::{
+    CompositeDataType, DataType, DisplayFmt, ScalarDataType, StructDef, StructField,
+};
 use crate::project::{Assumes, Segments};
 
 use super::{Attr, AttrType, FileDef, FileFormat, Hash, LoadExpr, Segment, SegmentIdx};
@@ -17,7 +19,7 @@ enum UnresolvedAttrType {
     U8,
     U16,
     U32,
-    Char(usize),
+    Str(usize),
     Ofs16(Option<String>),
     Struct(String),
     Array {
@@ -25,6 +27,7 @@ enum UnresolvedAttrType {
         count: usize,
     },
     CStr,
+    Formatted(DisplayFmt, Box<UnresolvedAttrType>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -369,8 +372,41 @@ pub(super) fn parse_struct(dict: &Dict) -> Result<(SmallString, UnresolvedStruct
     Ok((name, UnresolvedStructDef { fields }))
 }
 
+fn parse_display_fmt(s: &str) -> Option<DisplayFmt> {
+    match s {
+        "hex" => Some(DisplayFmt::Hex),
+        "dec" => Some(DisplayFmt::Dec),
+        "signed" => Some(DisplayFmt::SignedDec),
+        "bin" => Some(DisplayFmt::Bin),
+        "char" => Some(DisplayFmt::Char),
+        _ => None,
+    }
+}
+
+/// Detect `keyword(inner)` wrappers for display-format keywords other than `char`.
+/// Returns `(DisplayFmt, inner_str)` or `None`.
+fn try_parse_fmt_wrapper(s: &str) -> Option<(DisplayFmt, &str)> {
+    let paren = s.find('(')?;
+    if !s.ends_with(')') {
+        return None;
+    }
+    let kw = &s[..paren];
+    let inner = s[paren + 1..s.len() - 1].trim();
+    let fmt = match kw {
+        "hex" => DisplayFmt::Hex,
+        "dec" => DisplayFmt::Dec,
+        "signed" => DisplayFmt::SignedDec,
+        "bin" => DisplayFmt::Bin,
+        "char" => DisplayFmt::Char,
+        _ => return None,
+    };
+    Some((fmt, inner))
+}
+
 fn parse_attr_type(s: &str) -> Result<UnresolvedAttrType, ()> {
     let s = s.trim();
+
+    // [elem; count]
     if let Some(inner) = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
         let (elem_str, count_str) = inner.split_once(';').ok_or(())?;
         let elem = parse_attr_type(elem_str)?;
@@ -380,16 +416,26 @@ fn parse_attr_type(s: &str) -> Result<UnresolvedAttrType, ()> {
             count,
         });
     }
-    if let Some(inner) = s.strip_prefix("char(").and_then(|s| s.strip_suffix(')')) {
+
+    // str(N) — fixed-length string buffer
+    if let Some(inner) = s.strip_prefix("str(").and_then(|s| s.strip_suffix(')')) {
         let n = inner.trim().parse::<usize>().map_err(|_| ())?;
-        return Ok(UnresolvedAttrType::Char(n));
+        return Ok(UnresolvedAttrType::Str(n));
     }
+
     if s == "ofs16" {
         return Ok(UnresolvedAttrType::Ofs16(None));
     }
     if let Some(inner) = s.strip_prefix("ofs16(").and_then(|s| s.strip_suffix(')')) {
         return Ok(UnresolvedAttrType::Ofs16(Some(inner.trim().to_owned())));
     }
+
+    // dec(type), hex(type), bin(type), signed(type)
+    if let Some((fmt, inner_s)) = try_parse_fmt_wrapper(s) {
+        let inner = parse_attr_type(inner_s)?;
+        return Ok(UnresolvedAttrType::Formatted(fmt, Box::new(inner)));
+    }
+
     match s {
         "code" => Ok(UnresolvedAttrType::Code),
         "u8" => Ok(UnresolvedAttrType::U8),
@@ -404,6 +450,16 @@ fn parse_attr_type(s: &str) -> Result<UnresolvedAttrType, ()> {
             }
         }
     }
+}
+
+/// Parse a type string (e.g. `"dec(u16)"`, `"code"`) and resolve it against the given segments and struct names.
+pub(super) fn parse_attr_type_str(
+    s: &str,
+    segments: &Segments,
+    struct_names: &[SmallString],
+) -> Result<super::AttrType, String> {
+    let unresolved = parse_attr_type(s).map_err(|_| format!("invalid type string: '{s}'"))?;
+    resolve_attr_type(&unresolved, segments, struct_names)
 }
 
 pub(super) fn validate_no_struct_cycles(
@@ -444,6 +500,7 @@ fn check_attr_type_for_cycle(
     match t {
         UnresolvedAttrType::Struct(name) => check_struct_for_cycle(name, structs, path),
         UnresolvedAttrType::Array { elem, .. } => check_attr_type_for_cycle(elem, structs, path),
+        UnresolvedAttrType::Formatted(_, inner) => check_attr_type_for_cycle(inner, structs, path),
         _ => Ok(()),
     }
 }
@@ -458,7 +515,7 @@ fn resolve_data_type(
         UnresolvedAttrType::U8 => Ok(DataType::Scalar(ScalarDataType::U8)),
         UnresolvedAttrType::U16 => Ok(DataType::Scalar(ScalarDataType::U16)),
         UnresolvedAttrType::U32 => Ok(DataType::Scalar(ScalarDataType::U32)),
-        UnresolvedAttrType::Char(n) => Ok(DataType::Scalar(ScalarDataType::Char(*n))),
+        UnresolvedAttrType::Str(n) => Ok(DataType::Scalar(ScalarDataType::Str(*n))),
         UnresolvedAttrType::CStr => Ok(DataType::Scalar(ScalarDataType::CStr)),
         UnresolvedAttrType::Ofs16(None) => Ok(DataType::Scalar(ScalarDataType::Ofs16(None))),
         UnresolvedAttrType::Ofs16(Some(seg_name)) => {
@@ -483,6 +540,10 @@ fn resolve_data_type(
                 elem: Box::new(elem),
                 count: *count,
             }))
+        }
+        UnresolvedAttrType::Formatted(fmt, inner) => {
+            let inner = resolve_data_type(inner, segments, struct_names)?;
+            Ok(DataType::Formatted(*fmt, Box::new(inner)))
         }
     }
 }
@@ -543,6 +604,7 @@ pub(super) fn parse_attr(
     let mut ofs_seg: Option<SegmentIdx> = None;
     let mut comment: Option<String> = None;
     let mut assume = Assumes::default();
+    let mut arg_fmts: [Option<DisplayFmt>; 2] = [None; 2];
 
     for item in &dict.items {
         if let Item::Property { key, value, line } = item {
@@ -583,6 +645,19 @@ pub(super) fn parse_attr(
                             format!("line {line}: failed to parse 'assume' field `{value}`")
                         })?;
                 }
+                k if k.starts_with("arg[") && k.ends_with(']') => {
+                    let idx_str = &k["arg[".len()..k.len() - 1];
+                    let idx = idx_str
+                        .parse::<usize>()
+                        .map_err(|_| format!("line {line}: invalid arg index in '{k}'"))?;
+                    if idx >= 2 {
+                        return Err(format!("line {line}: arg index out of range: {idx}"));
+                    }
+                    let fmt = parse_display_fmt(value.trim()).ok_or_else(|| {
+                        format!("line {line}: unknown display format '{}'", value.trim())
+                    })?;
+                    arg_fmts[idx] = Some(fmt);
+                }
                 _ => {
                     return Err(format!(
                         "line {line}: unknown key '{}' in attr '{}'",
@@ -601,6 +676,7 @@ pub(super) fn parse_attr(
         ofs_seg,
         comment,
         assume,
+        arg_fmts,
     })
 }
 
