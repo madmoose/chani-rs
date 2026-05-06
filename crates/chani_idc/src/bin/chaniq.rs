@@ -28,9 +28,10 @@ enum Cmd {
     /// Find annotations by name or comment substring (does not require binary)
     Find { pattern: String },
     /// List annotations in a segment or address range (does not require binary)
-    ///
-    /// RANGE is one of: seg001  |  seg001:1000  |  seg001:1000-2000  (hex offsets)
-    List { range: String },
+    List {
+        #[arg(value_name = "RANGE", help = "seg001  |  seg001:1000  |  seg001:1000-2000  (hex offsets)")]
+        range: String,
+    },
     /// Search the rendered listing for a text pattern (requires binary)
     Search { pattern: String },
     /// Show cross-references to an address (requires binary)
