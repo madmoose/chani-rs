@@ -25,6 +25,14 @@ enum Cmd {
     Set(SetArgs),
     /// Print all annotations at an address (does not require binary)
     Get { addr: String },
+    /// Find annotations by name or comment substring (does not require binary)
+    Find { pattern: String },
+    /// List annotations in a segment or address range (does not require binary)
+    ///
+    /// RANGE is one of: seg001  |  seg001:1000  |  seg001:1000-2000  (hex offsets)
+    List { range: String },
+    /// Search the rendered listing for a text pattern (requires binary)
+    Search { pattern: String },
     /// Show cross-references to an address (requires binary)
     Xref { addr: String },
     /// Show disassembly of the function body at an address (requires binary)
@@ -73,6 +81,9 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Set(args) => cmd_set(path, args),
         Cmd::Get { addr } => cmd_get(path, &addr),
+        Cmd::Find { pattern } => cmd_find(path, &pattern),
+        Cmd::List { range } => cmd_list(path, &range),
+        Cmd::Search { pattern } => cmd_search(path, &pattern),
         Cmd::Xref { addr } => cmd_xref(path, &addr),
         Cmd::Func { addr } => cmd_func(path, &addr),
         Cmd::Callers { addr } => cmd_callers(path, &addr),
@@ -339,6 +350,168 @@ fn cmd_get(path: &Path, addr_str: &str) -> Result<()> {
             }
         } else {
             println!("  comment: {first}");
+        }
+    }
+
+    Ok(())
+}
+
+// ── cmd_find ──────────────────────────────────────────────────────────────────
+
+fn cmd_find(path: &Path, pattern: &str) -> Result<()> {
+    let project = load_str(path)?;
+    let pat = pattern.to_lowercase();
+
+    let mut found = false;
+    for (&addr, attr) in &project.attrs {
+        let name_match = attr.name.as_deref()
+            .is_some_and(|n| n.to_lowercase().contains(&pat));
+        let comment_match = attr.comment.as_deref()
+            .is_some_and(|c| c.to_lowercase().contains(&pat));
+        if !name_match && !comment_match {
+            continue;
+        }
+        found = true;
+        let name = attr.name.as_deref().unwrap_or("");
+        let auto = if attr.is_auto_label { " (auto)" } else { "" };
+        let type_str = attr.r#type.as_ref()
+            .map(|t| format!("[{}]", t.type_str(&project.segments, &project.structs)))
+            .unwrap_or_default();
+        let comment_first = attr.comment.as_deref()
+            .and_then(|c| c.lines().next())
+            .unwrap_or("");
+        println!("{}  {:<24}  {:<18}  {}",
+            fmt_addr(&project, addr),
+            format!("{name}{auto}"),
+            type_str,
+            comment_first,
+        );
+    }
+
+    if !found {
+        println!("(no matches for '{pattern}')");
+    }
+    Ok(())
+}
+
+// ── cmd_list ──────────────────────────────────────────────────────────────────
+
+fn parse_list_range(project: &Project, s: &str) -> Result<(SegmentIdx, u32, u32)> {
+    if let Some((seg_name, rest)) = s.split_once(':') {
+        let seg_idx = project
+            .segment_by_name(seg_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown segment '{seg_name}'"))?;
+        let seg_end = project.segments[seg_idx].end.unwrap_or(u32::MAX);
+        if let Some((start_str, end_str)) = rest.split_once('-') {
+            let start = parse_hex_ofs(start_str)?;
+            let end = parse_hex_ofs(end_str)?;
+            Ok((seg_idx, start, end))
+        } else {
+            let start = parse_hex_ofs(rest)?;
+            Ok((seg_idx, start, seg_end))
+        }
+    } else {
+        let seg_idx = project
+            .segment_by_name(s)
+            .ok_or_else(|| anyhow::anyhow!("unknown segment '{s}'"))?;
+        let seg_start = project.segments[seg_idx].start.unwrap_or(0);
+        let seg_end = project.segments[seg_idx].end.unwrap_or(u32::MAX);
+        Ok((seg_idx, seg_start, seg_end))
+    }
+}
+
+fn parse_hex_ofs(s: &str) -> Result<u32> {
+    u32::from_str_radix(s.trim_start_matches("0x"), 16)
+        .map_err(|_| anyhow::anyhow!("invalid hex offset '{s}'"))
+}
+
+fn cmd_list(path: &Path, range_str: &str) -> Result<()> {
+    let project = load_str(path)?;
+    let (seg_idx, start, end) = parse_list_range(&project, range_str)?;
+
+    let mut any = false;
+    for (&addr, attr) in &project.attrs {
+        if addr.0 != seg_idx || addr.1 < start || addr.1 >= end {
+            continue;
+        }
+        any = true;
+        let name = attr.name.as_deref().unwrap_or("");
+        let auto = if attr.is_auto_label { " (auto)" } else { "" };
+        let type_str = attr.r#type.as_ref()
+            .map(|t| t.type_str(&project.segments, &project.structs))
+            .unwrap_or_default();
+        let comment_first = attr.comment.as_deref()
+            .and_then(|c| c.lines().next())
+            .unwrap_or("");
+        println!("{}  {:<24}  {:<18}  {}",
+            fmt_addr(&project, addr),
+            format!("{name}{auto}"),
+            type_str,
+            comment_first,
+        );
+    }
+
+    if !any {
+        println!("(no annotations in range)");
+    }
+    Ok(())
+}
+
+// ── cmd_search ────────────────────────────────────────────────────────────────
+
+fn collect_rendered_lines(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> Vec<String> {
+    let sreg_map = project
+        .seg_dataflow
+        .state_at(project, seg_idx, ofs)
+        .map(|s| s.to_sreg_map())
+        .unwrap_or(SRegMap { cs: Some(seg_idx), ..Default::default() });
+    let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|a| a.ofs_seg);
+    let lookup = ProjectLookup {
+        project,
+        sreg_map,
+        register_file: None,
+        default_seg: ofs_seg,
+    };
+    let ctx = DisplayContext { lookup: &lookup, arg_fmts: [None; 2] };
+    let mut builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
+    builder.layout();
+    let n = builder.lines();
+    let mut lines = Vec::with_capacity(n as usize);
+    let mut buf = String::new();
+    for y in 0..n {
+        buf.clear();
+        builder.render(&mut buf, y);
+        lines.push(buf.clone());
+    }
+    lines
+}
+
+fn cmd_search(path: &Path, pattern: &str) -> Result<()> {
+    let project = load_analyzed(path)?;
+    let pat = pattern.to_lowercase();
+
+    for (seg_idx, seg) in project.segments.indexed_iter() {
+        let seg_start = seg.start.unwrap_or(0);
+        let seg_end = seg.end.unwrap_or(0);
+
+        let mut ofs = seg_start;
+        while ofs < seg_end {
+            let has_attr = project.attr_at(seg_idx, ofs).is_some();
+            let is_decoded = seg.addr_attributes.is_op(ofs);
+
+            if has_attr || is_decoded {
+                let lines = collect_rendered_lines(&project, seg_idx, ofs);
+                for line in &lines {
+                    if line.to_lowercase().contains(&pat) {
+                        println!("{}", line.trim_end());
+                    }
+                }
+            }
+
+            match seg.addr_attributes.next(ofs) {
+                Some(next) => ofs = next,
+                None => break,
+            }
         }
     }
 
