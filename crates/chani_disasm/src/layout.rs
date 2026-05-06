@@ -6,6 +6,7 @@ use crate::{
     DataWidth, DecodedInstruction, DisplayContext, SmallString,
     data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType},
     disassemble,
+    opcode_table::ArgType,
     project::{self, AttrType, FileFormat, Project, Segment, SegmentIdx},
 };
 
@@ -154,9 +155,9 @@ impl<'a> LayoutBuilder<'a> {
         self.line_state = LineState::InLine;
     }
 
-    fn layout_block_comment(&mut self, lines: &[&str]) {
+    fn layout_block_comment<S: AsRef<str>>(&mut self, lines: &[S]) {
         for line in lines {
-            let text = format!("; {line}");
+            let text = format!("; {}", line.as_ref());
             self.add(self.label_x0, WidgetKind::Comment, text);
             self.new_line();
         }
@@ -170,6 +171,17 @@ impl<'a> LayoutBuilder<'a> {
             ofs: self.base_ofs,
             x,
             y: self.y,
+            text: format!("; {comment}"),
+        });
+    }
+
+    fn layout_inline_comment_at(&mut self, comment: &str, y: u32) {
+        self.widgets.push(Widget {
+            kind: WidgetKind::Comment,
+            seg_idx: self.seg_idx,
+            ofs: self.base_ofs,
+            x: self.comment_x0,
+            y,
             text: format!("; {comment}"),
         });
     }
@@ -251,10 +263,11 @@ impl<'a> LayoutBuilder<'a> {
                 }
             }
 
+            let y_first = self.y;
             self.layout_data(self.text_x0, data_type);
 
             if let [single] = comment_lines.as_slice() {
-                self.layout_inline_comment(single);
+                self.layout_inline_comment_at(single, y_first);
             }
         }
 
@@ -307,14 +320,40 @@ impl<'a> LayoutBuilder<'a> {
             arg_fmts,
         };
 
+        // Collect names for any data attrs embedded inside this instruction's bytes
+        // (e.g. a label placed at the immediate operand's byte position).
+        let inst_len = self.project.segments[self.seg_idx]
+            .addr_attributes
+            .op_len(self.base_ofs);
+        let sub_labels: Vec<String> =
+            ((self.base_ofs + 1)..=(self.base_ofs + inst_len.saturating_sub(1)))
+                .filter_map(|ofs| self.project.name_at(self.seg_idx, ofs).map(str::to_owned))
+                .collect();
+        let mut sub_label_idx = 0usize;
+
         let mut x = self.text_x0 + u32::max(w + 1, 8);
         for i in 0..inst.arg_count() {
             if i > 0 {
                 self.add(x, WidgetKind::Punctuation, ", ".into());
                 x += 2;
             }
-            let mut s = SmallString::new();
-            let _ = inst.format_arg(&mut s, i, &inst_ctx);
+
+            let is_imm = matches!(inst.arg_type[i], ArgType::Imm8 | ArgType::Imm16);
+            let sub_label = if is_imm {
+                let lbl = sub_labels.get(sub_label_idx);
+                sub_label_idx += 1;
+                lbl
+            } else {
+                None
+            };
+
+            let s: SmallString = if let Some(name) = sub_label {
+                name.as_str().into()
+            } else {
+                let mut s = SmallString::new();
+                let _ = inst.format_arg(&mut s, i, &inst_ctx);
+                s
+            };
             let w = s.len() as u32;
 
             self.add(x, WidgetKind::Operand { index: i }, s);
@@ -442,31 +481,60 @@ impl<'a> LayoutBuilder<'a> {
         self.new_line();
     }
 
+    fn sub_comment_lines(&self, elem_ofs: u32) -> Vec<String> {
+        if elem_ofs == self.base_ofs {
+            return vec![];
+        }
+        self.project
+            .attr_at(self.seg_idx, elem_ofs)
+            .and_then(|a| a.comment.as_deref())
+            .map(|c| c.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
     fn layout_array_fmt(&mut self, x: u32, elem: &DataType, count: usize, fmt: DisplayFmt) {
         let base_ofs = self.ofs;
         let index_w = count.ilog10() + 1;
 
         if elem.is_scalar() {
             for i in 0..count {
+                let elem_ofs = self.ofs;
+                let comment_lines = self.sub_comment_lines(elem_ofs);
+                if comment_lines.len() > 1 {
+                    self.layout_block_comment(&comment_lines);
+                }
                 self.add(
                     x,
                     WidgetKind::ArrayIndex { base_ofs, index: i },
                     format!("[{0:>1$}]", i, index_w as usize),
                 );
+                let y_elem = self.y;
                 self.layout_data_fmt(x + index_w + 3, elem, fmt);
+                if let [single] = comment_lines.as_slice() {
+                    self.layout_inline_comment_at(single, y_elem);
+                }
                 self.new_line();
             }
             return;
         }
 
         for i in 0..count {
+            let elem_ofs = self.ofs;
+            let comment_lines = self.sub_comment_lines(elem_ofs);
+            if comment_lines.len() > 1 {
+                self.layout_block_comment(&comment_lines);
+            }
             self.add(
                 x,
                 WidgetKind::ArrayIndex { base_ofs, index: i },
                 format!("[{0:>1$}] {{", i, index_w as usize),
             );
+            let y_elem = self.y;
             self.new_line();
             self.layout_data_fmt(x + 2, elem, fmt);
+            if let [single] = comment_lines.as_slice() {
+                self.layout_inline_comment_at(single, y_elem);
+            }
             self.add(x, WidgetKind::Punctuation, "}".into());
             self.new_line();
         }
@@ -484,6 +552,11 @@ impl<'a> LayoutBuilder<'a> {
         let data_x0 = x + name_w + 1;
 
         for (field_index, f) in fields.iter().enumerate() {
+            let field_ofs = self.ofs;
+            let comment_lines = self.sub_comment_lines(field_ofs);
+            if comment_lines.len() > 1 {
+                self.layout_block_comment(&comment_lines);
+            }
             self.add(
                 x,
                 WidgetKind::StructField {
@@ -492,7 +565,11 @@ impl<'a> LayoutBuilder<'a> {
                 },
                 f.name.clone(),
             );
+            let y_field = self.y;
             self.layout_data(data_x0, &f.r#type);
+            if let [single] = comment_lines.as_slice() {
+                self.layout_inline_comment_at(single, y_field);
+            }
         }
     }
 }
