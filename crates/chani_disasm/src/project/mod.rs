@@ -7,6 +7,8 @@ use std::io;
 use std::path::Path;
 use std::{collections::BTreeMap, fs};
 
+use sha1::{Digest, Sha1};
+
 use chani_datafile::ast::{self, Dict, Document, Item};
 use chani_datafile::{SmallString, parser};
 
@@ -235,13 +237,25 @@ impl Project {
 
         let base = Path::new(path).parent().unwrap_or(Path::new("."));
 
-        // Load each binary file into memory, indexed by position in project.binaries.
+        // Load each binary file, validate or compute its SHA1 hash.
         let mut binary_data: Vec<Option<Vec<u8>>> = vec![None; project.files.len()];
+        let mut computed_hashes: Vec<Vec<u8>> = Vec::with_capacity(project.files.len());
         for (i, file) in project.files.iter().enumerate() {
             let file_path = base.join(&file.path).to_string_lossy().into_owned();
             let data = fs::read(&file_path).map_err(|e| format!("{file_path}: {e}"))?;
 
-            // TODO: verify hash when present
+            let computed = sha1_of(&data);
+            if let Some(expected) = &file.hash {
+                if expected.bytes != computed {
+                    let exp: String = expected.bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    let got: String = computed.iter().map(|b| format!("{b:02x}")).collect();
+                    return Err(format!(
+                        "{}: hash mismatch\n  expected sha1:{exp}\n  actual   sha1:{got}",
+                        file.path
+                    ));
+                }
+            }
+            computed_hashes.push(computed);
 
             match file.format {
                 FileFormat::Exe => {
@@ -251,6 +265,11 @@ impl Project {
                 FileFormat::Com | FileFormat::Bin => {
                     binary_data[i] = Some(data);
                 }
+            }
+        }
+        for (file, computed) in project.files.iter_mut().zip(computed_hashes) {
+            if file.hash.is_none() {
+                file.hash = Some(Hash { bytes: computed });
             }
         }
 
@@ -492,6 +511,18 @@ impl Project {
                     }
                     if let Some(end) = seg.end {
                         seg_dict.prop("end", &fmt_u32(end));
+                    }
+                } else {
+                    // For binary-backed segments, only write `end` when it differs from the
+                    // value the load expression would produce (e.g. BSS space beyond the file).
+                    if let (Some(end), Some(img)) = (
+                        seg.end,
+                        self.images.iter().find(|img| img.seg_idx == seg_idx),
+                    ) {
+                        let derived_end = img.load_offset + img.data.len() as u32;
+                        if end != derived_end {
+                            seg_dict.prop("end", &fmt_u32(end));
+                        }
                     }
                 }
                 if let Some(load) = &seg.load {
@@ -811,20 +842,26 @@ impl Project {
 
     /// Generate automatic labels for branch targets and typed-but-unnamed addresses.
     pub fn generate_auto_labels(&mut self) {
-        // For EXE-backed segments the canonical address is the flat linear address
-        // (seg_paragraph * 16 + ofs).  For bin/com-backed segments there is no
-        // paragraph base — the offset itself is the meaningful address.
-        let label_addr = |seg_idx: SegmentIdx, ofs: u32| -> u32 {
-            if self.images.iter().any(|img| img.seg_idx == seg_idx) {
-                ofs
+        // EXE/COM segments share a flat address space; their labels use the raw offset.
+        // BIN segments have independent address spaces; prefix with the segment name to
+        // prevent collisions when multiple BIN segments have overlapping offsets.
+        let label_suffix = |seg_idx: SegmentIdx, ofs: u32| -> String {
+            let is_bin = self.segments[seg_idx]
+                .load
+                .as_ref()
+                .is_some_and(|l| matches!(self.files[l.file_idx].format, FileFormat::Bin));
+            if is_bin {
+                format!("{}_{:05x}", self.segments[seg_idx].name, ofs)
+            } else if self.images.iter().any(|img| img.seg_idx == seg_idx) {
+                format!("{ofs:05x}")
             } else {
                 let seg = self.segments[seg_idx].start.unwrap_or(0) / 16;
-                seg * 16 + ofs
+                format!("{:05x}", seg * 16 + ofs)
             }
         };
 
         for (seg_idx, ofs) in self.branches.all_targets() {
-            let label = format!("loc_{:05x}", label_addr(seg_idx, ofs));
+            let label = format!("loc_{}", label_suffix(seg_idx, ofs));
             Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
         }
 
@@ -835,7 +872,7 @@ impl Project {
             .map(|a| a.addr)
             .collect();
         for (seg_idx, ofs) in code_addrs {
-            let label = format!("loc_{:05x}", label_addr(seg_idx, ofs));
+            let label = format!("loc_{}", label_suffix(seg_idx, ofs));
             Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
         }
 
@@ -847,7 +884,7 @@ impl Project {
                 .map(|a| a.addr)
                 .collect();
             for (seg_idx, ofs) in data_addrs {
-                let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+                let label = format!("data_{}", label_suffix(seg_idx, ofs));
                 Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
             }
         }
@@ -877,7 +914,7 @@ impl Project {
                 );
             }
             for (seg_idx, ofs) in ofs16_targets {
-                let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+                let label = format!("data_{}", label_suffix(seg_idx, ofs));
                 Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
             }
         }
@@ -924,7 +961,7 @@ impl Project {
                 }
             }
             for (seg_idx, ofs) in imm_targets {
-                let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+                let label = format!("data_{}", label_suffix(seg_idx, ofs));
                 Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
             }
         }
@@ -984,7 +1021,7 @@ impl Project {
                 }
             }
             for (seg_idx, ofs) in static_mem_targets {
-                let label = format!("data_{:05x}", label_addr(seg_idx, ofs));
+                let label = format!("data_{}", label_suffix(seg_idx, ofs));
                 Self::ensure_auto_label(&mut self.attrs, seg_idx, ofs, label);
             }
         }
@@ -1273,6 +1310,10 @@ fn make_segments(exe: &ExeMz) -> Segments {
 }
 
 // ── Ofs16 target collection ───────────────────────────────────────────────────
+
+fn sha1_of(data: &[u8]) -> Vec<u8> {
+    Sha1::digest(data).to_vec()
+}
 
 fn collect_ofs16_targets(
     data_type: &DataType,

@@ -9,5 +9,6 @@ workspace = true
 [dependencies]
 bytes_ext.workspace = true
 chani_datafile.workspace = true
+sha1.workspace = true
 smallvec.workspace = true
 smallstr.workspace = true

@@ -373,7 +373,7 @@ impl<'a> LayoutBuilder<'a> {
                         format!("db {}", format_numeric_value(v))
                     }
                 } else {
-                    format!("dw {}", format_value(v, DataWidth::Byte, fmt))
+                    format!("db {}", format_value(v, DataWidth::Byte, fmt))
                 };
                 self.add(x, WidgetKind::Data, text);
                 self.ofs += 1;
