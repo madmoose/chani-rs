@@ -3,7 +3,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use crate::{
-    DataWidth, DecodedInstruction, DisplayContext, SmallString,
+    DataWidth, DecodedInstruction, DisplayContext, Opcode, SmallString,
     data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType},
     disassemble,
     opcode_table::ArgType,
@@ -26,6 +26,7 @@ pub enum WidgetKind {
     SegmentDecl,
     AssumeDir,
     Comment,
+    XrefIn,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,8 @@ pub struct Widget {
     pub x: u32,
     pub y: u32,
     pub text: SmallString,
+    /// Address this widget links to (branch target, xref source, ofs16 referent).
+    pub link_addr: Option<crate::Address>,
 }
 
 pub type Widgets = Vec<Widget>;
@@ -97,6 +100,12 @@ impl<'a> LayoutBuilder<'a> {
         render_widgets(&self.widgets, buf, y);
     }
 
+    fn set_last_link(&mut self, addr: crate::Address) {
+        if let Some(w) = self.widgets.last_mut() {
+            w.link_addr = Some(addr);
+        }
+    }
+
     pub fn widgets(&self) -> Widgets {
         self.widgets.clone()
     }
@@ -124,6 +133,7 @@ impl<'a> LayoutBuilder<'a> {
             x: 0,
             y: self.y,
             text,
+            link_addr: None,
         });
         self.line_state = LineState::BlankLine;
     }
@@ -142,6 +152,7 @@ impl<'a> LayoutBuilder<'a> {
                 x: 0,
                 y: self.y,
                 text,
+                link_addr: None,
             });
         }
         self.widgets.push(Widget {
@@ -151,6 +162,7 @@ impl<'a> LayoutBuilder<'a> {
             x,
             y: self.y,
             text,
+            link_addr: None,
         });
         self.line_state = LineState::InLine;
     }
@@ -172,6 +184,7 @@ impl<'a> LayoutBuilder<'a> {
             x,
             y: self.y,
             text: format!("; {comment}"),
+            link_addr: None,
         });
     }
 
@@ -183,7 +196,50 @@ impl<'a> LayoutBuilder<'a> {
             x: self.comment_x0,
             y,
             text: format!("; {comment}"),
+            link_addr: None,
         });
+    }
+
+    fn fmt_xref_src(&self, src: (SegmentIdx, u32)) -> String {
+        self.project
+            .name_at(src.0, src.1)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!("{}:{:04x}", self.project.segments[src.0].name, src.1)
+            })
+    }
+
+    fn layout_xrefs_in(&mut self) {
+        let addr = (self.seg_idx, self.base_ofs);
+
+        // Incoming code xrefs
+        let code_sources: Vec<(SegmentIdx, u32)> =
+            self.project.branches.sources(addr).collect();
+        for src in code_sources {
+            let seg = &self.project.segments[src.0];
+            let seg_val = (seg.start.unwrap_or(0) / 16) as u16;
+            let bytes = self.project.bytes_at_seg(src.0, src.1);
+            let kind = disassemble::decode(seg_val, src.1 as u16, bytes.iter().copied())
+                .map(|i| if i.opcode == Opcode::Call { "call" } else { "jmp" })
+                .unwrap_or("jmp");
+            let label = self.fmt_xref_src(src);
+            let text: SmallString = format!("; \u{2190} {label} ({kind})").into();
+            self.add(self.label_x0, WidgetKind::XrefIn, text);
+            self.set_last_link(src);
+            self.new_line();
+        }
+
+        // Incoming data xrefs
+        if let Some(srcs) = self.project.data_xrefs.get(&addr) {
+            let srcs: Vec<_> = srcs.iter().copied().collect();
+            for src in srcs {
+                let label = self.fmt_xref_src(src);
+                let text: SmallString = format!("; \u{2190} {label} (data)").into();
+                self.add(self.label_x0, WidgetKind::XrefIn, text);
+                self.set_last_link(src);
+                self.new_line();
+            }
+        }
     }
 
     fn make_address(&mut self) -> SmallString {
@@ -253,6 +309,8 @@ impl<'a> LayoutBuilder<'a> {
                 self.layout_block_comment(&comment_lines);
             }
 
+            self.layout_xrefs_in();
+
             if let Some(label) = label {
                 self.add(self.label_x0, WidgetKind::Label, format!("{label}:"));
 
@@ -300,6 +358,8 @@ impl<'a> LayoutBuilder<'a> {
             self.layout_block_comment(comment_lines);
         }
 
+        self.layout_xrefs_in();
+
         if let Some(label) = label {
             self.add(self.label_x0, WidgetKind::Label, format!("{label}:"));
             self.new_line();
@@ -331,6 +391,12 @@ impl<'a> LayoutBuilder<'a> {
                 .collect();
         let mut sub_label_idx = 0usize;
 
+        let branch_target: Option<crate::Address> = {
+            let mut iter = self.project.branches.targets((self.seg_idx, self.base_ofs));
+            let first = iter.next();
+            if iter.next().is_none() { first } else { None }
+        };
+
         let mut x = self.text_x0 + u32::max(w + 1, 8);
         for i in 0..inst.arg_count() {
             if i > 0 {
@@ -357,6 +423,11 @@ impl<'a> LayoutBuilder<'a> {
             let w = s.len() as u32;
 
             self.add(x, WidgetKind::Operand { index: i }, s);
+            if i == 0 {
+                if let Some(target) = branch_target {
+                    self.set_last_link(target);
+                }
+            }
 
             x += w;
         }
@@ -467,6 +538,7 @@ impl<'a> LayoutBuilder<'a> {
                     && let Some(name) = self.project.resolve_label(ofs_seg_idx, v)
                 {
                     self.add(x, WidgetKind::Data, format!("dw {}", name));
+                    self.set_last_link((ofs_seg_idx, v as u32));
                 } else {
                     self.add(
                         x,
@@ -553,7 +625,12 @@ impl<'a> LayoutBuilder<'a> {
 
         for (field_index, f) in fields.iter().enumerate() {
             let field_ofs = self.ofs;
-            let comment_lines = self.sub_comment_lines(field_ofs);
+            // Skip if the field shares the struct's start — the parent already rendered that comment.
+            let comment_lines = if field_ofs == base_ofs {
+                vec![]
+            } else {
+                self.sub_comment_lines(field_ofs)
+            };
             if comment_lines.len() > 1 {
                 self.layout_block_comment(&comment_lines);
             }
@@ -685,6 +762,7 @@ fn push_addr_widget(
         x: 0,
         y,
         text,
+        link_addr: None,
     });
 }
 
@@ -708,6 +786,7 @@ fn push_header_line(
         x,
         y: *y,
         text: s,
+        link_addr: None,
     });
     *y += 1;
 }

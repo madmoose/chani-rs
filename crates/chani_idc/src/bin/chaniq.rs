@@ -33,7 +33,7 @@ enum Cmd {
         range: String,
     },
     /// Search the rendered listing for a text pattern (requires binary)
-    Search { pattern: String },
+    Search(SearchArgs),
     /// Show cross-references to an address (requires binary)
     Xref { addr: String },
     /// Show disassembly of the function body at an address (requires binary)
@@ -76,6 +76,20 @@ struct SetArgs {
     stdout: bool,
 }
 
+#[derive(Args)]
+struct SearchArgs {
+    pattern: String,
+    /// Print N lines of context after each match
+    #[arg(short = 'A', long = "after-context", value_name = "N")]
+    after_context: Option<usize>,
+    /// Print N lines of context before each match
+    #[arg(short = 'B', long = "before-context", value_name = "N")]
+    before_context: Option<usize>,
+    /// Print N lines of context before and after each match
+    #[arg(short = 'C', long = "context", value_name = "N")]
+    context: Option<usize>,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let path = cli.project.as_path();
@@ -84,7 +98,7 @@ fn main() -> Result<()> {
         Cmd::Get { addr } => cmd_get(path, &addr),
         Cmd::Find { pattern } => cmd_find(path, &pattern),
         Cmd::List { range } => cmd_list(path, &range),
-        Cmd::Search { pattern } => cmd_search(path, &pattern),
+        Cmd::Search(args) => cmd_search(path, &args),
         Cmd::Xref { addr } => cmd_xref(path, &addr),
         Cmd::Func { addr } => cmd_func(path, &addr),
         Cmd::Callers { addr } => cmd_callers(path, &addr),
@@ -487,32 +501,69 @@ fn collect_rendered_lines(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> V
     lines
 }
 
-fn cmd_search(path: &Path, pattern: &str) -> Result<()> {
-    let project = load_analyzed(path)?;
-    let pat = pattern.to_lowercase();
-
+fn collect_all_lines(project: &Project) -> Vec<String> {
+    let mut all_lines = Vec::new();
     for (seg_idx, seg) in project.segments.indexed_iter() {
         let seg_start = seg.start.unwrap_or(0);
         let seg_end = seg.end.unwrap_or(0);
-
         let mut ofs = seg_start;
         while ofs < seg_end {
-            let has_attr = project.attr_at(seg_idx, ofs).is_some();
-            let is_decoded = seg.addr_attributes.is_op(ofs);
-
-            if has_attr || is_decoded {
-                let lines = collect_rendered_lines(&project, seg_idx, ofs);
-                for line in &lines {
-                    if line.to_lowercase().contains(&pat) {
-                        println!("{}", line.trim_end());
-                    }
+            if project.attr_at(seg_idx, ofs).is_some() || seg.addr_attributes.is_op(ofs) {
+                for line in collect_rendered_lines(project, seg_idx, ofs) {
+                    all_lines.push(line.trim_end().to_string());
                 }
             }
-
             match seg.addr_attributes.next(ofs) {
                 Some(next) => ofs = next,
                 None => break,
             }
+        }
+    }
+    all_lines
+}
+
+fn cmd_search(path: &Path, args: &SearchArgs) -> Result<()> {
+    let project = load_analyzed(path)?;
+    let pat = args.pattern.to_lowercase();
+    let before = args.before_context.or(args.context).unwrap_or(0);
+    let after = args.after_context.or(args.context).unwrap_or(0);
+
+    let all_lines = collect_all_lines(&project);
+
+    let matches: Vec<usize> = all_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.to_lowercase().contains(&pat))
+        .map(|(i, _)| i)
+        .collect();
+
+    if before == 0 && after == 0 {
+        for i in matches {
+            println!("{}", all_lines[i]);
+        }
+        return Ok(());
+    }
+
+    // Merge overlapping or adjacent context windows into groups.
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    for &m in &matches {
+        let start = m.saturating_sub(before);
+        let end = (m + after + 1).min(all_lines.len());
+        if let Some(last) = groups.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        groups.push((start, end));
+    }
+
+    for (gi, (start, end)) in groups.iter().enumerate() {
+        if gi > 0 {
+            println!("--");
+        }
+        for line in &all_lines[*start..*end] {
+            println!("{line}");
         }
     }
 

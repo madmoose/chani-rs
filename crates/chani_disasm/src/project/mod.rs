@@ -5,7 +5,10 @@ mod segments;
 
 use std::io;
 use std::path::Path;
-use std::{collections::BTreeMap, fs};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+};
 
 use sha1::{Digest, Sha1};
 
@@ -52,6 +55,7 @@ pub struct Project {
     pub branches: BranchMap,
     pub blocks: BasicBlockMap,
     pub seg_dataflow: SegDataflow,
+    pub data_xrefs: BTreeMap<Address, BTreeSet<Address>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -360,6 +364,7 @@ impl Project {
             branches: BranchMap::new(),
             blocks: BasicBlockMap::new(),
             seg_dataflow: SegDataflow::new(),
+            data_xrefs: BTreeMap::new(),
         })
     }
 
@@ -475,6 +480,7 @@ impl Project {
             branches: BranchMap::new(),
             blocks: BasicBlockMap::new(),
             seg_dataflow: SegDataflow::new(),
+            data_xrefs: BTreeMap::new(),
         })
     }
 
@@ -604,6 +610,26 @@ impl Project {
         self.build_basic_blocks();
         self.seg_dataflow = crate::seg_dataflow::compute(self);
         self.generate_auto_labels();
+        self.build_data_xrefs();
+    }
+
+    fn build_data_xrefs(&mut self) {
+        let pairs: Vec<(Address, Address)> = self
+            .attrs
+            .iter()
+            .filter_map(|(&src, attr)| {
+                let dt = attr.r#type.as_ref()?.as_data()?;
+                let bytes = self.bytes_at_seg(src.0, src.1);
+                let mut targets = Vec::new();
+                collect_ofs16_targets(dt, bytes, &self.structs, attr.ofs_seg, &mut targets);
+                Some(targets.into_iter().map(move |t| (t, src)))
+            })
+            .flatten()
+            .collect();
+        self.data_xrefs.clear();
+        for (target, src) in pairs {
+            self.data_xrefs.entry(target).or_default().insert(src);
+        }
     }
 
     /// Mark all data-typed attributes in `addr_attributes` with their byte extents.

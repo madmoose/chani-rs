@@ -1,19 +1,26 @@
 use std::{
+    collections::{HashMap, HashSet},
     io::{self, Write},
     path::Path,
 };
 
-use chani_disasm::{layout::generate_widgets, project::Project, seg_dataflow::SegVal};
+use chani_disasm::{
+    Address,
+    layout::{WidgetKind, generate_widgets},
+    project::Project,
+    seg_dataflow::SegVal,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let show_dataflow = args.iter().any(|a| a == "--dataflow");
+    let show_html = args.iter().any(|a| a == "--html");
     let path = args.into_iter().skip(1).find(|a| !a.starts_with('-'));
 
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("Usage: disasm [--dataflow] <file>");
+            eprintln!("Usage: disasm [--dataflow] [--html] <file>");
             std::process::exit(1);
         }
     };
@@ -46,6 +53,16 @@ fn main() {
 
     if show_dataflow {
         if let Err(e) = print_dataflow(&project, &mut stdout)
+            && e.kind() != io::ErrorKind::BrokenPipe
+        {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if show_html {
+        if let Err(e) = print_listing_html(&project, &path, &mut stdout)
             && e.kind() != io::ErrorKind::BrokenPipe
         {
             eprintln!("error: {e}");
@@ -88,6 +105,8 @@ fn print_listing<W: Write>(project: &Project, w: &mut W) -> io::Result<()> {
     }
     let t2 = std::time::Instant::now();
 
+    _ = w.flush();
+
     eprintln!(
         "generate: {:?}  render: {:?}  total: {:?}",
         t1 - t0,
@@ -95,6 +114,267 @@ fn print_listing<W: Write>(project: &Project, w: &mut W) -> io::Result<()> {
         t2 - t0,
     );
     Ok(())
+}
+
+// ── HTML listing ─────────────────────────────────────────────────────────────
+
+fn widget_class(kind: &WidgetKind) -> &'static str {
+    match kind {
+        WidgetKind::Address => "addr",
+        WidgetKind::Label => "label",
+        WidgetKind::Separator => "sep",
+        WidgetKind::Opcode => "op",
+        WidgetKind::Operand { .. } => "operand",
+        WidgetKind::Punctuation => "punct",
+        WidgetKind::Data => "data",
+        WidgetKind::ArrayIndex { .. } => "array-idx",
+        WidgetKind::StructField { .. } => "struct-field",
+        WidgetKind::FileHeader => "file-hdr",
+        WidgetKind::SegmentHeader => "seg-hdr",
+        WidgetKind::SegmentDecl => "seg-decl",
+        WidgetKind::AssumeDir => "assume",
+        WidgetKind::Comment => "comment",
+        WidgetKind::XrefIn => "xref-in",
+    }
+}
+
+fn html_escape(s: &str, out: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+fn print_listing_html<W: Write>(project: &Project, path: &str, w: &mut W) -> io::Result<()> {
+    let title = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Disassembly");
+
+    write!(
+        w,
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>{title}</title>
+<style>
+body {{ background: #1e1e1e; color: #d4d4d4; font-family: "Consolas","Cascadia Code","Fira Mono",monospace; font-size: 14px; margin: 1rem 2rem; }}
+h1 {{ color: #d4d4d4; font-size: 1rem; margin-bottom: 0.5rem; }}
+pre.listing {{ margin: 0; line-height: 1.4; }}
+.addr {{ color: #569cd6; }}
+.label {{ color: #dcdcaa; }}
+.sep {{ color: #6a9955; }}
+.op {{ color: #c586c0; }}
+.operand {{ color: #9cdcfe; }}
+.punct {{ color: #d4d4d4; }}
+.data {{ color: #b5cea8; }}
+.array-idx {{ color: #ce9178; }}
+.struct-field {{ color: #9cdcfe; }}
+.file-hdr {{ color: #6a9955; }}
+.seg-hdr {{ color: #6a9955; }}
+.seg-decl {{ color: #dcdcaa; }}
+.assume {{ color: #c586c0; }}
+.comment {{ color: #6a9955; font-style: italic; }}
+.xref-in {{ color: #4ec9b0; }}
+a {{ color: inherit; text-decoration: none; }}
+a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+<pre class="listing"><code>
+"#
+    )?;
+
+    let mut label_to_anchor: HashMap<&str, String> = HashMap::new();
+    for (&(seg_idx, ofs), attr) in &project.attrs {
+        if let Some(name) = attr.name.as_deref() {
+            let seg_name = &project.segments[seg_idx].name;
+            label_to_anchor.insert(name, format!("{}-{:04x}", seg_name, ofs));
+        }
+    }
+
+    let t0 = std::time::Instant::now();
+    let (widgets, total_rows) = generate_widgets(project);
+    let t1 = std::time::Instant::now();
+
+    let block_break_rows: HashSet<u32> = widgets
+        .iter()
+        .filter(|w| matches!(w.kind, WidgetKind::Separator | WidgetKind::SegmentDecl))
+        .map(|w| w.y)
+        .collect();
+
+    let mut emitted_anchors: HashSet<String> = HashSet::new();
+    let mut buf = String::with_capacity(256);
+    let mut widget_iter = widgets.iter().peekable();
+    for y in 0..total_rows {
+        if y > 0 && block_break_rows.contains(&y) {
+            write!(w, "</code></pre>\n<pre class=\"listing\"><code>")?;
+        }
+        buf.clear();
+        let mut cursor = 0u32;
+        while let Some(widget) = widget_iter.peek() {
+            if widget.y != y {
+                break;
+            }
+            let widget = widget_iter.next().unwrap();
+            while cursor < widget.x {
+                buf.push(' ');
+                cursor += 1;
+            }
+            match &widget.kind {
+                WidgetKind::Address => {
+                    let anchor = addr_to_anchor(project, (widget.seg_idx, widget.ofs));
+                    if emitted_anchors.insert(anchor.clone()) {
+                        buf.push_str("<span id=\"");
+                        buf.push_str(&anchor);
+                        buf.push_str("\" class=\"addr\">");
+                    } else {
+                        buf.push_str("<span class=\"addr\">");
+                    }
+                    html_escape(&widget.text, &mut buf);
+                    buf.push_str("</span>");
+                }
+                WidgetKind::Operand { .. } => {
+                    let anchor = widget.link_addr
+                        .map(|a| addr_to_anchor(project, a))
+                        .or_else(|| label_to_anchor.get(widget.text.as_str()).cloned());
+                    if let Some(anchor) = anchor {
+                        buf.push_str("<a href=\"#");
+                        buf.push_str(&anchor);
+                        buf.push_str("\" class=\"operand\">");
+                        html_escape(&widget.text, &mut buf);
+                        buf.push_str("</a>");
+                    } else {
+                        buf.push_str("<span class=\"operand\">");
+                        html_escape(&widget.text, &mut buf);
+                        buf.push_str("</span>");
+                    }
+                }
+                WidgetKind::XrefIn => {
+                    buf.push_str("<span class=\"xref-in\">");
+                    render_xref_html(&widget.text, widget.link_addr, project, &label_to_anchor, &mut buf);
+                    buf.push_str("</span>");
+                }
+                WidgetKind::Data => {
+                    buf.push_str("<span class=\"data\">");
+                    render_data_html(&widget.text, widget.link_addr, project, &label_to_anchor, &mut buf);
+                    buf.push_str("</span>");
+                }
+                _ => {
+                    let cls = widget_class(&widget.kind);
+                    buf.push_str("<span class=\"");
+                    buf.push_str(cls);
+                    buf.push_str("\">");
+                    html_escape(&widget.text, &mut buf);
+                    buf.push_str("</span>");
+                }
+            }
+            cursor += widget.text.len() as u32;
+        }
+        writeln!(w, "{buf}")?;
+    }
+    let t2 = std::time::Instant::now();
+
+    write!(w, "</code></pre>\n</body>\n</html>\n")?;
+    _ = w.flush();
+
+    eprintln!(
+        "generate: {:?}  render: {:?}  total: {:?}",
+        t1 - t0,
+        t2 - t1,
+        t2 - t0,
+    );
+    Ok(())
+}
+
+fn addr_to_anchor(project: &Project, (seg_idx, ofs): Address) -> String {
+    format!("{}-{:04x}", project.segments[seg_idx].name, ofs)
+}
+
+fn render_xref_html(
+    text: &str,
+    link_addr: Option<Address>,
+    project: &Project,
+    label_map: &HashMap<&str, String>,
+    buf: &mut String,
+) {
+    // text format: "; ← src (kind)"
+    let prefix = "; \u{2190} ";
+    let Some(rest) = text.strip_prefix(prefix) else {
+        html_escape(text, buf);
+        return;
+    };
+    let Some(paren_pos) = rest.rfind(" (") else {
+        html_escape(text, buf);
+        return;
+    };
+    let src = &rest[..paren_pos];
+    let suffix = &rest[paren_pos..]; // " (call)" / " (jmp)" / " (data)"
+
+    let anchor = if let Some(addr) = link_addr {
+        addr_to_anchor(project, addr)
+    } else if let Some(a) = label_map.get(src) {
+        a.clone()
+    } else if src.contains(':') {
+        src.replace(':', "-")
+    } else {
+        html_escape(text, buf);
+        return;
+    };
+
+    buf.push_str(prefix);
+    buf.push_str("<a href=\"#");
+    buf.push_str(&anchor);
+    buf.push_str("\">");
+    html_escape(src, buf);
+    buf.push_str("</a>");
+    html_escape(suffix, buf);
+}
+
+fn render_data_html(
+    text: &str,
+    link_addr: Option<Address>,
+    project: &Project,
+    label_map: &HashMap<&str, String>,
+    buf: &mut String,
+) {
+    // link_addr is set by Ofs16 when a label was resolved.
+    if let Some(addr) = link_addr {
+        for prefix in ["dw ", "dd "] {
+            if let Some(label) = text.strip_prefix(prefix) {
+                let anchor = addr_to_anchor(project, addr);
+                buf.push_str(prefix);
+                buf.push_str("<a href=\"#");
+                buf.push_str(&anchor);
+                buf.push_str("\">");
+                html_escape(label, buf);
+                buf.push_str("</a>");
+                return;
+            }
+        }
+    }
+    // Fallback: label-map lookup for unique labels (covers edge cases).
+    for prefix in ["dw ", "dd "] {
+        if let Some(label) = text.strip_prefix(prefix)
+            && let Some(anchor) = label_map.get(label)
+        {
+            buf.push_str(prefix);
+            buf.push_str("<a href=\"#");
+            buf.push_str(anchor);
+            buf.push_str("\">");
+            html_escape(label, buf);
+            buf.push_str("</a>");
+            return;
+        }
+    }
+    html_escape(text, buf);
 }
 
 // ── Dataflow summary ──────────────────────────────────────────────────────────
