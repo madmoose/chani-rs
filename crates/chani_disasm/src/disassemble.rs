@@ -1,15 +1,39 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use smallvec::SmallVec;
 
-use crate::{SReg, opcode_table::ArgDir};
+use crate::{SReg, opcode_table::ArgDir, project::SegmentIdx};
 
 use super::{
     decoded_instruction::DecodedInstruction,
     opcode_table::{ArgType, GROUP_1, GROUP_2, GROUP_3, GROUP_4, GROUP_5, OPCODE_TABLE},
 };
 
+/// Decoding-time context that lets the disassembler resolve segment-relocation
+/// fixups while building [`DecodedInstruction`]s.
+#[derive(Default)]
+pub struct DisasmCtx<'a> {
+    /// Optional relocation map keyed by linear EXE byte address
+    /// (`reloc.seg as u32 * 16 + reloc.ofs as u32`). When present and an
+    /// instruction's imm bytes fall on an entry, the resolved segment is
+    /// recorded in [`DecodedInstruction::imm_seg`].
+    pub imm_relocations: Option<&'a BTreeMap<u32, SegmentIdx>>,
+}
+
 pub fn decode<I>(seg: u16, ofs: u16, iter: I) -> Option<DecodedInstruction>
+where
+    I: Iterator<Item = u8>,
+{
+    decode_with_ctx(seg, ofs, iter, &DisasmCtx::default())
+}
+
+pub fn decode_with_ctx<I>(
+    seg: u16,
+    ofs: u16,
+    iter: I,
+    ctx: &DisasmCtx,
+) -> Option<DecodedInstruction>
 where
     I: Iterator<Item = u8>,
 {
@@ -91,19 +115,24 @@ where
     }
 
     let mut imm = [0u32; 2];
+    let mut imm_ofs = [None::<u8>; 2];
     #[allow(clippy::needless_range_loop)]
     for i in 0..2 {
         if inst.arg_type[i] == ArgType::None {
             break;
         }
+        let ofs = bytes.borrow().len() as u8;
         match inst.arg_type[i] {
             ArgType::Imm8 | ArgType::Rel8 => {
+                imm_ofs[i] = Some(ofs);
                 imm[i] = fetch() as u32;
             }
             ArgType::IMem8 | ArgType::IMem16 | ArgType::Imm16 | ArgType::Rel16 => {
+                imm_ofs[i] = Some(ofs);
                 imm[i] = fetch16() as u32;
             }
             ArgType::IMem32 => {
+                imm_ofs[i] = Some(ofs);
                 imm[i] = fetch32();
             }
             ArgType::Mem16 | ArgType::Mem32 | ArgType::RM8 | ArgType::RM16 => {
@@ -112,13 +141,16 @@ where
                 match r#mod {
                     0b00 => {
                         if rm == 0b110 {
+                            imm_ofs[i] = Some(ofs);
                             imm[i] = fetch16() as u32;
                         }
                     }
                     0b01 => {
+                        imm_ofs[i] = Some(ofs);
                         imm[i] = fetch() as u32;
                     }
                     0b10 => {
+                        imm_ofs[i] = Some(ofs);
                         imm[i] = fetch16() as u32;
                     }
                     _ => {}
@@ -129,6 +161,27 @@ where
     }
 
     let has_mem_arg = inst.arg_type.iter().any(|&t| is_mem_arg(t, modrm));
+
+    // Resolve segment-relocation fixups for `Imm16` operands (whole 2-byte
+    // imm) and `IMem32` far pointers (seg-half at imm_ofs+2). Other operand
+    // kinds never carry seg fixups in 8086 EXEs.
+    let mut imm_seg = [None::<SegmentIdx>; 2];
+    if let Some(relocs) = ctx.imm_relocations {
+        let lin_base = (seg as u32) * 16 + (ofs as u32);
+        for i in 0..2 {
+            let Some(off) = imm_ofs[i] else { continue };
+            let probe = match inst.arg_type[i] {
+                ArgType::Imm16 => Some(lin_base + off as u32),
+                ArgType::IMem32 => Some(lin_base + off as u32 + 2),
+                _ => None,
+            };
+            if let Some(key) = probe
+                && let Some(idx) = relocs.get(&key)
+            {
+                imm_seg[i] = Some(*idx);
+            }
+        }
+    }
 
     Some(DecodedInstruction {
         opcode: inst.opcode,
@@ -143,6 +196,8 @@ where
         flag_f2,
         flag_f3,
         imm,
+        imm_ofs,
+        imm_seg,
         has_mem_arg,
     })
 }

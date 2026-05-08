@@ -2,10 +2,7 @@ use std::fmt::{Display, Write};
 
 use smallvec::SmallVec;
 
-use crate::{
-    BaseReg, DataWidth, GpReg8, GpReg16, IndexReg, MemRef, Operand, SReg, data_type::DisplayFmt,
-    project::SegmentIdx,
-};
+use crate::{SReg, data_type::DisplayFmt, project::SegmentIdx};
 
 use super::opcode_table::{ArgDir, ArgType, Opcode};
 
@@ -23,10 +20,25 @@ pub struct DecodedInstruction {
     pub flag_f2: bool,
     pub flag_f3: bool,
     pub imm: [u32; 2],
+    /// Byte offset within `bytes` at which `imm[i]` begins, or `None` if
+    /// `imm[i]` was not fetched from the byte stream (no displacement, no
+    /// immediate, register-only operand, etc.). Used to match imm slots
+    /// against an external relocation table.
+    pub imm_ofs: [Option<u8>; 2],
+    /// For each operand slot, the project segment that the imm bytes resolve
+    /// to via the EXE relocation table. Set only for `Imm16` operands and for
+    /// the seg-half of `IMem32` (far-pointer) operands. `None` when no
+    /// relocation applies.
+    pub imm_seg: [Option<SegmentIdx>; 2],
     pub has_mem_arg: bool,
 }
 
-fn write_imm_fmt<W: Write>(w: &mut W, v: u32, width: DataWidth, fmt: DisplayFmt) -> std::fmt::Result {
+fn write_imm_fmt<W: Write>(
+    w: &mut W,
+    v: u32,
+    width: DataWidth,
+    fmt: DisplayFmt,
+) -> std::fmt::Result {
     match fmt {
         DisplayFmt::Default | DisplayFmt::Hex => write_imm(w, v),
         DisplayFmt::Dec => write!(w, "{v}"),
@@ -227,6 +239,7 @@ impl DecodedInstruction {
             },
             ArgType::IMem32 => MemRef::Direct {
                 seg: (self.imm[i] >> 16) as u16,
+                seg_idx: self.imm_seg[i],
                 ofs: self.imm[i] as u16,
                 width: DataWidth::Dword,
             },
@@ -330,10 +343,16 @@ impl DecodedInstruction {
                 value: self.imm[i],
                 width: DataWidth::Byte,
             },
-            ArgType::Imm16 => Operand::Imm {
-                value: self.imm[i],
-                width: DataWidth::Word,
-            },
+            ArgType::Imm16 => {
+                if let Some(idx) = self.imm_seg[i] {
+                    Operand::SegRef(idx)
+                } else {
+                    Operand::Imm {
+                        value: self.imm[i],
+                        width: DataWidth::Word,
+                    }
+                }
+            }
             ArgType::Rel8 => {
                 let inc = self.imm[i] as i8 as i16 as u16;
                 let ofs = self
@@ -428,6 +447,13 @@ pub trait SymbolLookup {
 
     /// For `Imm8`/`Imm16` — resolves using a pre-configured default segment.
     fn lookup_offset(&self, ofs: u16) -> Option<String>;
+
+    /// Resolve a project segment index to its name. Used to render
+    /// relocation-resolved imm16 operands (`Operand::SegRef`) and the
+    /// seg-half of relocated far pointers.
+    fn lookup_segment(&self, _seg_idx: SegmentIdx) -> Option<String> {
+        None
+    }
 }
 pub struct DisplayContext<'a> {
     pub lookup: &'a dyn SymbolLookup,
@@ -545,7 +571,9 @@ impl DecodedInstruction {
             && let Some(mem_ref) = self.mem_ref()
         {
             let name = match mem_ref {
-                MemRef::Direct { seg, ofs, width } => ctx.lookup.lookup_direct(seg, ofs, width),
+                MemRef::Direct {
+                    seg, ofs, width, ..
+                } => ctx.lookup.lookup_direct(seg, ofs, width),
                 MemRef::Indirect {
                     seg,
                     base,
@@ -591,13 +619,28 @@ impl DecodedInstruction {
                 if let Some(name) = ctx.lookup.lookup_offset(self.imm[i] as u16) {
                     return write!(w, "{name}");
                 }
-                write_imm_fmt(w, self.imm[i], DataWidth::Byte, ctx.arg_fmts[i].unwrap_or_default())?;
+                write_imm_fmt(
+                    w,
+                    self.imm[i],
+                    DataWidth::Byte,
+                    ctx.arg_fmts[i].unwrap_or_default(),
+                )?;
             }
             ArgType::Imm16 => {
+                if let Some(idx) = self.imm_seg[i]
+                    && let Some(name) = ctx.lookup.lookup_segment(idx)
+                {
+                    return write!(w, "{name}");
+                }
                 if let Some(name) = ctx.lookup.lookup_offset(self.imm[i] as u16) {
                     return write!(w, "{name}");
                 }
-                write_imm_fmt(w, self.imm[i], DataWidth::Word, ctx.arg_fmts[i].unwrap_or_default())?;
+                write_imm_fmt(
+                    w,
+                    self.imm[i],
+                    DataWidth::Word,
+                    ctx.arg_fmts[i].unwrap_or_default(),
+                )?;
             }
             ArgType::Rel8 => {
                 let inc = self.imm[i] as i8 as i16 as u16;
@@ -655,7 +698,20 @@ impl DecodedInstruction {
                 if let Some(ovr) = self.seg_ovr {
                     write!(w, "{ovr}:")?;
                 }
-                write!(w, "[{seg:04x}:{ofs:04x}]")?;
+                if let Some(idx) = self.imm_seg[i]
+                    && let Some(seg_name) = ctx.lookup.lookup_segment(idx)
+                {
+                    let ofs_name = ctx.lookup.lookup_offset(ofs);
+                    write!(w, "[{seg_name}:")?;
+                    if let Some(name) = ofs_name {
+                        write!(w, "{name}")?;
+                    } else {
+                        write_imm(w, ofs as u32)?;
+                    }
+                    write!(w, "]")?;
+                } else {
+                    write!(w, "[{seg:04x}:{ofs:04x}]")?;
+                }
             }
             ArgType::Mem16 | ArgType::Mem32 | ArgType::RM8 | ArgType::RM16 => {
                 let modrm = self.modrm;
@@ -815,13 +871,226 @@ impl Display for DecodedInstruction {
     }
 }
 
+/// 16-bit general-purpose register, indexed in standard 8086 modrm.reg / modrm.rm order.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GpReg16 {
+    AX,
+    CX,
+    DX,
+    BX,
+    SP,
+    BP,
+    SI,
+    DI,
+}
+
+impl GpReg16 {
+    /// Decode a `GpReg16` from the low 3 bits of a modrm reg or rm field.
+    pub fn from_bits(bits: u8) -> Self {
+        match bits & 7 {
+            0 => Self::AX,
+            1 => Self::CX,
+            2 => Self::DX,
+            3 => Self::BX,
+            4 => Self::SP,
+            5 => Self::BP,
+            6 => Self::SI,
+            _ => Self::DI,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AX => "ax",
+            Self::CX => "cx",
+            Self::DX => "dx",
+            Self::BX => "bx",
+            Self::SP => "sp",
+            Self::BP => "bp",
+            Self::SI => "si",
+            Self::DI => "di",
+        }
+    }
+}
+
+impl Display for GpReg16 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 8-bit general-purpose register, indexed in standard 8086 modrm.reg / modrm.rm order.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GpReg8 {
+    AL,
+    CL,
+    DL,
+    BL,
+    AH,
+    CH,
+    DH,
+    BH,
+}
+
+impl GpReg8 {
+    /// Decode a `GpReg8` from the low 3 bits of a modrm reg or rm field.
+    pub fn from_bits(bits: u8) -> Self {
+        match bits & 7 {
+            0 => Self::AL,
+            1 => Self::CL,
+            2 => Self::DL,
+            3 => Self::BL,
+            4 => Self::AH,
+            5 => Self::CH,
+            6 => Self::DH,
+            _ => Self::BH,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AL => "al",
+            Self::CL => "cl",
+            Self::DL => "dl",
+            Self::BL => "bl",
+            Self::AH => "ah",
+            Self::CH => "ch",
+            Self::DH => "dh",
+            Self::BH => "bh",
+        }
+    }
+}
+
+impl Display for GpReg8 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BaseReg {
+    BP,
+    BX,
+}
+
+impl Display for BaseReg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BaseReg::BP => write!(f, "bp"),
+            BaseReg::BX => write!(f, "bx"),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IndexReg {
+    SI,
+    DI,
+}
+
+impl Display for IndexReg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexReg::SI => write!(f, "si"),
+            IndexReg::DI => write!(f, "di"),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum DataWidth {
+    Byte,  // 8-bit data
+    Word,  // 16-bit data
+    Dword, // 32-bit data
+}
+
+impl DataWidth {
+    pub fn sign_extend(self, v: u32) -> i32 {
+        match self {
+            DataWidth::Byte => v as u8 as i8 as i32,
+            DataWidth::Word => v as u16 as i16 as i32,
+            DataWidth::Dword => v as i32,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MemRef {
+    Direct {
+        seg: u16, // Direct segment (paragraph value)
+        /// Resolved project segment, set when the seg-half of the far-pointer
+        /// imm32 is covered by an EXE relocation entry.
+        seg_idx: Option<SegmentIdx>,
+        ofs: u16,         // Direct offset
+        width: DataWidth, // Data width
+    },
+    Indirect {
+        seg: SReg,               // Segment register (CS, DS, ES, SS)
+        base: Option<BaseReg>,   // Base register (BX, BP)
+        index: Option<IndexReg>, // Index register (SI, DI)
+        disp: u16,               // Displacement
+        width: DataWidth,        // Data width
+    },
+}
+
+impl MemRef {
+    pub fn width(&self) -> DataWidth {
+        match self {
+            MemRef::Direct { width, .. } => *width,
+            MemRef::Indirect { width, .. } => *width,
+        }
+    }
+}
+
+/// A fully-decoded instruction operand, resolving modrm bits, immediate bytes,
+/// and relative-branch arithmetic into concrete register / memory / immediate
+/// values. See [`crate::DecodedInstruction::operand`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Operand {
+    /// Operand index past the end of `arg_count()`, or an unrecognized operand.
+    None,
+    /// Literal constant baked into the opcode (e.g. shift-by-1 / int 3).
+    Const(u32),
+    Gp8(GpReg8),
+    Gp16(GpReg16),
+    Sreg(SReg),
+    Imm {
+        value: u32,
+        width: DataWidth,
+    },
+    /// A 16-bit immediate that the EXE relocation table resolved to a known
+    /// project segment. Produced from `Imm16` operands whose imm bytes are
+    /// covered by a relocation entry. e.g. `mov ax, seg001`.
+    SegRef(SegmentIdx),
+    /// A near branch target. `target` is the absolute `(seg, ofs)` after
+    /// applying the relative-branch arithmetic.
+    Rel {
+        target: (u16, u16),
+    },
+    Mem(MemRef),
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
-    use crate::decode;
+    use crate::{DisasmCtx, decode, decode_with_ctx};
 
     fn dec(bytes: &[u8]) -> DecodedInstruction {
         decode(0, 0, bytes.iter().copied()).expect("decode failed")
+    }
+
+    fn dec_with(
+        seg: u16,
+        ofs: u16,
+        bytes: &[u8],
+        relocs: &BTreeMap<u32, SegmentIdx>,
+    ) -> DecodedInstruction {
+        let ctx = DisasmCtx {
+            imm_relocations: Some(relocs),
+        };
+        decode_with_ctx(seg, ofs, bytes.iter().copied(), &ctx).expect("decode failed")
     }
 
     #[test]
@@ -868,7 +1137,9 @@ mod tests {
         let inst = dec(&[0x8b, 0x07]);
         assert_eq!(inst.operand(0), Operand::Gp16(GpReg16::AX));
         match inst.operand(1) {
-            Operand::Mem(MemRef::Indirect { base, index, disp, .. }) => {
+            Operand::Mem(MemRef::Indirect {
+                base, index, disp, ..
+            }) => {
                 assert_eq!(base, Some(BaseReg::BX));
                 assert_eq!(index, None);
                 assert_eq!(disp, 0);
@@ -968,11 +1239,121 @@ mod tests {
     }
 
     #[test]
+    fn imm_ofs_for_imm16() {
+        // mov ax, 1234h = b8 34 12 — imm16 starts at byte 1
+        let inst = dec(&[0xb8, 0x34, 0x12]);
+        assert_eq!(inst.imm_ofs[0], None); // AX is fixed-register
+        assert_eq!(inst.imm_ofs[1], Some(1));
+    }
+
+    #[test]
+    fn imm_ofs_for_rm_with_disp16() {
+        // mov ax, [bx+1234h] = 8b 87 34 12
+        // modrm 87 = mod=10 reg=000(AX) rm=111(BX), then 16-bit disp at byte 2
+        let inst = dec(&[0x8b, 0x87, 0x34, 0x12]);
+        assert_eq!(inst.imm_ofs[0], None); // Reg16 (AX): no imm bytes
+        assert_eq!(inst.imm_ofs[1], Some(2)); // RM16 with 16-bit disp
+    }
+
+    #[test]
+    fn imm_ofs_none_for_register_only() {
+        // mov ax, bx = 89 d8 (mod=11 — both operands are registers)
+        let inst = dec(&[0x89, 0xd8]);
+        assert_eq!(inst.imm_ofs, [None, None]);
+    }
+
+    #[test]
+    fn imm_ofs_for_imem16() {
+        // mov ax, [1234h] = a1 34 12 — IMem16 at byte 1
+        let inst = dec(&[0xa1, 0x34, 0x12]);
+        assert_eq!(inst.imm_ofs[0], None);
+        assert_eq!(inst.imm_ofs[1], Some(1));
+    }
+
+    #[test]
+    fn imm_ofs_for_far_call() {
+        // call far 1234:5678 = 9a 78 56 34 12 — IMem32 at byte 1
+        let inst = dec(&[0x9a, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(inst.imm_ofs[0], Some(1));
+    }
+
+    #[test]
     fn writes_to_gp16_sp_false_when_only_read() {
         // mov ax, sp = 89 e0 (modrm: mod=11 reg=100(SP) rm=000(AX))
         // SP is the source (Reg16, RO); AX is the destination.
         let inst = dec(&[0x89, 0xe0]);
         assert!(!inst.writes_to_gp16(GpReg16::SP));
         assert!(inst.writes_to_gp16(GpReg16::AX));
+    }
+
+    #[test]
+    fn imm_seg_empty_without_ctx() {
+        // mov ax, 1234h = b8 34 12 — without relocations, imm_seg stays None.
+        let inst = dec(&[0xb8, 0x34, 0x12]);
+        assert_eq!(inst.imm_seg, [None, None]);
+    }
+
+    #[test]
+    fn imm_seg_populated_for_imm16_when_reloc_matches() {
+        // Place a `mov ax, imm16` at linear address 0x100
+        // (op_seg=0x10 paragraph, op_ofs=0). Imm bytes start at op_ofs+1=0x101.
+        let mut relocs = BTreeMap::new();
+        let target = SegmentIdx::from(7);
+        relocs.insert(0x101, target);
+
+        let inst = dec_with(0x10, 0, &[0xb8, 0x34, 0x12], &relocs);
+        assert_eq!(inst.imm_seg[1], Some(target));
+        // operand(1) should now report SegRef.
+        assert_eq!(inst.operand(1), Operand::SegRef(target));
+    }
+
+    #[test]
+    fn imm_seg_not_populated_when_reloc_misses() {
+        // Same instruction, but the relocation is at a different address.
+        let mut relocs = BTreeMap::new();
+        relocs.insert(0x200, SegmentIdx::from(7));
+
+        let inst = dec_with(0x10, 0, &[0xb8, 0x34, 0x12], &relocs);
+        assert_eq!(inst.imm_seg, [None, None]);
+        // operand(1) falls back to plain Imm.
+        assert_eq!(
+            inst.operand(1),
+            Operand::Imm {
+                value: 0x1234,
+                width: DataWidth::Word,
+            }
+        );
+    }
+
+    #[test]
+    fn imm_seg_for_imem32_seg_half() {
+        // call far 1234:5678 = 9a 78 56 34 12. The seg-half (34 12) sits at
+        // imm_ofs+2 = 1+2 = 3 within the instruction. With op_seg=0, op_ofs=0,
+        // the relocation key is 3.
+        let mut relocs = BTreeMap::new();
+        let target = SegmentIdx::from(3);
+        relocs.insert(3, target);
+
+        let inst = dec_with(0, 0, &[0x9a, 0x78, 0x56, 0x34, 0x12], &relocs);
+        assert_eq!(inst.imm_seg[0], Some(target));
+        // The IMem32 routes through MemRef::Direct with seg_idx propagated.
+        match inst.operand(0) {
+            Operand::Mem(MemRef::Direct { seg_idx, .. }) => {
+                assert_eq!(seg_idx, Some(target));
+            }
+            other => panic!("expected Mem(Direct) with seg_idx set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn imm_seg_no_match_for_imem32_offset_half() {
+        // The offset half of a far ptr is at imm_ofs+0; we should NOT treat
+        // a reloc at that key as a seg fixup. Place reloc at offset-half:
+        let mut relocs = BTreeMap::new();
+        relocs.insert(1, SegmentIdx::from(3));
+
+        let inst = dec_with(0, 0, &[0x9a, 0x78, 0x56, 0x34, 0x12], &relocs);
+        // The probe for IMem32 is imm_ofs+2, not imm_ofs+0, so no match.
+        assert_eq!(inst.imm_seg[0], None);
     }
 }

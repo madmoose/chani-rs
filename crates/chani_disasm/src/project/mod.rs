@@ -53,6 +53,11 @@ pub struct Project {
     pub attrs: BTreeMap<Address, Attr>,
     pub exe: Option<ExeMz>,
     pub images: Vec<BinImage>,
+    /// EXE segment-relocation map, keyed by linear byte address
+    /// (`reloc.seg as u32 * 16 + reloc.ofs as u32`). Each entry resolves the
+    /// preliminary 16-bit segment value at that location to a project
+    /// `SegmentIdx`. Built during `analyze()` from `exe.relocations`.
+    pub imm_relocations: BTreeMap<u32, SegmentIdx>,
     pub branches: BranchMap,
     pub blocks: BasicBlockMap,
     pub seg_dataflow: SegDataflow,
@@ -363,6 +368,7 @@ impl Project {
             attrs: BTreeMap::new(),
             exe: Some(exe),
             images,
+            imm_relocations: BTreeMap::new(),
             branches: BranchMap::new(),
             blocks: BasicBlockMap::new(),
             seg_dataflow: SegDataflow::new(),
@@ -480,6 +486,7 @@ impl Project {
             attrs,
             exe: Default::default(),
             images: Vec::new(),
+            imm_relocations: BTreeMap::new(),
             branches: BranchMap::new(),
             blocks: BasicBlockMap::new(),
             seg_dataflow: SegDataflow::new(),
@@ -609,6 +616,7 @@ impl Project {
     }
 
     pub fn analyze(&mut self) {
+        self.build_imm_relocations();
         self.mark_data_attributes();
         self.disassemble();
         self.build_basic_blocks();
@@ -616,6 +624,50 @@ impl Project {
         self.seg_dataflow = crate::seg_dataflow::compute(self);
         self.generate_auto_labels();
         self.build_data_xrefs();
+    }
+
+    /// Walk `self.exe.relocations` and translate each `(seg, ofs)` entry to a
+    /// `(linear_address, SegmentIdx)` pair, using the preliminary 16-bit
+    /// segment value the linker wrote at that location to look up the
+    /// project segment via [`Project::segment_index_for`]. Relocations whose
+    /// preliminary value doesn't match any project segment are skipped.
+    fn build_imm_relocations(&mut self) {
+        let Some(exe) = &self.exe else {
+            self.imm_relocations = BTreeMap::new();
+            return;
+        };
+
+        // Find which file index corresponds to the EXE, then build a
+        // paragraph -> SegmentIdx map for every segment loaded from that
+        // EXE. The load paragraph is `load.file_start / 16`.
+        let exe_file_idx = self.files.iter().position(|f| f.format == FileFormat::Exe);
+        let mut paragraph_to_seg: BTreeMap<u16, SegmentIdx> = BTreeMap::new();
+        if let Some(exe_idx) = exe_file_idx {
+            for (idx, s) in self.segments.indexed_iter() {
+                let Some(load) = &s.load else { continue };
+                if load.file_idx != exe_idx {
+                    continue;
+                }
+                if load.file_start % 16 != 0 {
+                    continue;
+                }
+                let paragraph = (load.file_start / 16) as u16;
+                paragraph_to_seg.insert(paragraph, idx);
+            }
+        }
+
+        let mut map = BTreeMap::new();
+        for r in &exe.relocations {
+            let lin = r.seg as u32 * 16 + r.ofs as u32;
+            let Some(slot) = exe.image.get(lin as usize..lin as usize + 2) else {
+                continue;
+            };
+            let prelim = u16::from_le_bytes([slot[0], slot[1]]);
+            if let Some(&idx) = paragraph_to_seg.get(&prelim) {
+                map.insert(lin, idx);
+            }
+        }
+        self.imm_relocations = map;
     }
 
     fn build_data_xrefs(&mut self) {
@@ -698,10 +750,14 @@ impl Project {
             let mut cur_ofs = ofs;
 
             loop {
-                let Some(inst) = decode(
+                let ctx = crate::DisasmCtx {
+                    imm_relocations: Some(&self.imm_relocations),
+                };
+                let Some(inst) = crate::decode_with_ctx(
                     seg_val,
                     cur_ofs as u16,
                     self.bytes_at_seg(seg_idx, cur_ofs).iter().copied(),
+                    &ctx,
                 ) else {
                     break;
                 };
@@ -971,8 +1027,7 @@ impl Project {
                         continue;
                     }
 
-                    if let Some(ofs_seg) = self.attrs.get(&(seg_idx, ofs)).and_then(|a| a.ofs_seg)
-                    {
+                    if let Some(ofs_seg) = self.attrs.get(&(seg_idx, ofs)).and_then(|a| a.ofs_seg) {
                         let seg_val = (seg_start / 16) as u16;
                         let bytes = self.bytes_at_seg(seg_idx, ofs);
                         if let Some(inst) = decode(seg_val, ofs as u16, bytes.iter().copied()) {
@@ -1218,7 +1273,11 @@ fn path_in_type(dt: &DataType, rel: usize, prefix: &str, structs: &Structs) -> O
         }
         DataType::Formatted(_, inner) => path_in_type(inner, rel, prefix, structs),
         DataType::Scalar(_) => {
-            if rel == 0 { Some(prefix.to_string()) } else { None }
+            if rel == 0 {
+                Some(prefix.to_string())
+            } else {
+                None
+            }
         }
     }
 }
@@ -1291,6 +1350,10 @@ impl SymbolLookup for ProjectLookup<'_> {
 
     fn lookup_offset(&self, ofs: u16) -> Option<String> {
         self.project.resolve_label(self.default_seg?, ofs as u32)
+    }
+
+    fn lookup_segment(&self, seg_idx: SegmentIdx) -> Option<String> {
+        Some(self.project.segments[seg_idx].name.to_string())
     }
 }
 

@@ -332,12 +332,13 @@ fn clobber_call_with_preserves(
         state.set_gpreg(*r, SegVal::Unknown);
     }
 
-    let preserves = inst
-        .branch_destination()
-        .and_then(|(seg, ofs)| {
-            let seg_idx = project.segment_index_for(seg)?;
-            project.function_preserves.get(&(seg_idx, ofs as u32)).copied()
-        });
+    let preserves = inst.branch_destination().and_then(|(seg, ofs)| {
+        let seg_idx = project.segment_index_for(seg)?;
+        project
+            .function_preserves
+            .get(&(seg_idx, ofs as u32))
+            .copied()
+    });
 
     match preserves {
         Some(p) => {
@@ -376,7 +377,8 @@ pub fn compute(project: &Project) -> SegDataflow {
                 let Some(sreg) = AbstractState::sreg_idx_from_str(sreg_name) else {
                     continue;
                 };
-                if let Some(target_idx) = project.segments.iter().position(|s| &s.name == seg_name) {
+                if let Some(target_idx) = project.segments.iter().position(|s| &s.name == seg_name)
+                {
                     state.sregs[sreg] = SegVal::Known(SegmentIdx::from(target_idx));
                 }
             }

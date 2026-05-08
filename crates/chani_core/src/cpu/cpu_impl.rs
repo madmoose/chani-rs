@@ -198,7 +198,9 @@ impl Cpu {
         mem_ref: MemRef,
     ) -> (Address, Dd) {
         let (addr, width) = match mem_ref {
-            MemRef::Direct { seg, ofs, width } => (addr(seg, ofs), width),
+            MemRef::Direct {
+                seg, ofs, width, ..
+            } => (addr(seg, ofs), width),
             MemRef::Indirect {
                 seg,
                 base,

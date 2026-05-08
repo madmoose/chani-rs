@@ -7,7 +7,6 @@ mod disassemble;
 pub mod exe_mz;
 pub mod function_preserves;
 pub mod layout;
-mod memory_reference;
 mod opcode_table;
 pub mod project;
 pub mod seg_dataflow;
@@ -16,10 +15,10 @@ pub mod work_queue;
 use std::fmt::Display;
 
 pub use decoded_instruction::{
-    DecodedInstruction, DisplayContext, RegisterFile, SRegMap, SymbolLookup,
+    BaseReg, DataWidth, DecodedInstruction, DisplayContext, GpReg8, GpReg16, IndexReg, MemRef,
+    Operand, RegisterFile, SRegMap, SymbolLookup,
 };
-pub use disassemble::decode;
-pub use memory_reference::*;
+pub use disassemble::{DisasmCtx, decode, decode_with_ctx};
 pub use opcode_table::Opcode;
 
 use crate::project::SegmentIdx;

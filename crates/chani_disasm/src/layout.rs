@@ -3,7 +3,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use crate::{
-    DataWidth, DecodedInstruction, DisplayContext, Opcode, SmallString,
+    DataWidth, DecodedInstruction, DisplayContext, SmallString,
     data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType},
     disassemble,
     opcode_table::ArgType,
@@ -204,26 +204,23 @@ impl<'a> LayoutBuilder<'a> {
         self.project
             .name_at(src.0, src.1)
             .map(str::to_owned)
-            .unwrap_or_else(|| {
-                format!("{}:{:04x}", self.project.segments[src.0].name, src.1)
-            })
+            .unwrap_or_else(|| format!("{}:{:04x}", self.project.segments[src.0].name, src.1))
     }
 
     fn layout_xrefs_in(&mut self) {
         let addr = (self.seg_idx, self.base_ofs);
 
         // Incoming code xrefs
-        let code_sources: Vec<(SegmentIdx, u32)> =
-            self.project.branches.sources(addr).collect();
+        let code_sources: Vec<(SegmentIdx, u32)> = self.project.branches.sources(addr).collect();
         for src in code_sources {
             let seg = &self.project.segments[src.0];
             let seg_val = (seg.start.unwrap_or(0) / 16) as u16;
             let bytes = self.project.bytes_at_seg(src.0, src.1);
             let kind = disassemble::decode(seg_val, src.1 as u16, bytes.iter().copied())
-                .map(|i| if i.opcode == Opcode::Call { "call" } else { "jmp" })
+                .map(|i| i.opcode.as_str())
                 .unwrap_or("jmp");
             let label = self.fmt_xref_src(src);
-            let text: SmallString = format!("; \u{2190} {label} ({kind})").into();
+            let text: SmallString = format!("; <- {label} ({kind})").into();
             self.add(self.label_x0, WidgetKind::XrefIn, text);
             self.set_last_link(src);
             self.new_line();
@@ -234,7 +231,7 @@ impl<'a> LayoutBuilder<'a> {
             let srcs: Vec<_> = srcs.iter().copied().collect();
             for src in srcs {
                 let label = self.fmt_xref_src(src);
-                let text: SmallString = format!("; \u{2190} {label} (data)").into();
+                let text: SmallString = format!("; <- {label} (data)").into();
                 self.add(self.label_x0, WidgetKind::XrefIn, text);
                 self.set_last_link(src);
                 self.new_line();
@@ -270,8 +267,16 @@ impl<'a> LayoutBuilder<'a> {
         if is_code {
             let seg_val = (seg.start.unwrap_or_default() / 16) as u16;
             let bytes = self.project.bytes_at_seg(self.seg_idx, self.base_ofs);
-            let inst =
-                disassemble::decode(seg_val, self.base_ofs as u16, bytes.iter().copied()).unwrap();
+            let ctx = disassemble::DisasmCtx {
+                imm_relocations: Some(&self.project.imm_relocations),
+            };
+            let inst = disassemble::decode_with_ctx(
+                seg_val,
+                self.base_ofs as u16,
+                bytes.iter().copied(),
+                &ctx,
+            )
+            .unwrap();
 
             let prev_stops_flow = prev_ofs
                 .map(|ofs| seg.addr_attributes.stops_flow(ofs))
@@ -413,10 +418,10 @@ impl<'a> LayoutBuilder<'a> {
         let inst_len = self.project.segments[self.seg_idx]
             .addr_attributes
             .op_len(self.base_ofs);
-        let sub_labels: Vec<String> =
-            ((self.base_ofs + 1)..=(self.base_ofs + inst_len.saturating_sub(1)))
-                .filter_map(|ofs| self.project.name_at(self.seg_idx, ofs).map(str::to_owned))
-                .collect();
+        let sub_labels: Vec<String> = ((self.base_ofs + 1)
+            ..=(self.base_ofs + inst_len.saturating_sub(1)))
+            .filter_map(|ofs| self.project.name_at(self.seg_idx, ofs).map(str::to_owned))
+            .collect();
         let mut sub_label_idx = 0usize;
 
         let branch_target: Option<crate::Address> = {
