@@ -2,7 +2,10 @@ use std::fmt::{Display, Write};
 
 use smallvec::SmallVec;
 
-use crate::{BaseReg, DataWidth, IndexReg, MemRef, SReg, data_type::DisplayFmt, project::SegmentIdx};
+use crate::{
+    BaseReg, DataWidth, GpReg8, GpReg16, IndexReg, MemRef, Operand, SReg, data_type::DisplayFmt,
+    project::SegmentIdx,
+};
 
 use super::opcode_table::{ArgDir, ArgType, Opcode};
 
@@ -196,12 +199,19 @@ impl DecodedInstruction {
     }
 
     pub fn mem_ref(&self) -> Option<MemRef> {
-        let (i, arg_type) = self
-            .arg_type
-            .iter()
-            .copied()
-            .enumerate()
-            .find(|(_, arg_type)| is_mem_ref_arg(*arg_type, self.modrm))?;
+        (0..2).find_map(|i| self.mem_ref_at(i))
+    }
+
+    /// Resolve operand `i` to a memory reference, if it is one. Returns `None`
+    /// for non-memory operands (registers, immediates, etc.).
+    pub fn mem_ref_at(&self, i: usize) -> Option<MemRef> {
+        if i >= 2 {
+            return None;
+        }
+        let arg_type = self.arg_type[i];
+        if !is_mem_ref_arg(arg_type, self.modrm) {
+            return None;
+        }
 
         let mem_ref = match arg_type {
             ArgType::IMem8 | ArgType::IMem16 | ArgType::Mem16 => MemRef::Indirect {
@@ -209,10 +219,9 @@ impl DecodedInstruction {
                 base: None,
                 index: None,
                 disp: self.imm[i] as u16,
-                width: match self.arg_type[i] {
+                width: match arg_type {
                     ArgType::IMem8 => DataWidth::Byte,
-                    ArgType::IMem16 => DataWidth::Word,
-                    ArgType::Mem16 => DataWidth::Word,
+                    ArgType::IMem16 | ArgType::Mem16 => DataWidth::Word,
                     _ => unreachable!(),
                 },
             },
@@ -269,19 +278,136 @@ impl DecodedInstruction {
                     base,
                     index,
                     disp,
-                    width: match self.arg_type[i] {
+                    width: match arg_type {
                         ArgType::RM8 => DataWidth::Byte,
                         ArgType::RM16 => DataWidth::Word,
                         _ => unreachable!(),
                     },
                 }
             }
-            _ => {
-                unreachable!()
-            }
+            _ => unreachable!(),
         };
 
         Some(mem_ref)
+    }
+
+    /// Resolve operand `i` to a fully-decoded [`Operand`].
+    /// Returns [`Operand::None`] for `i >= arg_count()` or for `ArgType::Inherit`
+    /// placeholders (which only appear inside group instruction templates).
+    pub fn operand(&self, i: usize) -> Operand {
+        if i >= 2 {
+            return Operand::None;
+        }
+        let arg_type = self.arg_type[i];
+        match arg_type {
+            ArgType::None | ArgType::Inherit => Operand::None,
+            ArgType::Const1 => Operand::Const(1),
+            ArgType::Const3 => Operand::Const(3),
+            ArgType::AL => Operand::Gp8(GpReg8::AL),
+            ArgType::CL => Operand::Gp8(GpReg8::CL),
+            ArgType::DL => Operand::Gp8(GpReg8::DL),
+            ArgType::BL => Operand::Gp8(GpReg8::BL),
+            ArgType::AH => Operand::Gp8(GpReg8::AH),
+            ArgType::CH => Operand::Gp8(GpReg8::CH),
+            ArgType::DH => Operand::Gp8(GpReg8::DH),
+            ArgType::BH => Operand::Gp8(GpReg8::BH),
+            ArgType::AX => Operand::Gp16(GpReg16::AX),
+            ArgType::CX => Operand::Gp16(GpReg16::CX),
+            ArgType::DX => Operand::Gp16(GpReg16::DX),
+            ArgType::BX => Operand::Gp16(GpReg16::BX),
+            ArgType::SP => Operand::Gp16(GpReg16::SP),
+            ArgType::BP => Operand::Gp16(GpReg16::BP),
+            ArgType::SI => Operand::Gp16(GpReg16::SI),
+            ArgType::DI => Operand::Gp16(GpReg16::DI),
+            ArgType::ES => Operand::Sreg(SReg::ES),
+            ArgType::CS => Operand::Sreg(SReg::CS),
+            ArgType::SS => Operand::Sreg(SReg::SS),
+            ArgType::DS => Operand::Sreg(SReg::DS),
+            ArgType::Reg8 => Operand::Gp8(GpReg8::from_bits(self.modrm >> 3)),
+            ArgType::Reg16 => Operand::Gp16(GpReg16::from_bits(self.modrm >> 3)),
+            ArgType::SReg => Operand::Sreg(SReg::from_bits(self.modrm >> 3)),
+            ArgType::Imm8 => Operand::Imm {
+                value: self.imm[i],
+                width: DataWidth::Byte,
+            },
+            ArgType::Imm16 => Operand::Imm {
+                value: self.imm[i],
+                width: DataWidth::Word,
+            },
+            ArgType::Rel8 => {
+                let inc = self.imm[i] as i8 as i16 as u16;
+                let ofs = self
+                    .op_ofs
+                    .wrapping_add(self.bytes.len() as u16)
+                    .wrapping_add(inc);
+                Operand::Rel {
+                    target: (self.op_seg, ofs),
+                }
+            }
+            ArgType::Rel16 => {
+                let inc = self.imm[i] as i16 as u16;
+                let ofs = self
+                    .op_ofs
+                    .wrapping_add(self.bytes.len() as u16)
+                    .wrapping_add(inc);
+                Operand::Rel {
+                    target: (self.op_seg, ofs),
+                }
+            }
+            ArgType::IMem8
+            | ArgType::IMem16
+            | ArgType::IMem32
+            | ArgType::Mem16
+            | ArgType::Mem32 => self
+                .mem_ref_at(i)
+                .map(Operand::Mem)
+                .unwrap_or(Operand::None),
+            ArgType::RM8 => {
+                if (self.modrm >> 6) & 0b11 == 0b11 {
+                    Operand::Gp8(GpReg8::from_bits(self.modrm))
+                } else {
+                    self.mem_ref_at(i)
+                        .map(Operand::Mem)
+                        .unwrap_or(Operand::None)
+                }
+            }
+            ArgType::RM16 => {
+                if (self.modrm >> 6) & 0b11 == 0b11 {
+                    Operand::Gp16(GpReg16::from_bits(self.modrm))
+                } else {
+                    self.mem_ref_at(i)
+                        .map(Operand::Mem)
+                        .unwrap_or(Operand::None)
+                }
+            }
+        }
+    }
+
+    /// For instructions with a clean binary `dst <- src` shape (one operand
+    /// `WO`|`RW`, the other `RO`), return `(dst_idx, src_idx)`. Returns
+    /// `None` for compares (both `RO`), `xchg` (both `RW`), single-arg or
+    /// no-arg instructions.
+    pub fn dst_src(&self) -> Option<(usize, usize)> {
+        let writes = |i: usize| matches!(self.arg_dir[i], ArgDir::WO | ArgDir::RW);
+        let reads = |i: usize| matches!(self.arg_dir[i], ArgDir::RO | ArgDir::RW);
+        for dst in 0..2 {
+            let src = 1 - dst;
+            if writes(dst) && !writes(src) && reads(src) {
+                return Some((dst, src));
+            }
+        }
+        None
+    }
+
+    /// Iterator over operand indices that are written (`WO` or `RW`).
+    pub fn destinations(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..2).filter(move |&i| matches!(self.arg_dir[i], ArgDir::WO | ArgDir::RW))
+    }
+
+    /// True iff any destination operand resolves to the given GP16 register.
+    pub fn writes_to_gp16(&self, r: GpReg16) -> bool {
+        self.destinations()
+            .any(|i| matches!(self.operand(i), Operand::Gp16(g) if g == r))
     }
 }
 
@@ -458,21 +584,9 @@ impl DecodedInstruction {
             ArgType::CS => write!(w, "cs")?,
             ArgType::SS => write!(w, "ss")?,
             ArgType::DS => write!(w, "ds")?,
-            ArgType::Reg8 => {
-                let reg = (self.modrm >> 3) & 0b111;
-                let s = ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"];
-                write!(w, "{}", s[reg as usize])?;
-            }
-            ArgType::Reg16 => {
-                let reg = (self.modrm >> 3) & 0b111;
-                let s = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"];
-                write!(w, "{}", s[reg as usize])?;
-            }
-            ArgType::SReg => {
-                let reg = (self.modrm >> 3) & 0b11;
-                let s = ["es", "cs", "ss", "ds"];
-                write!(w, "{}", s[reg as usize])?;
-            }
+            ArgType::Reg8 => write!(w, "{}", GpReg8::from_bits(self.modrm >> 3))?,
+            ArgType::Reg16 => write!(w, "{}", GpReg16::from_bits(self.modrm >> 3))?,
+            ArgType::SReg => write!(w, "{}", SReg::from_bits(self.modrm >> 3))?,
             ArgType::Imm8 => {
                 if let Some(name) = ctx.lookup.lookup_offset(self.imm[i] as u16) {
                     return write!(w, "{name}");
@@ -554,14 +668,10 @@ impl DecodedInstruction {
                     // Only RM8/RM16 are valid here, Mem16/Mem32 are not
                     if matches!(arg, ArgType::Mem16 | ArgType::Mem32) {
                         write!(w, "invalid")?;
+                    } else if wd {
+                        write!(w, "{}", GpReg16::from_bits(rm))?;
                     } else {
-                        // str_reg equivalent: use 16-bit or 8-bit reg name
-                        let reg_names = if wd {
-                            ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"]
-                        } else {
-                            ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"]
-                        };
-                        write!(w, "{}", reg_names[rm as usize])?;
+                        write!(w, "{}", GpReg8::from_bits(rm))?;
                     }
                 } else {
                     if needs_width_specifier {
@@ -702,5 +812,167 @@ impl Display for DecodedInstruction {
                 arg_fmts: [None; 2],
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decode;
+
+    fn dec(bytes: &[u8]) -> DecodedInstruction {
+        decode(0, 0, bytes.iter().copied()).expect("decode failed")
+    }
+
+    #[test]
+    fn operand_fixed_registers() {
+        // inc ax = 0x40 (one-arg, AX is RW)
+        let inst = dec(&[0x40]);
+        assert_eq!(inst.operand(0), Operand::Gp16(GpReg16::AX));
+        assert_eq!(inst.operand(1), Operand::None);
+
+        // push si = 0x56
+        let inst = dec(&[0x56]);
+        assert_eq!(inst.operand(0), Operand::Gp16(GpReg16::SI));
+    }
+
+    #[test]
+    fn operand_reg16_from_modrm() {
+        // mov ax, bx = 89 d8  (modrm: mod=11 reg=011 rm=000)
+        // 89 = MOV r/m16, r16; reg field encodes the source (BX), rm encodes dst (AX).
+        let inst = dec(&[0x89, 0xd8]);
+        assert_eq!(inst.operand(0), Operand::Gp16(GpReg16::AX)); // RM16
+        assert_eq!(inst.operand(1), Operand::Gp16(GpReg16::BX)); // Reg16
+    }
+
+    #[test]
+    fn operand_reg8_from_modrm() {
+        // mov al, bl = 88 d8 (modrm: mod=11 reg=011(BL) rm=000(AL))
+        let inst = dec(&[0x88, 0xd8]);
+        assert_eq!(inst.operand(0), Operand::Gp8(GpReg8::AL));
+        assert_eq!(inst.operand(1), Operand::Gp8(GpReg8::BL));
+    }
+
+    #[test]
+    fn operand_sreg_from_modrm() {
+        // mov ds, ax = 8e d8 (modrm: mod=11 reg=011(DS) rm=000(AX))
+        let inst = dec(&[0x8e, 0xd8]);
+        assert_eq!(inst.operand(0), Operand::Sreg(SReg::DS));
+        assert_eq!(inst.operand(1), Operand::Gp16(GpReg16::AX));
+    }
+
+    #[test]
+    fn operand_rm16_memory() {
+        // mov ax, [bx] = 8b 07 (modrm: mod=00 reg=000(AX) rm=111(BX))
+        // 0x8B = MOV r16, r/m16: operand 0 is Reg16 (AX, dst), operand 1 is RM16 ([BX], src).
+        let inst = dec(&[0x8b, 0x07]);
+        assert_eq!(inst.operand(0), Operand::Gp16(GpReg16::AX));
+        match inst.operand(1) {
+            Operand::Mem(MemRef::Indirect { base, index, disp, .. }) => {
+                assert_eq!(base, Some(BaseReg::BX));
+                assert_eq!(index, None);
+                assert_eq!(disp, 0);
+            }
+            other => panic!("expected Mem(Indirect), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn operand_immediate() {
+        // mov ax, 1234h = b8 34 12
+        let inst = dec(&[0xb8, 0x34, 0x12]);
+        assert_eq!(inst.operand(0), Operand::Gp16(GpReg16::AX));
+        assert_eq!(
+            inst.operand(1),
+            Operand::Imm {
+                value: 0x1234,
+                width: DataWidth::Word,
+            }
+        );
+    }
+
+    #[test]
+    fn operand_rel_target_matches_branch_destination() {
+        // jmp +5 (rel8) = eb 05 at offset 0
+        let inst = dec(&[0xeb, 0x05]);
+        let bd = inst.branch_destination().unwrap();
+        match inst.operand(0) {
+            Operand::Rel { target } => assert_eq!(target, bd),
+            other => panic!("expected Rel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dst_src_for_mov() {
+        // mov ax, bx = 89 d8
+        let inst = dec(&[0x89, 0xd8]);
+        assert_eq!(inst.dst_src(), Some((0, 1)));
+    }
+
+    #[test]
+    fn dst_src_for_cmp_is_none() {
+        // cmp ax, bx = 39 d8 (both operands RO)
+        let inst = dec(&[0x39, 0xd8]);
+        assert_eq!(inst.dst_src(), None);
+    }
+
+    #[test]
+    fn dst_src_for_xchg_is_none() {
+        // xchg ax, bx = 87 c3 (both RW)
+        let inst = dec(&[0x87, 0xc3]);
+        assert_eq!(inst.dst_src(), None);
+    }
+
+    #[test]
+    fn destinations_for_xchg() {
+        // xchg ax, bx = 87 c3 — both operands writable
+        let inst = dec(&[0x87, 0xc3]);
+        let dests: Vec<usize> = inst.destinations().collect();
+        assert_eq!(dests, vec![0, 1]);
+    }
+
+    #[test]
+    fn destinations_for_cmp_empty() {
+        let inst = dec(&[0x39, 0xd8]);
+        let dests: Vec<usize> = inst.destinations().collect();
+        assert!(dests.is_empty());
+    }
+
+    #[test]
+    fn destinations_for_mov_just_dst() {
+        let inst = dec(&[0x89, 0xd8]);
+        let dests: Vec<usize> = inst.destinations().collect();
+        assert_eq!(dests, vec![0]);
+    }
+
+    #[test]
+    fn writes_to_gp16_sp_via_specific_arg() {
+        // pop sp = 5c (one-arg form, SP is the destination)
+        let inst = dec(&[0x5c]);
+        assert!(inst.writes_to_gp16(GpReg16::SP));
+        assert!(!inst.writes_to_gp16(GpReg16::AX));
+    }
+
+    #[test]
+    fn writes_to_gp16_sp_via_modrm_rm() {
+        // mov sp, bx = 89 dc (modrm: mod=11 reg=011(BX) rm=100(SP))
+        let inst = dec(&[0x89, 0xdc]);
+        assert!(inst.writes_to_gp16(GpReg16::SP));
+    }
+
+    #[test]
+    fn writes_to_gp16_sp_via_immediate_arith() {
+        // add sp, 4 = 83 c4 04 (group: mod=11 reg=000(ADD) rm=100(SP))
+        let inst = dec(&[0x83, 0xc4, 0x04]);
+        assert!(inst.writes_to_gp16(GpReg16::SP));
+    }
+
+    #[test]
+    fn writes_to_gp16_sp_false_when_only_read() {
+        // mov ax, sp = 89 e0 (modrm: mod=11 reg=100(SP) rm=000(AX))
+        // SP is the source (Reg16, RO); AX is the destination.
+        let inst = dec(&[0x89, 0xe0]);
+        assert!(!inst.writes_to_gp16(GpReg16::SP));
+        assert!(inst.writes_to_gp16(GpReg16::AX));
     }
 }

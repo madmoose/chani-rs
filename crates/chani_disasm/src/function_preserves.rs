@@ -25,9 +25,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    Address, Opcode, decode,
+    Address, GpReg16, Opcode, Operand, SReg, decode,
     decoded_instruction::DecodedInstruction,
-    opcode_table::{ArgDir, ArgType},
     project::{Project, SegmentIdx},
 };
 
@@ -128,65 +127,6 @@ impl AbsState {
 
 // ── Argument helpers ──────────────────────────────────────────────────────────
 
-fn sreg_from_modrm_bits(bits: u8) -> u8 {
-    bits & 3
-}
-
-/// Return the `Slot` token corresponding to a segment-register operand,
-/// based on the operand's `ArgType` (specific) or modrm bits (`ArgType::SReg`).
-/// Returns `None` if the operand is not a segment register.
-fn sreg_slot_from_arg(arg: ArgType, modrm: u8) -> Option<SRegKind> {
-    match arg {
-        ArgType::DS => Some(SRegKind::Ds),
-        ArgType::ES => Some(SRegKind::Es),
-        ArgType::SS => Some(SRegKind::Ss),
-        ArgType::CS => Some(SRegKind::Cs),
-        ArgType::SReg => Some(match sreg_from_modrm_bits((modrm >> 3) & 3) {
-            0 => SRegKind::Es,
-            1 => SRegKind::Cs,
-            2 => SRegKind::Ss,
-            _ => SRegKind::Ds,
-        }),
-        _ => None,
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum SRegKind {
-    Ds,
-    Es,
-    Ss,
-    Cs,
-}
-
-/// Returns true if any operand of the instruction writes to SP.
-fn writes_to_sp(inst: &DecodedInstruction) -> bool {
-    let mod_bits = (inst.modrm >> 6) & 3;
-    for i in 0..2 {
-        if inst.arg_type[i] == ArgType::None {
-            continue;
-        }
-        if !matches!(inst.arg_dir[i], ArgDir::WO | ArgDir::RW) {
-            continue;
-        }
-        match inst.arg_type[i] {
-            ArgType::SP => return true,
-            ArgType::Reg16 => {
-                if (inst.modrm >> 3) & 7 == 4 {
-                    return true;
-                }
-            }
-            ArgType::RM16 => {
-                if mod_bits == 0b11 && (inst.modrm & 7) == 4 {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 fn call_dest(project: &Project, inst: &DecodedInstruction) -> Option<Address> {
     let (seg, ofs) = inst.branch_destination()?;
     let seg_idx = project.segment_index_for(seg)?;
@@ -201,14 +141,12 @@ fn apply_transfer(
     state: &mut AbsState,
     estimates: &FunctionPreservesMap,
 ) {
-    let modrm = inst.modrm;
-
     match inst.opcode {
         Opcode::Push => {
-            let slot = match sreg_slot_from_arg(inst.arg_type[0], modrm) {
-                Some(SRegKind::Ds) if state.ds_eq_entry => Slot::EntryDs,
-                Some(SRegKind::Es) if state.es_eq_entry => Slot::EntryEs,
-                Some(SRegKind::Ss) if state.ss_eq_entry => Slot::EntrySs,
+            let slot = match inst.operand(0) {
+                Operand::Sreg(SReg::DS) if state.ds_eq_entry => Slot::EntryDs,
+                Operand::Sreg(SReg::ES) if state.es_eq_entry => Slot::EntryEs,
+                Operand::Sreg(SReg::SS) if state.ss_eq_entry => Slot::EntrySs,
                 _ => Slot::Other,
             };
             state.push_slot(slot);
@@ -216,14 +154,14 @@ fn apply_transfer(
 
         Opcode::Pop => {
             let popped = state.pop_slot();
-            match sreg_slot_from_arg(inst.arg_type[0], modrm) {
-                Some(SRegKind::Ds) => state.ds_eq_entry = matches!(popped, Slot::EntryDs),
-                Some(SRegKind::Es) => state.es_eq_entry = matches!(popped, Slot::EntryEs),
-                Some(SRegKind::Ss) => state.ss_eq_entry = matches!(popped, Slot::EntrySs),
-                Some(SRegKind::Cs) => {} // unusual; CS not tracked
-                None => {} // pop to gp/mem — already discarded
+            match inst.operand(0) {
+                Operand::Sreg(SReg::DS) => state.ds_eq_entry = matches!(popped, Slot::EntryDs),
+                Operand::Sreg(SReg::ES) => state.es_eq_entry = matches!(popped, Slot::EntryEs),
+                Operand::Sreg(SReg::SS) => state.ss_eq_entry = matches!(popped, Slot::EntrySs),
+                Operand::Sreg(SReg::CS) => {} // unusual; CS not tracked
+                _ => {} // pop to gp/mem — already discarded
             }
-            if writes_to_sp(inst) {
+            if inst.writes_to_gp16(GpReg16::SP) {
                 state.invalidate_stack();
             }
         }
@@ -238,19 +176,17 @@ fn apply_transfer(
 
         Opcode::Mov | Opcode::Xchg => {
             // Clear eq flags for any segment-register destination.
-            for i in 0..2 {
-                if matches!(inst.arg_dir[i], ArgDir::WO | ArgDir::RW) {
-                    if let Some(k) = sreg_slot_from_arg(inst.arg_type[i], modrm) {
-                        match k {
-                            SRegKind::Ds => state.ds_eq_entry = false,
-                            SRegKind::Es => state.es_eq_entry = false,
-                            SRegKind::Ss => state.ss_eq_entry = false,
-                            SRegKind::Cs => {}
-                        }
+            for i in inst.destinations() {
+                if let Operand::Sreg(s) = inst.operand(i) {
+                    match s {
+                        SReg::DS => state.ds_eq_entry = false,
+                        SReg::ES => state.es_eq_entry = false,
+                        SReg::SS => state.ss_eq_entry = false,
+                        SReg::CS => {}
                     }
                 }
             }
-            if writes_to_sp(inst) {
+            if inst.writes_to_gp16(GpReg16::SP) {
                 state.invalidate_stack();
             }
         }
@@ -285,7 +221,7 @@ fn apply_transfer(
 
         _ => {
             // Catch any other instruction that might alter SP (add, sub, inc, dec, lea, …).
-            if writes_to_sp(inst) {
+            if inst.writes_to_gp16(GpReg16::SP) {
                 state.invalidate_stack();
             }
         }

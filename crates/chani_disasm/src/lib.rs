@@ -36,13 +36,29 @@ pub enum SReg {
     DS,
 }
 
+impl SReg {
+    /// Decode an `SReg` from the 2-bit segment-register field of a modrm byte.
+    pub fn from_bits(bits: u8) -> Self {
+        match bits & 3 {
+            0 => SReg::ES,
+            1 => SReg::CS,
+            2 => SReg::SS,
+            _ => SReg::DS,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SReg::ES => "es",
+            SReg::CS => "cs",
+            SReg::SS => "ss",
+            SReg::DS => "ds",
+        }
+    }
+}
+
 impl Display for SReg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SReg::ES => write!(f, "es"),
-            SReg::CS => write!(f, "cs"),
-            SReg::SS => write!(f, "ss"),
-            SReg::DS => write!(f, "ds"),
-        }
+        f.write_str(self.as_str())
     }
 }

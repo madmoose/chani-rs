@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::{
-    Address, SReg, SRegMap, SmallString,
+    Address, GpReg16, Operand, SReg, SRegMap, SmallString,
     basic_block::BasicBlock,
     decode,
-    opcode_table::{ArgDir, ArgType, Opcode},
+    decoded_instruction::DecodedInstruction,
+    opcode_table::Opcode,
     project::{Project, SegmentIdx},
 };
 
@@ -24,49 +25,6 @@ impl SegVal {
             self.clone()
         } else {
             SegVal::Unknown
-        }
-    }
-}
-
-// ── GP register index ─────────────────────────────────────────────────────────
-
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum GpReg16 {
-    AX = 0,
-    CX = 1,
-    DX = 2,
-    BX = 3,
-    SP = 4,
-    BP = 5,
-    SI = 6,
-    DI = 7,
-}
-
-impl GpReg16 {
-    fn from_bits(bits: u8) -> Self {
-        match bits & 7 {
-            0 => Self::AX,
-            1 => Self::CX,
-            2 => Self::DX,
-            3 => Self::BX,
-            4 => Self::SP,
-            5 => Self::BP,
-            6 => Self::SI,
-            _ => Self::DI,
-        }
-    }
-
-    fn from_arg_type(arg: ArgType) -> Option<Self> {
-        match arg {
-            ArgType::AX => Some(Self::AX),
-            ArgType::CX => Some(Self::CX),
-            ArgType::DX => Some(Self::DX),
-            ArgType::BX => Some(Self::BX),
-            ArgType::SP => Some(Self::SP),
-            ArgType::BP => Some(Self::BP),
-            ArgType::SI => Some(Self::SI),
-            ArgType::DI => Some(Self::DI),
-            _ => None,
         }
     }
 }
@@ -197,24 +155,26 @@ impl SegDataflow {
     }
 }
 
-// ── Helper: classify arg as SReg ─────────────────────────────────────────────
+// ── Operand → abstract value helpers ──────────────────────────────────────────
 
-fn sreg_from_modrm_bits(bits: u8) -> SReg {
-    match bits & 3 {
-        0 => SReg::ES,
-        1 => SReg::CS,
-        2 => SReg::SS,
-        _ => SReg::DS,
+/// Read the abstract segment value of an operand (for moves / xchg / push).
+/// Returns Unknown for non-register operands and for 8-bit registers (which
+/// the analysis does not track).
+fn read_seg_val(state: &AbstractState, inst: &DecodedInstruction, i: usize) -> SegVal {
+    match inst.operand(i) {
+        Operand::Sreg(r) => state.get_sreg(r).clone(),
+        Operand::Gp16(r) => state.get_gpreg(r).clone(),
+        _ => SegVal::Unknown,
     }
 }
 
-fn sreg_from_arg_type(arg: ArgType) -> Option<SReg> {
-    match arg {
-        ArgType::ES => Some(SReg::ES),
-        ArgType::CS => Some(SReg::CS),
-        ArgType::SS => Some(SReg::SS),
-        ArgType::DS => Some(SReg::DS),
-        _ => None,
+/// Write an abstract value to a destination operand. Memory destinations are
+/// silently ignored (we don't track memory).
+fn write_seg_val(state: &mut AbstractState, inst: &DecodedInstruction, i: usize, val: SegVal) {
+    match inst.operand(i) {
+        Operand::Sreg(r) => state.set_sreg(r, val),
+        Operand::Gp16(r) => state.set_gpreg(r, val),
+        _ => {}
     }
 }
 
@@ -244,94 +204,39 @@ fn transfer_block_until(
         };
 
         let len = inst.bytes.len() as u32;
-        let modrm = inst.modrm;
-        let mod_bits = (modrm >> 6) & 3;
 
         match inst.opcode {
             Opcode::Push => {
-                let val = match inst.arg_type[0] {
-                    ArgType::SReg => {
-                        let r = sreg_from_modrm_bits((modrm >> 3) & 3);
-                        state.get_sreg(r).clone()
-                    }
-                    arg if sreg_from_arg_type(arg).is_some() => {
-                        state.get_sreg(sreg_from_arg_type(arg).unwrap()).clone()
-                    }
-                    ArgType::Reg16 => {
-                        let r = GpReg16::from_bits((modrm >> 3) & 7);
-                        state.get_gpreg(r).clone()
-                    }
-                    arg if let Some(r) = GpReg16::from_arg_type(arg) => state.get_gpreg(r).clone(),
-                    _ => SegVal::Unknown,
-                };
-                abstract_stack.push(val);
+                abstract_stack.push(read_seg_val(&state, &inst, 0));
             }
 
             Opcode::Pop => {
                 let val = abstract_stack.pop().unwrap_or(SegVal::Unknown);
-                match inst.arg_type[0] {
-                    ArgType::SReg => {
-                        let r = sreg_from_modrm_bits((modrm >> 3) & 3);
-                        state.set_sreg(r, val);
-                    }
-                    arg if sreg_from_arg_type(arg).is_some() => {
-                        state.set_sreg(sreg_from_arg_type(arg).unwrap(), val);
-                    }
-                    ArgType::RM16 if mod_bits == 0b11 => {
-                        let r = GpReg16::from_bits(modrm & 7);
-                        state.set_gpreg(r, val);
-                    }
-                    arg if GpReg16::from_arg_type(arg).is_some() => {
-                        state.set_gpreg(GpReg16::from_arg_type(arg).unwrap(), val);
-                    }
-                    _ => {} // pop to memory — discard
-                }
+                write_seg_val(&mut state, &inst, 0, val);
             }
 
             Opcode::Mov => {
-                // Find which arg is dest (WO/RW) and which is src (RO).
-                let dest_idx = inst
-                    .arg_dir
-                    .iter()
-                    .position(|d| matches!(d, ArgDir::WO | ArgDir::RW));
-                let src_idx = dest_idx.map(|i| 1 - i);
-
-                if let (Some(dst), Some(src)) = (dest_idx, src_idx) {
-                    let src_val = read_arg_val(&state, inst.arg_type[src], modrm);
-                    write_arg_val(
-                        &mut state,
-                        inst.arg_type[dst],
-                        inst.arg_dir[dst],
-                        modrm,
-                        src_val,
-                    );
+                if let Some((dst, src)) = inst.dst_src() {
+                    let v = read_seg_val(&state, &inst, src);
+                    write_seg_val(&mut state, &inst, dst, v);
                 }
             }
 
             Opcode::Xchg => {
-                let a = read_arg_val(&state, inst.arg_type[0], modrm);
-                let b = read_arg_val(&state, inst.arg_type[1], modrm);
-                write_arg_val(&mut state, inst.arg_type[0], inst.arg_dir[0], modrm, b);
-                write_arg_val(&mut state, inst.arg_type[1], inst.arg_dir[1], modrm, a);
+                let a = read_seg_val(&state, &inst, 0);
+                let b = read_seg_val(&state, &inst, 1);
+                write_seg_val(&mut state, &inst, 0, b);
+                write_seg_val(&mut state, &inst, 1, a);
             }
 
             Opcode::Lds => {
                 state.set_sreg(SReg::DS, SegVal::Unknown);
-                if mod_bits == 0b11 {
-                    // Technically invalid encoding, but be safe.
-                    state.set_gpreg(GpReg16::from_bits((modrm >> 3) & 7), SegVal::Unknown);
-                } else if let Some(r) = GpReg16::from_arg_type(inst.arg_type[0]) {
-                    state.set_gpreg(r, SegVal::Unknown);
-                }
+                write_seg_val(&mut state, &inst, 0, SegVal::Unknown);
             }
 
             Opcode::Les => {
                 state.set_sreg(SReg::ES, SegVal::Unknown);
-                if mod_bits == 0b11 {
-                    state.set_gpreg(GpReg16::from_bits((modrm >> 3) & 7), SegVal::Unknown);
-                } else if let Some(r) = GpReg16::from_arg_type(inst.arg_type[0]) {
-                    state.set_gpreg(r, SegVal::Unknown);
-                }
+                write_seg_val(&mut state, &inst, 0, SegVal::Unknown);
             }
 
             // Near calls preserve CS; consult the per-function preservation
@@ -353,9 +258,9 @@ fn transfer_block_until(
 
             // Any other opcode: clobber destination GP registers.
             _ => {
-                for i in 0..2 {
-                    if matches!(inst.arg_dir[i], ArgDir::WO | ArgDir::RW) {
-                        clobber_gp_arg(&mut state, inst.arg_type[i], modrm);
+                for i in inst.destinations() {
+                    if let Operand::Gp16(r) = inst.operand(i) {
+                        state.set_gpreg(r, SegVal::Unknown);
                     }
                 }
             }
@@ -452,66 +357,6 @@ fn clobber_call_with_preserves(
             state.set_sreg(SReg::ES, SegVal::Unknown);
             state.set_sreg(SReg::SS, SegVal::Unknown);
         }
-    }
-}
-
-/// Set a destination GP register to Unknown for "other" instructions.
-fn clobber_gp_arg(state: &mut AbstractState, arg: ArgType, modrm: u8) {
-    let mod_bits = (modrm >> 6) & 3;
-    match arg {
-        ArgType::RM16 if mod_bits == 0b11 => {
-            state.set_gpreg(GpReg16::from_bits(modrm & 7), SegVal::Unknown);
-        }
-        ArgType::Reg16 => {
-            state.set_gpreg(GpReg16::from_bits((modrm >> 3) & 7), SegVal::Unknown);
-        }
-        arg if GpReg16::from_arg_type(arg).is_some() => {
-            state.set_gpreg(GpReg16::from_arg_type(arg).unwrap(), SegVal::Unknown);
-        }
-        _ => {}
-    }
-}
-
-/// Read the abstract segment value of an argument (for moves/xchg source side).
-/// Returns Unknown for anything that isn't a simple register reference.
-fn read_arg_val(state: &AbstractState, arg: ArgType, modrm: u8) -> SegVal {
-    let mod_bits = (modrm >> 6) & 3;
-    match arg {
-        ArgType::SReg => {
-            let r = sreg_from_modrm_bits((modrm >> 3) & 3);
-            state.get_sreg(r).clone()
-        }
-        arg if let Some(r) = sreg_from_arg_type(arg) => state.get_sreg(r).clone(),
-        ArgType::RM16 if mod_bits == 0b11 => state.get_gpreg(GpReg16::from_bits(modrm & 7)).clone(),
-        ArgType::Reg16 => state
-            .get_gpreg(GpReg16::from_bits((modrm >> 3) & 7))
-            .clone(),
-        arg if let Some(r) = GpReg16::from_arg_type(arg) => state.get_gpreg(r).clone(),
-        _ => SegVal::Unknown,
-    }
-}
-
-/// Write an abstract value to a destination argument.
-/// Memory destinations are silently ignored (we don't track memory).
-fn write_arg_val(state: &mut AbstractState, arg: ArgType, dir: ArgDir, modrm: u8, val: SegVal) {
-    if !matches!(dir, ArgDir::WO | ArgDir::RW) {
-        return;
-    }
-    let mod_bits = (modrm >> 6) & 3;
-    match arg {
-        ArgType::SReg => {
-            let r = sreg_from_modrm_bits((modrm >> 3) & 3);
-            state.set_sreg(r, val);
-        }
-        arg if let Some(r) = sreg_from_arg_type(arg) => state.set_sreg(r, val),
-        ArgType::RM16 if mod_bits == 0b11 => {
-            state.set_gpreg(GpReg16::from_bits(modrm & 7), val);
-        }
-        ArgType::Reg16 => {
-            state.set_gpreg(GpReg16::from_bits((modrm >> 3) & 7), val);
-        }
-        arg if let Some(r) = GpReg16::from_arg_type(arg) => state.set_gpreg(r, val),
-        _ => {} // memory destination or untracked — ignore
     }
 }
 
