@@ -360,6 +360,34 @@ impl<'a> LayoutBuilder<'a> {
 
         self.layout_xrefs_in();
 
+        if let Some(p) = self
+            .project
+            .function_preserves
+            .get(&(self.seg_idx, self.base_ofs))
+        {
+            let mut parts: Vec<&str> = Vec::new();
+            if p.ds {
+                parts.push("DS");
+            }
+            if p.es {
+                parts.push("ES");
+            }
+            if p.ss {
+                parts.push("SS");
+            }
+            let summary = if parts.is_empty() {
+                "-".to_string()
+            } else {
+                parts.join(", ")
+            };
+            self.add(
+                self.label_x0,
+                WidgetKind::Comment,
+                format!("; preserves: {summary}"),
+            );
+            self.new_line();
+        }
+
         if let Some(label) = label {
             self.add(self.label_x0, WidgetKind::Label, format!("{label}:"));
             self.new_line();

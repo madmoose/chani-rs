@@ -18,6 +18,7 @@ use chani_datafile::{SmallString, parser};
 use crate::basic_block::{BasicBlock, BasicBlockMap};
 use crate::branch_map::BranchMap;
 use crate::data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType, StructDef};
+use crate::function_preserves::FunctionPreservesMap;
 use crate::project::architecure::Architecture;
 use crate::project::loadexpr::LoadExpr;
 use crate::seg_dataflow::SegDataflow;
@@ -55,6 +56,7 @@ pub struct Project {
     pub branches: BranchMap,
     pub blocks: BasicBlockMap,
     pub seg_dataflow: SegDataflow,
+    pub function_preserves: FunctionPreservesMap,
     pub data_xrefs: BTreeMap<Address, BTreeSet<Address>>,
 }
 
@@ -364,6 +366,7 @@ impl Project {
             branches: BranchMap::new(),
             blocks: BasicBlockMap::new(),
             seg_dataflow: SegDataflow::new(),
+            function_preserves: FunctionPreservesMap::new(),
             data_xrefs: BTreeMap::new(),
         })
     }
@@ -480,6 +483,7 @@ impl Project {
             branches: BranchMap::new(),
             blocks: BasicBlockMap::new(),
             seg_dataflow: SegDataflow::new(),
+            function_preserves: FunctionPreservesMap::new(),
             data_xrefs: BTreeMap::new(),
         })
     }
@@ -608,6 +612,7 @@ impl Project {
         self.mark_data_attributes();
         self.disassemble();
         self.build_basic_blocks();
+        self.function_preserves = crate::function_preserves::compute(self);
         self.seg_dataflow = crate::seg_dataflow::compute(self);
         self.generate_auto_labels();
         self.build_data_xrefs();

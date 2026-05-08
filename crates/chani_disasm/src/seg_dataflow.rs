@@ -334,9 +334,10 @@ fn transfer_block_until(
                 }
             }
 
-            // Near calls preserve CS; callee may freely modify DS, ES, and GP regs.
+            // Near calls preserve CS; consult the per-function preservation
+            // analysis for DS/ES/SS, and assume all GP regs are clobbered.
             Opcode::Call => {
-                clobber_call(&mut state);
+                clobber_call_with_preserves(&mut state, project, &inst);
             }
 
             // Interrupts: handler returns via iret, restoring CS/SS/flags from stack,
@@ -402,6 +403,55 @@ fn clobber_call(state: &mut AbstractState) {
         GpReg16::DI,
     ] {
         state.set_gpreg(*r, SegVal::Unknown);
+    }
+}
+
+/// Model a `Call` instruction using the per-function preservation analysis.
+/// Falls back to [`clobber_call`] when the callee is indirect or unknown.
+fn clobber_call_with_preserves(
+    state: &mut AbstractState,
+    project: &Project,
+    inst: &crate::DecodedInstruction,
+) {
+    // GP regs are always assumed caller-save.
+    for r in &[
+        GpReg16::AX,
+        GpReg16::CX,
+        GpReg16::DX,
+        GpReg16::BX,
+        GpReg16::SP,
+        GpReg16::BP,
+        GpReg16::SI,
+        GpReg16::DI,
+    ] {
+        state.set_gpreg(*r, SegVal::Unknown);
+    }
+
+    let preserves = inst
+        .branch_destination()
+        .and_then(|(seg, ofs)| {
+            let seg_idx = project.segment_index_for(seg)?;
+            project.function_preserves.get(&(seg_idx, ofs as u32)).copied()
+        });
+
+    match preserves {
+        Some(p) => {
+            if !p.ds {
+                state.set_sreg(SReg::DS, SegVal::Unknown);
+            }
+            if !p.es {
+                state.set_sreg(SReg::ES, SegVal::Unknown);
+            }
+            if !p.ss {
+                state.set_sreg(SReg::SS, SegVal::Unknown);
+            }
+        }
+        None => {
+            // Indirect or unknown — clobber DS, ES, SS conservatively.
+            state.set_sreg(SReg::DS, SegVal::Unknown);
+            state.set_sreg(SReg::ES, SegVal::Unknown);
+            state.set_sreg(SReg::SS, SegVal::Unknown);
+        }
     }
 }
 

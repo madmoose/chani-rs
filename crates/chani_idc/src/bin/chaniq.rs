@@ -42,6 +42,9 @@ enum Cmd {
     Callers { addr: String },
     /// Show callees of the function at an address (requires binary)
     Callees { addr: String },
+    /// Show instructions that clobber DS/ES/SS preservation. With <addr>:
+    /// trace one function. Without: report every analyzed function. (requires binary)
+    Clobbers { addr: Option<String> },
     /// Run project consistency checks (does not require binary)
     Check,
 }
@@ -103,6 +106,7 @@ fn main() -> Result<()> {
         Cmd::Func { addr } => cmd_func(path, &addr),
         Cmd::Callers { addr } => cmd_callers(path, &addr),
         Cmd::Callees { addr } => cmd_callees(path, &addr),
+        Cmd::Clobbers { addr } => cmd_clobbers(path, addr.as_deref()),
         Cmd::Check => cmd_check(path),
     }
 }
@@ -126,15 +130,34 @@ fn load_analyzed(path: &Path) -> Result<Project> {
 // ── Address helpers ───────────────────────────────────────────────────────────
 
 fn parse_addr(project: &Project, s: &str) -> Result<(SegmentIdx, u32)> {
-    let (seg_name, ofs_str) = s
-        .split_once(':')
-        .ok_or_else(|| anyhow::anyhow!("address must be 'seg:ofs', got '{s}'"))?;
-    let seg_idx = project
-        .segment_by_name(seg_name)
-        .ok_or_else(|| anyhow::anyhow!("unknown segment '{seg_name}'"))?;
-    let ofs = u32::from_str_radix(ofs_str.trim_start_matches("0x"), 16)
-        .map_err(|_| anyhow::anyhow!("invalid hex offset '{ofs_str}'"))?;
-    Ok((seg_idx, ofs))
+    if let Some((seg_name, ofs_str)) = s.split_once(':') {
+        let seg_idx = project
+            .segment_by_name(seg_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown segment '{seg_name}'"))?;
+        let ofs = u32::from_str_radix(ofs_str.trim_start_matches("0x"), 16)
+            .map_err(|_| anyhow::anyhow!("invalid hex offset '{ofs_str}'"))?;
+        return Ok((seg_idx, ofs));
+    }
+
+    let matches: Vec<Address> = project
+        .attrs
+        .iter()
+        .filter_map(|(&addr, attr)| {
+            attr.name
+                .as_deref()
+                .filter(|name| *name == s)
+                .map(|_| addr)
+        })
+        .collect();
+
+    match matches.len() {
+        0 => bail!("no label or 'seg:ofs' address matches '{s}'"),
+        1 => Ok(matches[0]),
+        _ => bail!(
+            "label '{s}' is ambiguous ({} matches); use seg:ofs form",
+            matches.len()
+        ),
+    }
 }
 
 fn fmt_addr(project: &Project, (seg_idx, ofs): Address) -> String {
@@ -716,39 +739,7 @@ fn cmd_func(path: &Path, addr_str: &str) -> Result<()> {
 }
 
 fn function_blocks(project: &Project, entry: Address) -> Vec<Address> {
-    let mut visited: BTreeSet<Address> = BTreeSet::new();
-    let mut queue: Vec<Address> = vec![entry];
-
-    while let Some(addr) = queue.pop() {
-        if !visited.insert(addr) { continue; }
-        let Some(block) = project.blocks.block_at(addr.0, addr.1) else { continue };
-
-        // Find last instruction offset by stepping backwards from block.end
-        let last_ofs = project.segments[block.seg_idx]
-            .addr_attributes
-            .prev(block.end)
-            .filter(|&p| p >= block.start)
-            .unwrap_or(block.start);
-
-        let last_is_call = decode_at(project, block.seg_idx, last_ofs)
-            .is_some_and(|i| i.opcode == Opcode::Call);
-
-        for &succ in &block.successors {
-            if last_is_call {
-                // Follow only the fall-through (return address), not the callee entry.
-                if succ == (block.seg_idx, block.end) {
-                    queue.push(succ);
-                }
-            } else {
-                // Follow all successors (jmp targets, conditional branch targets).
-                queue.push(succ);
-            }
-        }
-    }
-
-    let mut addrs: Vec<Address> = visited.into_iter().collect();
-    addrs.sort();
-    addrs
+    project.blocks.function_blocks(project, entry)
 }
 
 // ── cmd_callers ───────────────────────────────────────────────────────────────
@@ -837,6 +828,88 @@ fn cmd_callees(path: &Path, addr_str: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── cmd_clobbers ──────────────────────────────────────────────────────────────
+
+fn cmd_clobbers(path: &Path, addr_str: Option<&str>) -> Result<()> {
+    let project = load_analyzed(path)?;
+
+    match addr_str {
+        Some(s) => {
+            let (seg_idx, ofs) = parse_addr(&project, s)?;
+            let entry = (seg_idx, ofs);
+            if !project.function_preserves.contains_key(&entry) {
+                bail!("{s} is not a known function entry");
+            }
+            print_clobbers_for(&project, entry);
+        }
+        None => {
+            let entries: Vec<Address> = project.function_preserves.keys().copied().collect();
+            let mut first = true;
+            for entry in entries {
+                let records =
+                    chani_disasm::function_preserves::trace_function_clobbers(&project, entry);
+                if records.is_empty() {
+                    continue;
+                }
+                if !first {
+                    println!();
+                }
+                first = false;
+                print_clobber_header(&project, entry);
+                for rec in &records {
+                    print_clobber_line(&project, rec);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn print_clobbers_for(project: &Project, entry: Address) {
+    print_clobber_header(project, entry);
+    let records = chani_disasm::function_preserves::trace_function_clobbers(project, entry);
+    if records.is_empty() {
+        println!("  (none)");
+    } else {
+        for rec in &records {
+            print_clobber_line(project, rec);
+        }
+    }
+}
+
+fn print_clobber_header(project: &Project, entry: Address) {
+    let label = project.name_at(entry.0, entry.1).unwrap_or("(unnamed)");
+    let p = project
+        .function_preserves
+        .get(&entry)
+        .copied()
+        .unwrap_or(chani_disasm::function_preserves::FunctionPreserves::BOTTOM);
+    let mut parts: Vec<&str> = Vec::new();
+    if p.ds { parts.push("DS"); }
+    if p.es { parts.push("ES"); }
+    if p.ss { parts.push("SS"); }
+    let summary = if parts.is_empty() { "-".to_string() } else { parts.join(", ") };
+    println!(
+        "clobbers in {}  {label}  (preserves: {summary})",
+        fmt_addr(project, entry)
+    );
+}
+
+fn print_clobber_line(
+    project: &Project,
+    rec: &chani_disasm::function_preserves::ClobberRecord,
+) {
+    let mut tags = Vec::new();
+    if rec.clobbers_ds { tags.push("DS"); }
+    if rec.clobbers_es { tags.push("ES"); }
+    if rec.clobbers_ss { tags.push("SS"); }
+    if rec.stack_invalidated { tags.push("stack"); }
+    let tag_str = tags.join(",");
+    let line = render_addr(project, rec.addr.0, rec.addr.1);
+    println!("  [{tag_str}]  {line}    ; {}", rec.reason);
 }
 
 // ── cmd_check ─────────────────────────────────────────────────────────────────

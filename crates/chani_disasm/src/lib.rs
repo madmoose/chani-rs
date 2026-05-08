@@ -5,6 +5,7 @@ pub mod data_type;
 mod decoded_instruction;
 mod disassemble;
 pub mod exe_mz;
+pub mod function_preserves;
 pub mod layout;
 mod memory_reference;
 mod opcode_table;

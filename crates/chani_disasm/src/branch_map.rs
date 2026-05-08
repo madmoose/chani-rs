@@ -39,6 +39,11 @@ impl BranchMap {
         self.backward.keys().copied()
     }
 
+    /// All unique branch source addresses across all edges.
+    pub fn all_sources(&self) -> impl Iterator<Item = Address> + '_ {
+        self.forward.keys().copied()
+    }
+
     pub fn has_target(&self, from: Address) -> bool {
         self.forward.contains_key(&from)
     }

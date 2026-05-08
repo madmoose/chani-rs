@@ -1,8 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use smallvec::SmallVec;
 
-use crate::{Address, project::SegmentIdx};
+use crate::{Address, Opcode, decode, project::{Project, SegmentIdx}};
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
@@ -54,5 +54,53 @@ impl BasicBlockMap {
 
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+
+    /// Block-level CFG walk from a function entry. Follows all successors of
+    /// non-Call blocks, but for blocks ending in `Call` follows only the
+    /// fall-through edge (returning to the next instruction) rather than the
+    /// callee. Returns the sorted list of block-start addresses reachable
+    /// under those rules.
+    pub fn function_blocks(&self, project: &Project, entry: Address) -> Vec<Address> {
+        let mut visited: BTreeSet<Address> = BTreeSet::new();
+        let mut queue: Vec<Address> = vec![entry];
+
+        while let Some(addr) = queue.pop() {
+            if !visited.insert(addr) {
+                continue;
+            }
+            let Some(block) = self.block_at(addr.0, addr.1) else {
+                continue;
+            };
+
+            let last_ofs = project.segments[block.seg_idx]
+                .addr_attributes
+                .prev(block.end)
+                .filter(|&p| p >= block.start)
+                .unwrap_or(block.start);
+
+            let seg = &project.segments[block.seg_idx];
+            let seg_val = (seg.start.unwrap_or(0) / 16) as u16;
+            let last_is_call = decode(
+                seg_val,
+                last_ofs as u16,
+                project.bytes_at_seg(block.seg_idx, last_ofs).iter().copied(),
+            )
+            .is_some_and(|i| i.opcode == Opcode::Call);
+
+            for &succ in &block.successors {
+                if last_is_call {
+                    if succ == (block.seg_idx, block.end) {
+                        queue.push(succ);
+                    }
+                } else {
+                    queue.push(succ);
+                }
+            }
+        }
+
+        let mut addrs: Vec<Address> = visited.into_iter().collect();
+        addrs.sort();
+        addrs
     }
 }
