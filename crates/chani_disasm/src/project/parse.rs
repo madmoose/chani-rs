@@ -605,6 +605,7 @@ pub(super) fn parse_attr(
     let mut comment: Option<String> = None;
     let mut assume = Assumes::default();
     let mut arg_fmts: [Option<DisplayFmt>; 2] = [None; 2];
+    let mut targets: Vec<(SegmentIdx, u32)> = Vec::new();
 
     for item in &dict.items {
         if let Item::Property { key, value, line } = item {
@@ -645,6 +646,18 @@ pub(super) fn parse_attr(
                             format!("line {line}: failed to parse 'assume' field `{value}`")
                         })?;
                 }
+                "targets" => {
+                    for tok in value.split(',') {
+                        let tok = tok.trim();
+                        if tok.is_empty() {
+                            continue;
+                        }
+                        let target = parse_addr(tok, segments).map_err(|e| {
+                            format!("line {line}: invalid target '{tok}' in attr '{}': {e}", dict.key)
+                        })?;
+                        targets.push(target);
+                    }
+                }
                 k if k.starts_with("arg[") && k.ends_with(']') => {
                     let idx_str = &k["arg[".len()..k.len() - 1];
                     let idx = idx_str
@@ -677,6 +690,7 @@ pub(super) fn parse_attr(
         comment,
         assume,
         arg_fmts,
+        targets,
     })
 }
 

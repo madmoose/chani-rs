@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::io;
 use std::path::Path;
-use std::fs;
 
 use anyhow::{Context, Result, bail};
 use chani_disasm::data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType};
 use chani_disasm::layout::LayoutBuilder;
-use chani_disasm::project::{Attr, AttrType, Assumes, Project, ProjectLookup, SegmentIdx};
+use chani_disasm::project::{Assumes, Attr, AttrType, Project, ProjectLookup, SegmentIdx};
 use chani_disasm::{Address, DisplayContext, Opcode, SRegMap, decode};
 use clap::{Args, Parser, Subcommand};
 
@@ -29,7 +29,10 @@ enum Cmd {
     Find { pattern: String },
     /// List annotations in a segment or address range (does not require binary)
     List {
-        #[arg(value_name = "RANGE", help = "seg001  |  seg001:1000  |  seg001:1000-2000  (hex offsets)")]
+        #[arg(
+            value_name = "RANGE",
+            help = "seg001  |  seg001:1000  |  seg001:1000-2000  (hex offsets)"
+        )]
         range: String,
     },
     /// Search the rendered listing for a text pattern (requires binary)
@@ -45,6 +48,10 @@ enum Cmd {
     /// Show instructions that clobber DS/ES/SS preservation. With <addr>:
     /// trace one function. Without: report every analyzed function. (requires binary)
     Clobbers { addr: Option<String> },
+    /// List indirect call/jmp instructions with no manually-specified targets (requires binary)
+    Unresolved,
+    /// List addresses with manual branch targets, optionally filtered to one address (requires binary)
+    Targets { addr: Option<String> },
     /// Run project consistency checks (does not require binary)
     Check,
 }
@@ -71,6 +78,11 @@ struct SetArgs {
     /// Set operand display format, e.g. "0:hex" or "1:dec"
     #[arg(long = "arg", value_name = "N:FMT")]
     arg_fmt: Vec<String>,
+    /// Set a manual branch destination for an indirect or self-modifying
+    /// branch instruction; repeatable; replaces all existing targets.
+    /// Use "" once to clear.
+    #[arg(long = "target", value_name = "SEG:OFS")]
+    target: Vec<String>,
     /// Remove the attr entirely
     #[arg(long)]
     delete: bool,
@@ -107,6 +119,8 @@ fn main() -> Result<()> {
         Cmd::Callers { addr } => cmd_callers(path, &addr),
         Cmd::Callees { addr } => cmd_callees(path, &addr),
         Cmd::Clobbers { addr } => cmd_clobbers(path, addr.as_deref()),
+        Cmd::Unresolved => cmd_unresolved(path),
+        Cmd::Targets { addr } => cmd_targets(path, addr.as_deref()),
         Cmd::Check => cmd_check(path),
     }
 }
@@ -114,15 +128,14 @@ fn main() -> Result<()> {
 // ── Load helpers ──────────────────────────────────────────────────────────────
 
 fn load_str(path: &Path) -> Result<Project> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     Project::from_str(&content).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn load_analyzed(path: &Path) -> Result<Project> {
     let path_str = path.to_str().unwrap_or("");
-    let mut project = Project::from_project_file(path_str)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut project = Project::from_project_file(path_str).map_err(|e| anyhow::anyhow!("{e}"))?;
     project.analyze();
     Ok(project)
 }
@@ -142,12 +155,7 @@ fn parse_addr(project: &Project, s: &str) -> Result<(SegmentIdx, u32)> {
     let matches: Vec<Address> = project
         .attrs
         .iter()
-        .filter_map(|(&addr, attr)| {
-            attr.name
-                .as_deref()
-                .filter(|name| *name == s)
-                .map(|_| addr)
-        })
+        .filter_map(|(&addr, attr)| attr.name.as_deref().filter(|name| *name == s).map(|_| addr))
         .collect();
 
     match matches.len() {
@@ -185,7 +193,10 @@ fn render_addr(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> String {
         .seg_dataflow
         .state_at(project, seg_idx, ofs)
         .map(|s| s.to_sreg_map())
-        .unwrap_or(SRegMap { cs: Some(seg_idx), ..Default::default() });
+        .unwrap_or(SRegMap {
+            cs: Some(seg_idx),
+            ..Default::default()
+        });
     let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|a| a.ofs_seg);
     let lookup = ProjectLookup {
         project,
@@ -193,7 +204,10 @@ fn render_addr(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> String {
         register_file: None,
         default_seg: ofs_seg,
     };
-    let ctx = DisplayContext { lookup: &lookup, arg_fmts: [None; 2] };
+    let ctx = DisplayContext {
+        lookup: &lookup,
+        arg_fmts: [None; 2],
+    };
     let mut builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
     builder.layout();
     let n = builder.lines();
@@ -208,7 +222,10 @@ fn print_addr_block(project: &Project, seg_idx: SegmentIdx, ofs: u32) {
         .seg_dataflow
         .state_at(project, seg_idx, ofs)
         .map(|s| s.to_sreg_map())
-        .unwrap_or(SRegMap { cs: Some(seg_idx), ..Default::default() });
+        .unwrap_or(SRegMap {
+            cs: Some(seg_idx),
+            ..Default::default()
+        });
     let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|a| a.ofs_seg);
     let lookup = ProjectLookup {
         project,
@@ -216,7 +233,10 @@ fn print_addr_block(project: &Project, seg_idx: SegmentIdx, ofs: u32) {
         register_file: None,
         default_seg: ofs_seg,
     };
-    let ctx = DisplayContext { lookup: &lookup, arg_fmts: [None; 2] };
+    let ctx = DisplayContext {
+        lookup: &lookup,
+        arg_fmts: [None; 2],
+    };
     let mut builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
     builder.layout();
     let n = builder.lines();
@@ -244,8 +264,8 @@ fn parse_display_fmt(s: &str) -> Result<DisplayFmt> {
 // ── cmd_set ───────────────────────────────────────────────────────────────────
 
 fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut project = Project::from_str(&content).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let (seg_idx, ofs) = parse_addr(&project, &args.addr)?;
@@ -259,14 +279,21 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             && args.ofs_seg.is_none()
             && args.assume.is_empty()
             && args.arg_fmt.is_empty()
+            && args.target.is_empty()
         {
-            bail!("specify at least one of --name, --type, --comment, --ofs-seg, --assume, --arg (or --delete)");
+            bail!(
+                "specify at least one of --name, --type, --comment, --ofs-seg, --assume, --arg, --target (or --delete)"
+            );
         }
 
         let parsed_type = args
             .r#type
             .as_deref()
-            .map(|s| project.parse_type_str(s).map_err(|e| anyhow::anyhow!("{e}")))
+            .map(|s| {
+                project
+                    .parse_type_str(s)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            })
             .transpose()?;
 
         let parsed_ofs_seg = args
@@ -303,6 +330,15 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             parsed_arg_fmts.push((idx, parse_display_fmt(fmt_str)?));
         }
 
+        let mut parsed_targets: Vec<Address> = Vec::new();
+        for s in &args.target {
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            parsed_targets.push(parse_addr(&project, s)?);
+        }
+
         let attr = project.attrs.entry((seg_idx, ofs)).or_insert_with(|| Attr {
             addr: (seg_idx, ofs),
             r#type: None,
@@ -312,6 +348,7 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             comment: None,
             assume: Assumes::default(),
             arg_fmts: [None; 2],
+            targets: Vec::new(),
         });
 
         if let Some(name) = args.name {
@@ -322,7 +359,11 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             attr.r#type = Some(t);
         }
         if let Some(comment) = args.comment {
-            attr.comment = if comment.is_empty() { None } else { Some(comment) };
+            attr.comment = if comment.is_empty() {
+                None
+            } else {
+                Some(comment)
+            };
         }
         if parsed_ofs_seg.is_some() {
             attr.ofs_seg = parsed_ofs_seg;
@@ -333,6 +374,9 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
         for (idx, fmt) in parsed_arg_fmts {
             attr.arg_fmts[idx] = Some(fmt);
         }
+        if !args.target.is_empty() {
+            attr.targets = parsed_targets;
+        }
     }
 
     if args.stdout {
@@ -340,8 +384,7 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
     } else {
         let mut buf = Vec::new();
         project.write_to(&mut buf)?;
-        fs::write(path, &buf)
-            .with_context(|| format!("cannot write {}", path.display()))?;
+        fs::write(path, &buf).with_context(|| format!("cannot write {}", path.display()))?;
     }
 
     Ok(())
@@ -361,7 +404,10 @@ fn cmd_get(path: &Path, addr_str: &str) -> Result<()> {
     };
 
     if let Some(t) = &attr.r#type {
-        println!("  type:    {}", t.type_str(&project.segments, &project.structs));
+        println!(
+            "  type:    {}",
+            t.type_str(&project.segments, &project.structs)
+        );
     }
     if let Some(name) = &attr.name {
         let auto = if attr.is_auto_label { " (auto)" } else { "" };
@@ -371,13 +417,25 @@ fn cmd_get(path: &Path, addr_str: &str) -> Result<()> {
         println!("  ofs_seg: {}", project.segments[seg_idx].name);
     }
     if !attr.assume.is_empty() {
-        let s: Vec<String> = attr.assume.iter().map(|(r, seg)| format!("{r}:{seg}")).collect();
+        let s: Vec<String> = attr
+            .assume
+            .iter()
+            .map(|(r, seg)| format!("{r}:{seg}"))
+            .collect();
         println!("  assume:  {}", s.join(" "));
     }
     for (i, fmt) in attr.arg_fmts.iter().enumerate() {
         if let Some(f) = fmt {
             println!("  arg[{i}]:  {}", f.as_str());
         }
+    }
+    if !attr.targets.is_empty() {
+        let s: Vec<String> = attr
+            .targets
+            .iter()
+            .map(|&addr| fmt_addr(&project, addr))
+            .collect();
+        println!("  targets: {}", s.join(", "));
     }
     if let Some(comment) = &attr.comment {
         let first = comment.lines().next().unwrap_or("");
@@ -402,9 +460,13 @@ fn cmd_find(path: &Path, pattern: &str) -> Result<()> {
 
     let mut found = false;
     for (&addr, attr) in &project.attrs {
-        let name_match = attr.name.as_deref()
+        let name_match = attr
+            .name
+            .as_deref()
             .is_some_and(|n| n.to_lowercase().contains(&pat));
-        let comment_match = attr.comment.as_deref()
+        let comment_match = attr
+            .comment
+            .as_deref()
             .is_some_and(|c| c.to_lowercase().contains(&pat));
         if !name_match && !comment_match {
             continue;
@@ -412,13 +474,18 @@ fn cmd_find(path: &Path, pattern: &str) -> Result<()> {
         found = true;
         let name = attr.name.as_deref().unwrap_or("");
         let auto = if attr.is_auto_label { " (auto)" } else { "" };
-        let type_str = attr.r#type.as_ref()
+        let type_str = attr
+            .r#type
+            .as_ref()
             .map(|t| format!("[{}]", t.type_str(&project.segments, &project.structs)))
             .unwrap_or_default();
-        let comment_first = attr.comment.as_deref()
+        let comment_first = attr
+            .comment
+            .as_deref()
             .and_then(|c| c.lines().next())
             .unwrap_or("");
-        println!("{}  {:<24}  {:<18}  {}",
+        println!(
+            "{}  {:<24}  {:<18}  {}",
             fmt_addr(&project, addr),
             format!("{name}{auto}"),
             type_str,
@@ -475,13 +542,18 @@ fn cmd_list(path: &Path, range_str: &str) -> Result<()> {
         any = true;
         let name = attr.name.as_deref().unwrap_or("");
         let auto = if attr.is_auto_label { " (auto)" } else { "" };
-        let type_str = attr.r#type.as_ref()
+        let type_str = attr
+            .r#type
+            .as_ref()
             .map(|t| t.type_str(&project.segments, &project.structs))
             .unwrap_or_default();
-        let comment_first = attr.comment.as_deref()
+        let comment_first = attr
+            .comment
+            .as_deref()
             .and_then(|c| c.lines().next())
             .unwrap_or("");
-        println!("{}  {:<24}  {:<18}  {}",
+        println!(
+            "{}  {:<24}  {:<18}  {}",
             fmt_addr(&project, addr),
             format!("{name}{auto}"),
             type_str,
@@ -502,7 +574,10 @@ fn collect_rendered_lines(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> V
         .seg_dataflow
         .state_at(project, seg_idx, ofs)
         .map(|s| s.to_sreg_map())
-        .unwrap_or(SRegMap { cs: Some(seg_idx), ..Default::default() });
+        .unwrap_or(SRegMap {
+            cs: Some(seg_idx),
+            ..Default::default()
+        });
     let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|a| a.ofs_seg);
     let lookup = ProjectLookup {
         project,
@@ -510,7 +585,10 @@ fn collect_rendered_lines(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> V
         register_file: None,
         default_seg: ofs_seg,
     };
-    let ctx = DisplayContext { lookup: &lookup, arg_fmts: [None; 2] };
+    let ctx = DisplayContext {
+        lookup: &lookup,
+        arg_fmts: [None; 2],
+    };
     let mut builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
     builder.layout();
     let n = builder.lines();
@@ -609,7 +687,13 @@ fn cmd_xref(path: &Path, addr_str: &str) -> Result<()> {
     for (&src_addr, attr) in &project.attrs {
         if let Some(AttrType::Data(dt)) = &attr.r#type {
             let ofs_seg = attr.ofs_seg;
-            if ofs16_points_to(project.bytes_at_seg(src_addr.0, src_addr.1), dt, &project, ofs_seg, target) {
+            if ofs16_points_to(
+                project.bytes_at_seg(src_addr.0, src_addr.1),
+                dt,
+                &project,
+                ofs_seg,
+                target,
+            ) {
                 data_srcs.push(src_addr);
             }
         }
@@ -628,10 +712,16 @@ fn cmd_xref(path: &Path, addr_str: &str) -> Result<()> {
         println!("  code:");
         for src in code_srcs {
             let kind = decode_at(&project, src.0, src.1)
-                .map(|i| if i.opcode == Opcode::Call { "call" } else { "jmp " })
+                .map(|i| {
+                    if i.opcode == Opcode::Call {
+                        "call"
+                    } else {
+                        "jmp "
+                    }
+                })
                 .unwrap_or("?   ");
             let line = render_addr(&project, src.0, src.1);
-            println!("    [{kind}]  {line}", );
+            println!("    [{kind}]  {line}",);
         }
     }
 
@@ -655,14 +745,18 @@ fn ofs16_points_to(
     match dt {
         DataType::Scalar(ScalarDataType::Ofs16(seg_opt)) => {
             let seg = seg_opt.or(fallback_seg);
-            if seg != Some(target.0) { return false; }
+            if seg != Some(target.0) {
+                return false;
+            }
             let lo = bytes.first().copied().unwrap_or(0) as u32;
             let hi = bytes.get(1).copied().unwrap_or(0) as u32;
             (lo | (hi << 8)) == target.1
         }
         DataType::Scalar(ScalarDataType::U16) => {
             let seg = fallback_seg;
-            if seg != Some(target.0) { return false; }
+            if seg != Some(target.0) {
+                return false;
+            }
             let lo = bytes.first().copied().unwrap_or(0) as u32;
             let hi = bytes.get(1).copied().unwrap_or(0) as u32;
             (lo | (hi << 8)) == target.1
@@ -708,13 +802,21 @@ fn cmd_func(path: &Path, addr_str: &str) -> Result<()> {
         bail!("no basic blocks found at {addr_str}");
     }
 
-    let label = project.name_at(seg_idx, entry_block_start).unwrap_or("(unnamed)");
-    println!("; function: {} at {}", label, fmt_addr(&project, (seg_idx, entry_block_start)));
+    let label = project
+        .name_at(seg_idx, entry_block_start)
+        .unwrap_or("(unnamed)");
+    println!(
+        "; function: {} at {}",
+        label,
+        fmt_addr(&project, (seg_idx, entry_block_start))
+    );
     println!();
 
     let mut prev_end: Option<u32> = None;
     for &(bseg, bstart) in &block_addrs {
-        let Some(block) = project.blocks.block_at(bseg, bstart) else { continue };
+        let Some(block) = project.blocks.block_at(bseg, bstart) else {
+            continue;
+        };
 
         // Blank separator between non-contiguous blocks
         if prev_end.is_some_and(|e| e != bstart) {
@@ -726,8 +828,12 @@ fn cmd_func(path: &Path, addr_str: &str) -> Result<()> {
         let mut ofs = bstart;
         while ofs < block.end {
             print_addr_block(&project, bseg, ofs);
-            let Some(next) = seg.addr_attributes.next(ofs) else { break };
-            if next >= block.end { break }
+            let Some(next) = seg.addr_attributes.next(ofs) else {
+                break;
+            };
+            if next >= block.end {
+                break;
+            }
             ofs = next;
         }
         // Always render the last instruction (the one at or just before block.end)
@@ -755,10 +861,7 @@ fn cmd_callers(path: &Path, addr_str: &str) -> Result<()> {
     let mut callers: Vec<Address> = project
         .branches
         .sources(target)
-        .filter(|&src| {
-            decode_at(&project, src.0, src.1)
-                .is_some_and(|i| i.opcode == Opcode::Call)
-        })
+        .filter(|&src| decode_at(&project, src.0, src.1).is_some_and(|i| i.opcode == Opcode::Call))
         .collect();
     callers.sort();
 
@@ -786,8 +889,14 @@ fn cmd_callees(path: &Path, addr_str: &str) -> Result<()> {
         .map(|b| b.start)
         .ok_or_else(|| anyhow::anyhow!("{} is not inside a decoded basic block", addr_str))?;
 
-    let label = project.name_at(seg_idx, entry_block_start).unwrap_or("(unnamed)");
-    println!("callees of {}  {}", fmt_addr(&project, (seg_idx, entry_block_start)), label);
+    let label = project
+        .name_at(seg_idx, entry_block_start)
+        .unwrap_or("(unnamed)");
+    println!(
+        "callees of {}  {}",
+        fmt_addr(&project, (seg_idx, entry_block_start)),
+        label
+    );
 
     let block_addrs = function_blocks(&project, (seg_idx, entry_block_start));
 
@@ -795,7 +904,9 @@ fn cmd_callees(path: &Path, addr_str: &str) -> Result<()> {
     let mut seen: BTreeSet<Address> = BTreeSet::new();
 
     for &(bseg, bstart) in &block_addrs {
-        let Some(block) = project.blocks.block_at(bseg, bstart) else { continue };
+        let Some(block) = project.blocks.block_at(bseg, bstart) else {
+            continue;
+        };
 
         let last_ofs = project.segments[block.seg_idx]
             .addr_attributes
@@ -803,8 +914,8 @@ fn cmd_callees(path: &Path, addr_str: &str) -> Result<()> {
             .filter(|&p| p >= block.start)
             .unwrap_or(block.start);
 
-        let last_is_call = decode_at(&project, bseg, last_ofs)
-            .is_some_and(|i| i.opcode == Opcode::Call);
+        let last_is_call =
+            decode_at(&project, bseg, last_ofs).is_some_and(|i| i.opcode == Opcode::Call);
 
         if last_is_call {
             for &succ in &block.successors {
@@ -888,28 +999,129 @@ fn print_clobber_header(project: &Project, entry: Address) {
         .copied()
         .unwrap_or(chani_disasm::function_preserves::FunctionPreserves::BOTTOM);
     let mut parts: Vec<&str> = Vec::new();
-    if p.ds { parts.push("DS"); }
-    if p.es { parts.push("ES"); }
-    if p.ss { parts.push("SS"); }
-    let summary = if parts.is_empty() { "-".to_string() } else { parts.join(", ") };
+    if p.ds {
+        parts.push("DS");
+    }
+    if p.es {
+        parts.push("ES");
+    }
+    if p.ss {
+        parts.push("SS");
+    }
+    let summary = if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(", ")
+    };
     println!(
         "clobbers in {}  {label}  (preserves: {summary})",
         fmt_addr(project, entry)
     );
 }
 
-fn print_clobber_line(
-    project: &Project,
-    rec: &chani_disasm::function_preserves::ClobberRecord,
-) {
+fn print_clobber_line(project: &Project, rec: &chani_disasm::function_preserves::ClobberRecord) {
     let mut tags = Vec::new();
-    if rec.clobbers_ds { tags.push("DS"); }
-    if rec.clobbers_es { tags.push("ES"); }
-    if rec.clobbers_ss { tags.push("SS"); }
-    if rec.stack_invalidated { tags.push("stack"); }
+    if rec.clobbers_ds {
+        tags.push("DS");
+    }
+    if rec.clobbers_es {
+        tags.push("ES");
+    }
+    if rec.clobbers_ss {
+        tags.push("SS");
+    }
+    if rec.stack_invalidated {
+        tags.push("stack");
+    }
     let tag_str = tags.join(",");
     let line = render_addr(project, rec.addr.0, rec.addr.1);
     println!("  [{tag_str}]  {line}    ; {}", rec.reason);
+}
+
+// ── cmd_unresolved ────────────────────────────────────────────────────────────
+
+fn cmd_unresolved(path: &Path) -> Result<()> {
+    let project = load_analyzed(path)?;
+    let mut found = 0usize;
+    for (seg_idx, seg) in project.segments.indexed_iter() {
+        let attrs = &seg.addr_attributes;
+        let base = attrs.base();
+        let mut ofs_opt = if attrs.is_op(base) {
+            Some(base)
+        } else {
+            attrs.next(base)
+        };
+        while let Some(ofs) = ofs_opt {
+            if !attrs.is_op(ofs) {
+                ofs_opt = attrs.next(ofs);
+                continue;
+            }
+            if let Some(inst) = decode_at(&project, seg_idx, ofs) {
+                let is_indirect = matches!(inst.opcode, Opcode::Call | Opcode::Jmp)
+                    && inst.branch_destination().is_none();
+                if is_indirect {
+                    let has_manual = project
+                        .attr_at(seg_idx, ofs)
+                        .is_some_and(|a| !a.targets.is_empty());
+                    if !has_manual {
+                        let line = render_addr(&project, seg_idx, ofs);
+                        println!("{line}");
+                        found += 1;
+                    }
+                }
+            }
+            ofs_opt = attrs.next(ofs);
+        }
+    }
+    if found == 0 {
+        println!("(none)");
+    }
+    Ok(())
+}
+
+// ── cmd_targets ───────────────────────────────────────────────────────────────
+
+fn cmd_targets(path: &Path, addr_opt: Option<&str>) -> Result<()> {
+    let project = load_analyzed(path)?;
+
+    let entries: Vec<(Address, Vec<Address>)> = if let Some(addr_str) = addr_opt {
+        let addr = parse_addr(&project, addr_str)?;
+        match project.attr_at(addr.0, addr.1) {
+            Some(a) if !a.targets.is_empty() => vec![(addr, a.targets.clone())],
+            _ => Vec::new(),
+        }
+    } else {
+        project
+            .attrs
+            .iter()
+            .filter(|(_, a)| !a.targets.is_empty())
+            .map(|(&addr, a)| (addr, a.targets.clone()))
+            .collect()
+    };
+
+    if entries.is_empty() {
+        println!("(none)");
+        return Ok(());
+    }
+
+    for (i, (addr, mut targets)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        targets.sort_by(|a, b| {
+            project.segments[a.0]
+                .name
+                .cmp(&project.segments[b.0].name)
+                .then(a.1.cmp(&b.1))
+        });
+        let line = render_addr(&project, addr.0, addr.1);
+        println!("{line}");
+        for target in targets {
+            let label = project.resolve_label(target.0, target.1).unwrap_or_default();
+            println!("    -> {}  {label}", fmt_addr(&project, target));
+        }
+    }
+    Ok(())
 }
 
 // ── cmd_check ─────────────────────────────────────────────────────────────────
@@ -922,15 +1134,19 @@ fn cmd_check(path: &Path) -> Result<()> {
     for (&addr, attr) in &project.attrs {
         if let Some(AttrType::Data(dt)) = &attr.r#type {
             if contains_unresolved_ofs16(dt) && attr.ofs_seg.is_none() {
-                println!("warn: {}  ofs16 without ofs_seg (segment unknown)",
-                    fmt_addr(&project, addr));
+                println!(
+                    "warn: {}  ofs16 without ofs_seg (segment unknown)",
+                    fmt_addr(&project, addr)
+                );
                 issues += 1;
             }
         }
     }
 
     // 2. code attrs overlapping data-typed attrs
-    let data_addrs: Vec<(Address, usize)> = project.attrs.iter()
+    let data_addrs: Vec<(Address, usize)> = project
+        .attrs
+        .iter()
         .filter_map(|(&addr, attr)| {
             let dt = attr.r#type.as_ref()?.as_data()?;
             Some((addr, dt.byte_size(&[], &project.structs).max(1)))
@@ -938,13 +1154,19 @@ fn cmd_check(path: &Path) -> Result<()> {
         .collect();
 
     'outer: for (&code_addr, attr) in &project.attrs {
-        if attr.r#type != Some(AttrType::Code) { continue; }
+        if attr.r#type != Some(AttrType::Code) {
+            continue;
+        }
         for &(data_addr, data_size) in &data_addrs {
-            if data_addr.0 != code_addr.0 { continue; }
+            if data_addr.0 != code_addr.0 {
+                continue;
+            }
             if code_addr.1 >= data_addr.1 && code_addr.1 < data_addr.1 + data_size as u32 {
-                println!("warn: {}  code attr overlaps data attr at {}",
+                println!(
+                    "warn: {}  code attr overlaps data attr at {}",
                     fmt_addr(&project, code_addr),
-                    fmt_addr(&project, data_addr));
+                    fmt_addr(&project, data_addr)
+                );
                 issues += 1;
                 continue 'outer;
             }
@@ -958,15 +1180,20 @@ fn cmd_check(path: &Path) -> Result<()> {
     for (&addr, attr) in &project.attrs {
         for (_, seg_name) in &attr.assume {
             if project.segment_by_name(seg_name).is_none() {
-                println!("warn: {}  assume references unknown segment '{seg_name}'",
-                    fmt_addr(&project, addr));
+                println!(
+                    "warn: {}  assume references unknown segment '{seg_name}'",
+                    fmt_addr(&project, addr)
+                );
                 issues += 1;
             }
         }
     }
 
     if issues == 0 {
-        println!("ok: no issues found ({} attrs checked)", project.attrs.len());
+        println!(
+            "ok: no issues found ({} attrs checked)",
+            project.attrs.len()
+        );
     } else {
         println!("{issues} issue(s) found");
     }

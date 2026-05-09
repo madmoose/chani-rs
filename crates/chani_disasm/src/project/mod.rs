@@ -176,6 +176,10 @@ pub struct Attr {
     pub assume: Vec<(SmallString, SmallString)>,
     /// Per-operand display format for code instructions (operand 0 and 1).
     pub arg_fmts: [Option<DisplayFmt>; 2],
+    /// Manually-supplied branch destinations for indirect or self-modifying
+    /// branch instructions. When present, these are authoritative — they
+    /// supersede any statically-resolved target during disassembly.
+    pub targets: Vec<Address>,
 }
 
 // ── Project implementation ────────────────────────────────────────────────────
@@ -615,6 +619,22 @@ impl Project {
                         attr_dict.prop(format!("arg[{i}]"), fmt.as_str());
                     }
                 }
+                if !attr.targets.is_empty() {
+                    let mut sorted: Vec<Address> = attr.targets.clone();
+                    sorted.sort_by(|a, b| {
+                        self.segments[a.0]
+                            .name
+                            .cmp(&self.segments[b.0].name)
+                            .then(a.1.cmp(&b.1))
+                    });
+                    sorted.dedup();
+                    let s = sorted
+                        .iter()
+                        .map(|(seg, ofs)| format!("{}:{:04x}", self.segments[*seg].name, ofs))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    attr_dict.prop("targets", &s);
+                }
                 if let Some(comment) = &attr.comment {
                     attr_dict.prop_encoded("comment", comment.as_str());
                 }
@@ -794,8 +814,32 @@ impl Project {
                     .addr_attributes
                     .mark_as_code(cur_ofs, len);
 
+                let manual_targets: Vec<Address> = self
+                    .attrs
+                    .get(&(seg_idx, cur_ofs))
+                    .map(|a| a.targets.clone())
+                    .unwrap_or_default();
+
+                if !manual_targets.is_empty() && !inst.branches() {
+                    eprintln!(
+                        "warning: targets specified at {}:{:04x} but instruction is not a branch",
+                        self.segments[seg_idx].name, cur_ofs
+                    );
+                }
+
                 if inst.branches() {
-                    if let Some((dst_seg, dst_ofs)) = inst.branch_destination() {
+                    if !manual_targets.is_empty() {
+                        // Manual targets are authoritative — they replace any
+                        // statically-resolved destination (relevant for indirect
+                        // branches and self-modifying jumps).
+                        for target in &manual_targets {
+                            branches.add((seg_idx, cur_ofs), *target);
+                            queue.push(*target);
+                            self.segments[target.0]
+                                .addr_attributes
+                                .mark_as_block_start(target.1);
+                        }
+                    } else if let Some((dst_seg, dst_ofs)) = inst.branch_destination() {
                         if let Some(dst_idx) = self.segment_index_for(dst_seg) {
                             branches.add((seg_idx, cur_ofs), (dst_idx, dst_ofs as u32));
                             queue.push((dst_idx, dst_ofs as u32));
@@ -1208,6 +1252,7 @@ impl Project {
             comment: None,
             assume: Assumes::default(),
             arg_fmts: [None; 2],
+            targets: Vec::new(),
         });
         attr.name = Some(label);
         attr.is_auto_label = true;

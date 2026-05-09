@@ -583,7 +583,33 @@ impl DecodedInstruction {
                 } => ctx.lookup.lookup_indirect(seg, base, index, disp, width),
             };
             if let Some(name) = name {
-                return write!(w, "{name}");
+                if needs_width_specifier {
+                    match self.arg_type[i] {
+                        ArgType::RM8 | ArgType::IMem8 => write!(w, "byte ptr ")?,
+                        ArgType::RM16 | ArgType::Mem16 | ArgType::IMem16 => {
+                            write!(w, "word ptr ")?
+                        }
+                        ArgType::Mem32 => write!(w, "far ptr ")?,
+                        _ => {}
+                    }
+                }
+                let has_reg = matches!(
+                    mem_ref,
+                    MemRef::Indirect {
+                        base: Some(_),
+                        ..
+                    } | MemRef::Indirect {
+                        index: Some(_),
+                        ..
+                    }
+                );
+                if has_reg {
+                    return write!(w, "{name}");
+                }
+                if let Some(ovr) = self.seg_ovr {
+                    write!(w, "{ovr}:")?;
+                }
+                return write!(w, "[{name}]");
             }
         }
 

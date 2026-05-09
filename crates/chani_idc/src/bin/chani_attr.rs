@@ -1,6 +1,6 @@
+use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::fs;
 
 use anyhow::{Context, Result, bail};
 use chani_disasm::project::{Assumes, Attr, Project, SegmentIdx};
@@ -42,11 +42,9 @@ fn main() -> Result<()> {
     let content = fs::read_to_string(&args.project)
         .with_context(|| format!("cannot read {}", args.project.display()))?;
 
-    let mut project = Project::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut project = Project::from_str(&content).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let (seg_idx, ofs) = parse_addr(&project, &args.addr)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let (seg_idx, ofs) = parse_addr(&project, &args.addr).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if args.delete {
         project.attrs.remove(&(seg_idx, ofs));
@@ -58,7 +56,11 @@ fn main() -> Result<()> {
         let parsed_type = args
             .r#type
             .as_deref()
-            .map(|s| project.parse_type_str(s).map_err(|e| anyhow::anyhow!("{e}")))
+            .map(|s| {
+                project
+                    .parse_type_str(s)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            })
             .transpose()?;
 
         let attr = project.attrs.entry((seg_idx, ofs)).or_insert_with(|| Attr {
@@ -70,10 +72,15 @@ fn main() -> Result<()> {
             comment: None,
             assume: Assumes::default(),
             arg_fmts: [None; 2],
+            targets: Vec::new(),
         });
 
         if let Some(name) = args.name {
-            attr.name = if name.is_empty() { None } else { Some(name.into()) };
+            attr.name = if name.is_empty() {
+                None
+            } else {
+                Some(name.into())
+            };
             attr.is_auto_label = false;
         }
 
@@ -82,7 +89,11 @@ fn main() -> Result<()> {
         }
 
         if let Some(comment) = args.comment {
-            attr.comment = if comment.is_empty() { None } else { Some(comment) };
+            attr.comment = if comment.is_empty() {
+                None
+            } else {
+                Some(comment)
+            };
         }
     }
 
