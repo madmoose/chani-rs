@@ -22,6 +22,7 @@ use crate::function_preserves::FunctionPreservesMap;
 use crate::project::architecure::Architecture;
 use crate::project::loadexpr::LoadExpr;
 use crate::seg_dataflow::SegDataflow;
+use crate::simple_const_propagation::SimpleConstPropagation;
 use crate::work_queue::WorkQueue;
 use crate::{Address, MemRef, SymbolLookup, decode};
 use crate::{address_attributes::AddressAttributes, exe_mz::ExeMz};
@@ -61,6 +62,7 @@ pub struct Project {
     pub branches: BranchMap,
     pub blocks: BasicBlockMap,
     pub seg_dataflow: SegDataflow,
+    pub simple_const_propagation: SimpleConstPropagation,
     pub function_preserves: FunctionPreservesMap,
     pub data_xrefs: BTreeMap<Address, BTreeSet<Address>>,
 }
@@ -372,6 +374,7 @@ impl Project {
             branches: BranchMap::new(),
             blocks: BasicBlockMap::new(),
             seg_dataflow: SegDataflow::new(),
+            simple_const_propagation: SimpleConstPropagation::new(),
             function_preserves: FunctionPreservesMap::new(),
             data_xrefs: BTreeMap::new(),
         })
@@ -490,6 +493,7 @@ impl Project {
             branches: BranchMap::new(),
             blocks: BasicBlockMap::new(),
             seg_dataflow: SegDataflow::new(),
+            simple_const_propagation: SimpleConstPropagation::new(),
             function_preserves: FunctionPreservesMap::new(),
             data_xrefs: BTreeMap::new(),
         })
@@ -622,6 +626,7 @@ impl Project {
         self.build_basic_blocks();
         self.function_preserves = crate::function_preserves::compute(self);
         self.seg_dataflow = crate::seg_dataflow::compute(self);
+        self.simple_const_propagation = crate::simple_const_propagation::compute(self);
         self.generate_auto_labels();
         self.build_data_xrefs();
     }

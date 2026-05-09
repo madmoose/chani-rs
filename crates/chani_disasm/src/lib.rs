@@ -10,6 +10,7 @@ pub mod layout;
 mod opcode_table;
 pub mod project;
 pub mod seg_dataflow;
+pub mod simple_const_propagation;
 pub mod work_queue;
 
 use std::fmt::Display;
