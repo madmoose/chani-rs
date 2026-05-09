@@ -1,0 +1,3269 @@
+int[INT 21,0]:
+    title = Program Terminate
+    int = 21
+    condition[ah] = 00
+    input[cs] = PSP Program segment
+    terminates = true
+
+    description = [[[
+        returns nothing
+
+
+        - restores the terminate, Ctrl-Break, and critical error exit addresses, flushes all buffers, frees memory and returns to DOS via the termination handler address
+        - does not close FCBs
+        - this function is no longer recommended, but can be used by version of DOS before 2.0, see ~INT 21,4C~ and ~INT 20~
+    ]]]
+end
+
+int[INT 21,4C]:
+    title = Terminate Process With Return Code
+    int = 21
+    condition[ah] = 4c
+    input[al] = return code (for batch files)
+    terminates = true
+
+    description = [[[
+        returns nothing
+
+
+        - approved method of program termination
+        - restores the terminate, Ctrl-Break, and critical error exit addresses, flushes all buffers, frees memory and returns to DOS via the termination handler address
+        - does not close FCBs
+        - this function is not supported in versions of DOS before 2.x, so use ~INT 21,0~ or ~INT 20~ to exit.
+
+
+        - see also ~INT 27~  ~INT 21,31~
+    ]]]
+end
+
+int[INT 21,3D]:
+    title = Open File Using Handle
+    int = 21
+    condition[ah] = 3d
+    input[al] = [[[
+         open access mode
+         00  read only
+         01  write only
+         02  read/write
+    ]]]
+    input[ds:dx] = pointer to an ASCIIZ file name
+
+    description = [[[
+        on return:
+        AX = file handle if CF not set
+           = error code if CF set  (see DOS ERROR CODES)
+
+
+        Access modes in AL:
+
+        │7│6│5│4│3│2│1│0│  AL
+        │ │ │ │ │ └─┴─┴──── read/write/update access mode
+        │ │ │ │ └───────── reserved, always 0
+        │ └─┴─┴────────── sharing mode (see below) (DOS 3.1+)
+        └─────────────── 1 = private, 0 = inheritable (DOS 3.1+)
+
+
+        Sharing mode bits (DOS 3.1+):	       Access mode bits:
+        654				       210
+        000  compatibility mode (exclusive)    000  read access
+        001  deny others read/write access     001  write access
+        010  deny others write access	       010  read/write access
+        011  deny others read access
+        100  full access permitted to all
+
+
+        - will open normal, hidden and system files
+        - file pointer is placed at beginning of file
+    ]]]
+end
+
+int[INT 21,1]:
+    title = Keyboard Input with Echo
+    int = 21
+    condition[ah] = 1
+    returns = al
+
+    description = [[[
+        on return:
+        AL = character from standard input device
+
+
+        - waits for keyboard input from STDIN and echoes to STDOUT
+        - returns 0 for extended keystroke, then function must be
+          called again to return scan code
+        - if Ctrl-Break is detected, ~INT 23~ is executed
+    ]]]
+end
+
+int[INT 21,2]:
+    title = Display Output
+    int = 21
+    condition[ah] = 2
+    input[dl] = character to output
+
+    description = [[[
+        returns nothing
+
+
+        - outputs character to STDOUT
+        - backspace is treated as non-destructive cursor left
+        - if Ctrl-Break is detected, ~INT 23~ is executed
+    ]]]
+end
+
+int[INT 21,3]:
+    title = Wait for Auxiliary Device Input
+    int = 21
+    condition[ah] = 3
+    returns = al
+
+    description = [[[
+        on return:
+        AL = character from the auxiliary device
+
+
+        - does not supply error returns
+        - waits for character and reads from STDAUX
+        - default DOS AUX parameters are 2400,N,8,1
+    ]]]
+end
+
+int[INT 21,4]:
+    title = Auxiliary Output
+    int = 21
+    condition[ah] = 4
+    input[dl] = character to output
+
+    description = [[[
+        returns nothing
+
+
+        - sends character in DL to STDAUX
+        - does not supply error returns
+        - waits until STDAUX is available
+        - default DOS AUX parameters are 2400,N,8,1
+    ]]]
+end
+
+int[INT 21,5]:
+    title = Printer Output
+    int = 21
+    condition[ah] = 5
+    input[dl] = character to output
+
+    description = [[[
+        returns nothing
+
+
+        - sends character in DL to STDPRN
+        - waits until STDPRN device is ready before output
+    ]]]
+end
+
+int[INT 21,6]:
+    title = Direct Console I/O
+    int = 21
+    condition[ah] = 6
+    input[dl] = [[[
+        (0-FE) character to output
+        = FF if console input request
+    ]]]
+    returns = al, zf
+
+    description = [[[
+        on return:
+        AL = input character if console input request (DL=FF)
+        ZF = 0	if console request character available (in AL)
+           = 1	if no character is ready, and function request
+             was console input
+
+
+        - reads from or writes to the console device depending on
+          the value of DL
+        - cannot output character FF  (DL=FF indicates read function)
+        - for console read, no echo is produced
+        - returns 0 for extended keystroke, then function must be
+          called again to return scan code
+        - ignores Ctrl-Break and Ctrl-PrtSc
+    ]]]
+end
+
+int[INT 21,7]:
+    title = Direct Console Input Without Echo
+    int = 21
+    condition[ah] = 7
+    returns = al
+
+    description = [[[
+        on return:
+        AL = character from STDIN
+
+
+        - waits for keyboard input until keystroke is ready
+        - character is not echoed to STDOUT
+        - returns 0 for extended keystroke, then function must be
+          called again to return scan code
+        - ignores Ctrl-Break and Ctrl-PrtSc
+        - see	~INT 21,1~
+    ]]]
+end
+
+int[INT 21,8]:
+    title = Console Input Without Echo
+    int = 21
+    condition[ah] = 8
+    returns = al
+
+    description = [[[
+        on return:
+        AL = character from STDIN
+
+
+        - returns 0 for extended keystroke, then function must be
+          called again to return scan code
+        - waits for character from STDIN and returns data in AL
+        - if Ctrl-Break is detected, ~INT 23~ is executed
+    ]]]
+end
+
+int[INT 21,9]:
+    title = Print String
+    int = 21
+    condition[ah] = 9
+    input[ds:dx] = pointer to string ending in "$"
+
+    description = [[[
+        returns nothing
+
+
+        - outputs character string to STDOUT up to "$"
+        - backspace is treated as non-destructive
+        - if Ctrl-Break is detected, ~INT 23~ is executed
+    ]]]
+end
+
+int[INT 21,A]:
+    title = Buffered Keyboard Input
+    int = 21
+    condition[ah] = a
+    input[ds:dx] = pointer to input buffer of the format:
+
+    description = [[[
+        returns nothing
+
+        - since strings can be pre-loaded, it is recommended that the
+          default string be terminated with a CR
+        - N bytes of data are read from STDIN into buffer+2
+        - max buffer size is 255, minimum buffer size is 1 byte
+        - chars up to and including a CR are placed into the buffer
+          beginning at byte 2;	Byte 1 returns the number of chars
+          placed into the buffer  (extended codes take 2 characters)
+        - DOS editing keys are active during this call
+        - ~INT 23~ is called if Ctrl-Break or Ctrl-C detected
+    ]]]
+end
+
+int[INT 21,B]:
+    title = Check Standard Input Status
+    int = 21
+    condition[ah] = b
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if no character available
+           = FF if character available
+
+
+        - checks STDIN for available characters
+        - character is not returned
+        - if Ctrl-Break is detected ~INT 23~ is executed
+    ]]]
+end
+
+int[INT 21,C]:
+    title = Clear Keyboard Buffer and Invoke Keyboard Function
+    int = 21
+    condition[ah] = c
+    input[al] = 01, 06, 07, 08 or 0A   (INT 21 input functions)
+
+    description = [[[
+        on return:
+        see return values from INT 21,AL where AL is 1, 6, 7, 8 or A
+
+
+        - main function is to clear the input buffer and call INT 21h with
+          the specified function (in AL)
+        - see ~INT 21,1~,  ~INT 21,6~,  ~INT 21,7~,  ~INT 21,8~ & ~INT 21,A~
+    ]]]
+end
+
+int[INT 21,D]:
+    title = Disk Reset
+    int = 21
+    condition[ah] = d
+
+    description = [[[
+        returns nothing
+
+
+        - all file buffers are flushed to disk
+        - does NOT update directory entry
+    ]]]
+end
+
+int[INT 21,E]:
+    title = Select Disk
+    int = 21
+    condition[ah] = e
+    input[dl] = zero based, drive number (0-25, A: - Z:)
+    returns = al
+
+    description = [[[
+        on return:
+        AL = one based, total number of logical drives including
+             hardfiles (1-26)
+
+
+        - for DOS 3.x+, this function returns the number of logical
+          drives or the value of LASTDRIVE (default of 5) in the
+          CONFIG.SYS file
+    ]]]
+end
+
+int[INT 21,F]:
+    title = Open a File Using FCB
+    int = 21
+    condition[ah] = f
+    input[ds:dx] = pointer to unopened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if file opened
+           = FF if unable to open
+
+
+        - opens an existing file using a previously setup FCB
+        - the FCB fields drive identifier, filename and extension
+          must be filled in before call
+        - sets default FCB fields; current block number is set to 0;
+          record size is set to 80h; file size, date and time are set
+          to the values from the directory
+        - does not create file, see  ~INT 21,16~
+        - DOS 2.x allows opening of subdirectories, DOS 3.x does not
+    ]]]
+end
+
+int[INT 21,10]:
+    title = Close a File Using FCB
+    int = 21
+    condition[ah] = 10
+    input[ds:dx] = pointer to opened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00  if file closed
+           = FF  if file not closed
+
+
+        - closes a previously opened file opened with an FCB
+        - FCB must be setup with drive id, filename, and extension
+          before call
+    ]]]
+end
+
+int[INT 21,11]:
+    title = Search for First Entry Using FCB
+    int = 21
+    condition[ah] = 11
+    input[ds:dx] = pointer to unopened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if matching file found
+           = FF if file not found
+
+        - searches for first occurrence of filename specified in FCB
+        - FCB must have drive id, filename, and extension before call
+        - extended FCB can be used to specify a search criteria based
+          on attributes; hidden, system, label, and directory attributes
+          can be used to narrow the search  (see FILE ATTRIBUTES)
+        - after successful call DTA holds an unopened FCB/XFCB for
+          the requested file.	Using any of the other FCB functions
+          destroys this DTA copy of the FCB/XFCB
+        - searching can be continued with the FCB find-next function
+        - "?" wildcard supported after DOS 2.1, "*" supported in DOS 3.x
+        - DOS 2.x can't find . and .. entries, DOS 3.x can (unless in root)
+        - see	~INT 21,12~
+    ]]]
+end
+
+int[INT 21,12]:
+    title = Search for Next Entry Using FCB
+    int = 21
+    condition[ah] = 12
+    input[ds:dx] = [[[
+        pointer to unopened FCB returned from
+        ~INT 21,11~  or  ~INT 21,12~
+    ]]]
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if file found
+           = FF if file not found
+
+
+        - finds next matching file after calls to ~INT 21,11~ and
+          ~INT 21,12~
+        - FCB should be the same across calls to INT 21,11 and 12
+        - after successful call DTA holds an unopened FCB/XFCB for
+          the requested file.	Using any of the other FCB functions
+          destroys this DTA copy of the FCB/XFCB
+    ]]]
+end
+
+int[INT 21,13]:
+    title = Delete File Using FCB
+    int = 21
+    condition[ah] = 13
+    input[ds:dx] = pointer to an unopened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if file deleted
+           = FF if file not found
+
+
+        - deletes unopened file with normal attributes
+        - FCB must contain drive id, filename, and extension before call
+        - "?" wildcard supported after DOS 2.1, "*" supported by DOS 3.x+
+        - DOS 2.x allowed deletion of a subdirectory if XFCB was provided,
+          even if files existed, causing lost clusters.  DOS 3.x does not
+    ]]]
+end
+
+int[INT 21,14]:
+    title = Sequential Read Using FCB
+    int = 21
+    condition[ah] = 14
+    input[ds:dx] = pointer to an opened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if successful read
+           = 01 if end of file (no data read)
+           = 02 if DTA is too small
+           = 03 if end of file or partial record read
+
+
+        - reads a record from file pointed to by FCB at the location
+          specified in current block and current record number
+        - data record is read into the DTA
+        - FCB record number is updated
+    ]]]
+end
+
+int[INT 21,15]:
+    title = Sequential Write Using FCB
+    int = 21
+    condition[ah] = 15
+    input[ds:dx] = pointer to an opened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if write was successful
+           = 01 if diskette is full or read only
+           = 02 if DTA is too small
+
+
+        - writes a record from the DTA to the current record position
+          in file specified by the opened FCB
+        - record size and output location are maintained in the FCB
+    ]]]
+end
+
+int[INT 21,16]:
+    title = Create a File Using FCB
+    int = 21
+    condition[ah] = 16
+    input[ds:dx] = pointer to an unopened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if file created
+           = FF if file creation failed
+
+
+        - creates file using FCB and leaves open for later output
+        - FCB must be setup with drive id, filename, and extension
+          before call
+        - an extended FCB can be used to also set file attributes
+    ]]]
+end
+
+int[INT 21,17]:
+    title = Rename a File Using FCB
+    int = 21
+    condition[ah] = 17
+    input[ds:dx] = [[[
+        pointer to a modified FCB of the format:
+        Offset     Description
+        00	   drive designator
+        01	   original file name
+        09	   original file extension
+        11	   new file name
+        19	   new extension
+    ]]]
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if file renamed
+           = FF if file not renamed
+
+
+        - allows renaming of files with normal attributes
+        - "?" wildcard supported after DOS 2.1, "*" supported by
+          DOS 3.x+
+    ]]]
+end
+
+int[INT 21,19]:
+    title = Get Current Default Drive
+    int = 21
+    condition[ah] = 19
+    returns = al
+
+    description = [[[
+        on return:
+        AL = current default drive (0=A,1=B,etc)
+
+
+        - determines the current default drive
+    ]]]
+end
+
+int[INT 21,1A]:
+    title = Set Disk Transfer Address (DTA)
+    int = 21
+    condition[ah] = 1a
+    input[ds:dx] = pointer to disk transfer address (DTA)
+
+    description = [[[
+        returns nothing
+
+
+        - specifies the disk transfer address to DOS
+        - DTA cannot overlap 64K segment boundary
+        - offset 80h in the PSP is a 128 byte default DTA supplied
+          by DOS upon program load
+        - use of the DTA provided by DOS will result in the loss
+          of the program command tail which also occupies the 128
+          bytes starting at offset 80h of the PSP
+        - see	~INT 21,2F~
+    ]]]
+end
+
+int[INT 21,1B]:
+    title = Get Allocation Table Information
+    int = 21
+    condition[ah] = 1b
+    returns = al, cx, dx, ds:bx
+
+    description = [[[
+        on return:
+        AL = sectors per cluster
+        CX = bytes per sector
+        DX = clusters on disk
+        DS:BX = pointer to Media Descriptor Byte found in FAT
+
+
+        - retrieves information on capacity and format of default drive
+        - DS:BX can be used to determine if drive is RAMDISK or removable
+        - see  ~INT 21,1C~
+    ]]]
+end
+
+int[INT 21,1C]:
+    title = Get Allocation Table Info for Specified Drive
+    int = 21
+    condition[ah] = 1c
+    input[dl] = drive number (0 for default, 1 = A:, Z: = 26)
+    returns = al, cx, dx, ds:bx
+
+    description = [[[
+        on return:
+        AL = sectors per cluster
+        CX = bytes per sector
+        DX = clusters on disk
+        DS:BX = pointer to Media Descriptor Byte found in FAT
+
+
+        - retrieves information on capacity and format of specified drive
+        - DS:BX can be used to determine if drive is RAMDISK or removable
+        - see  ~INT 21,1B~
+    ]]]
+end
+
+int[INT 21,1F]:
+    title = Get Pointer to Current Drive Parameter Table
+    int = 21
+    condition[ah] = 1f
+    input[dl] = drive number (0=default, 1=A, ...)
+    returns = al, ds:bx
+
+    description = [[[
+        on return:
+        AL = 00  DS:BX is pointer to drive parameter table  (DPT)
+             FF  drive does not exist
+        DS:BX = pointer to drive parameter table (DPT) if AL=0
+
+
+        - the format of the DPT varies between DOS versions
+        - calls ~INT 21,32~ with DL=00 for DOS version 2.x+
+    ]]]
+end
+
+int[INT 21,21]:
+    title = Random Read Using FCB
+    int = 21
+    condition[ah] = 21
+    input[ds:dx] = pointer to an opened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if read successful
+           = 01 if EOF (no data read)
+           = 02 if DTA is too small
+           = 03 if EOF (partial record read)
+
+
+        - reads random records from a file opened with an FCB
+          to the DTA
+        - FCB must be setup with drive id, filename, extension,
+          record position and record length before call
+        - current record position field in FCB is not updated
+    ]]]
+end
+
+int[INT 21,22]:
+    title = Random Write Using FCB
+    int = 21
+    condition[ah] = 22
+    input[ds:dx] = far pointer to an opened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if write successful
+           = 01 if diskette full or read only
+           = 02 if DTA is too small
+
+
+        - write records to random location in file opened with FCB
+        - FCB must be setup with drive id, filename, extension,
+          record position and record length before call
+        - current record position field in FCB is not updated
+    ]]]
+end
+
+int[INT 21,23]:
+    title = Get File Size Using FCB
+    int = 21
+    condition[ah] = 23
+    input[ds:dx] = pointer to an unopened FCB
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if successful
+           = FF if file not found
+
+
+        - determines the number of records in a file
+        - FCB must be setup with drive id, complete filename and
+          extension plus record length before call
+        - updates random record position in FCB located at DS:DX
+          with file record count
+    ]]]
+end
+
+int[INT 21,24]:
+    title = Set Relative Record Field in FCB
+    int = 21
+    condition[ah] = 24
+    input[ds:dx] = pointer to an opened FCB
+
+    description = [[[
+        returns nothing
+
+
+        - modifies opened FCB for random operation
+        - sets FCB random record field to current sequential block
+          and record fields
+    ]]]
+end
+
+int[INT 21,25]:
+    title = Set Interrupt Vector
+    int = 21
+    condition[ah] = 25
+    input[al] = interrupt number
+    input[ds:dx] = pointer to interrupt handler
+
+    description = [[[
+        returns nothing
+
+
+        - provides a safe method for changing interrupt vectors
+
+
+        - see	~INT 21,35~
+    ]]]
+end
+
+int[INT 21,26]:
+    title = Create New Program Segment Prefix
+    int = 21
+    condition[ah] = 26
+    input[dx] = segment address of new PSP
+
+    description = [[[
+        returns nothing
+
+
+        - allocates memory for a PSP and copies current PSP there
+        - used before DOS 2.x to spawn a child process
+        - the application is responsible for allocating any memory
+          necessary for the child process
+        - ~INT 21,4B~ (EXEC) is now the recommended method for starting
+          a child process, so this function should be avoided
+
+
+        - see also ~INT 21,55~
+    ]]]
+end
+
+int[INT 21,27]:
+    title = Random Block Read Using FCB
+    int = 21
+    condition[ah] = 27
+    input[cx] = number of records to read
+    input[ds:dx] = pointer to an opened FCB
+    returns = al, cx
+
+    description = [[[
+        on return:
+        AL = 00 if read was successful
+           = 01 if EOF (no data read)
+           = 02 if DTA is too small
+           = 03 if EOF (partial record read)
+        CX = actual number of records read
+
+
+        - allows random access and sequential reading of a group
+          of records from a file opened with an FCB into the DTA
+        - FCB must be setup with drive id, filename, extension
+          record length and random record number before call
+    ]]]
+end
+
+int[INT 21,28]:
+    title = Random Block Write Using FCB
+    int = 21
+    condition[ah] = 28
+    input[cx] = number of records to write
+    input[ds:dx] = pointer to an opened FCB
+    returns = al, cx
+
+    description = [[[
+        on return:
+        AL = 00 if write successful
+           = 01 if diskette full or read only
+           = 02 if DTA is too small
+        CX = number of records written
+
+
+        - allows random access and sequential writing of a group
+          of records from a file opened with an FCB into the DTA
+        - FCB must be setup with random record number and record size
+        - updates random record number, current block and current
+          record fields
+    ]]]
+end
+
+int[INT 21,29]:
+    title = Parse a Filename for FCB
+    int = 21
+    condition[ah] = 29
+    input[al] = bit pattern to control parsing (see bit meanings below)
+    input[ds:si] = pointer to a filespec to parse
+    input[es:di] = pointer to a buffer for unopened FCB
+    returns = al, ds:si, es:di
+
+    description = [[[
+        on return:
+        AL = 00 if no wildcard characters present
+           = 01 if wildcards present in string
+           = FF if drive specifier is invalid
+        DS:SI = pointer to the first character after parsed filename
+        ES:DI = pointer to the updated unopened FCB
+
+
+        - retrieves filename from the command line string and places
+          the filename components into an unopened FCB for later use
+        - if no filename is found a pointer is returned in ES:DI that
+          has a blank at ES:DI+1
+        - this function can be used to detect the existence of logical DOS
+          drives by creating a dummy filespec with a drive letter and colon
+          prepended.  If the drive is invalid, this function will return FF
+          in AL
+    ]]]
+end
+
+int[INT 21,2A]:
+    title = Get Date
+    int = 21
+    condition[ah] = 2a
+    returns = al, cx, dh, dl
+
+    description = [[[
+        on return:
+        AL = day of the week (0=Sunday)
+        CX = year (1980-2099)
+        DH = month (1-12)
+        DL = day (1-31)
+
+
+        - retrieves system date based on the DOS maintained clock
+        - updates BIOS Data Area current date and date rollover flag
+          at location 40:70
+    ]]]
+end
+
+int[INT 21,2B]:
+    title = Set Date
+    int = 21
+    condition[ah] = 2b
+    input[cx] = year (1980-2099)
+    input[dh] = month (1-12)
+    input[dl] = day (1-31)
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if date change successful
+           = FF if invalid date
+
+
+        - sets DOS maintained clock
+        - DOS versions 3.3+ also update the CMOS date where applicable
+    ]]]
+end
+
+int[INT 21,2C]:
+    title = Get Time
+    int = 21
+    condition[ah] = 2c
+    returns = ch, cl, dh, dl
+
+    description = [[[
+        on return:
+        CH = hour (0-23)
+        CL = minutes (0-59)
+        DH = seconds (0-59)
+        DL = hundredths (0-99)
+
+
+        - retrieves DOS maintained clock time
+    ]]]
+end
+
+int[INT 21,2D]:
+    title = Set Time
+    int = 21
+    condition[ah] = 2d
+    input[ch] = hour (0-23)
+    input[cl] = minutes (0-59)
+    input[dh] = seconds (0-59)
+    input[dl] = hundredths (0-99)
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00 if time change successful
+           = FF if time invalid
+
+
+        - changes DOS maintained clock
+        - DOS version 3.3+ also update CMOS clock where applicable
+    ]]]
+end
+
+int[INT 21,2E]:
+    title = Set/Reset Verify Switch
+    int = 21
+    condition[ah] = 2e
+    input[al] = [[[
+        00 to set off
+        = 01 to set verify on
+    ]]]
+    input[dh] = 00 for DOS versions before 3.0
+
+    description = [[[
+        returns nothing
+
+
+        - with the verify setting on, disk I/O is more secure but
+          takes longer to complete
+
+
+        - see	~INT 21,54~
+    ]]]
+end
+
+int[INT 21,2F]:
+    title = Get Disk Transfer Address (DTA)
+    int = 21
+    condition[ah] = 2f
+    returns = es:bx
+
+    description = [[[
+        on return:
+        ES:BX = pointer to current DTA
+
+
+        - returns the DTA address
+        - the default DTA is a 128 byte block at address 80h in the
+          Program Segment Prefix (PSP).  This area also contains the
+          command tail at program startup it must be saved or the DTA
+          must be relocated before use to preserve the command tail
+
+        - see	~INT 21,1A~
+    ]]]
+end
+
+int[INT 21,30]:
+    title = Get DOS Version Number
+    int = 21
+    condition[ah] = 30
+    returns = al, ah, bh, bl:cx
+
+    description = [[[
+        on return:
+        AL = major version number (2-5)
+        AH = minor version number (in hundredths decimal)
+        BH = FF  indicates MS-DOS, only if OEM vendor chooses to identify
+           = 00  indicates PC-DOS
+        BL:CX = 24 bit OEM serial number if BH is FF
+
+
+        - for an example DOS version 2.1 returns AL=2 and AH=10
+        - DOS versions prior to DOS 2.0 return zero in AH and AL
+        - DOS version 4.0 and 4.1 usually return the same value of 4.00
+        - the OEM serial number is a rarity, though some older OEM DOS
+          versions implemented this feature
+        - the OS/2 compatibility box returns 10.10 for OS/2 1.1, 10.20
+          for OS/2 1.2, etc...
+        - when testing for version, a specific test can often cause your
+          code to not work in following versions of DOS.  It is often better
+          to test for a version number greater or equal to the minimum rather
+          than a specific version number where possible
+        - see DOS Versions
+    ]]]
+end
+
+int[INT 21,31]:
+    title = Terminate Process and Remain Resident
+    int = 21
+    condition[ah] = 31
+    input[al] = exit code (returned to batch files)
+    input[dx] = memory size in paragraphs to reserve
+    terminates = true
+
+    description = [[[
+        returns nothing
+
+
+        - preferred method for Terminate and Stay Resident programs
+        - terminates process without releasing allocated memory and
+          without closing open files
+        - attempts allocation of memory specified in DX from memory
+          allocated by DOS at startup.	 ~INT 21,48~ memory allocation
+          is not affected
+
+        - see	~INT 27~
+    ]]]
+end
+
+int[INT 21,32]:
+    title = Get Pointer to Drive Parameter Table (Undocumented)
+    int = 21
+    condition[ah] = 32
+    input[dl] = drive (0=default, 1=A:, 2=B:, 3=C:, ...)
+    returns = al, ds:bx
+
+    description = [[[
+        on return:
+        AL =  FF if the drive number in DL was invalid
+        DS:BX = address of drive parameter table (DPT)
+
+
+        - available since DOS 2.0
+        - used by DOS commands CHKDSK and RECOVER
+        - forces a media check, which clears byte DS:[BX+17h] or DS:[BX+18h]
+          in the Drive Parameter Table
+        - actually accesses the disk, causing a critical error if a disk
+          error occurs
+        - can be used to determine if a drive is SUBST'ed by comparing
+          DS:[BX+1] and DS:[BX] for a match.  If not equal, then the
+          drive is possibly SUBST'ed (though not guaranteed, this may also
+          indicate a Bernoulli box)
+        - can be used to determine if a drive is a RAM disk; if the disk is
+          NOT removable and (DS:[BX+1] == 0), then the disk is a RAM disk
+          (see ~IOCTL,0~ bit number 0Bh to determine if the disk is removable)
+    ]]]
+end
+
+int[INT 21,33]:
+    title = Get/Set System Values (Ctl-Break/Boot Drive)
+    int = 21
+    condition[ah] = 33
+    input[al] = [[[
+        00 to get Ctrl-Break checking flag
+        = 01 to set Ctrl-Break checking flag
+        = 02 to set extended Ctrl-Break checking
+        = 05 get boot drive (DOS 4.x)
+    ]]]
+    input[dl] = [[[
+        00 to set Ctrl-Break checking off
+        = 01 to set Ctrl-Break checking on
+        = boot drive for subfunction 5;  (1=A:, 2=B:, ...)
+    ]]]
+    returns = dl
+
+    description = [[[
+        on return:
+        DL = 00 Ctrl-Break checking OFF (AL=0 or AL=2)
+           = 01 Ctrl-Break checking ON	(AL=0 or AL=2)
+           = boot drive number (1-26, A: - Z:) (function 05)
+
+
+        - retrieves DOS Ctrl-Break or extended Ctrl-Break setting which
+          determines if DOS will check for Ctrl-Break during INT 21 calls
+    ]]]
+end
+
+int[INT 21,34]:
+    title = Get Address to DOS Critical Flag
+    int = 21
+    condition[ah] = 34
+    returns = es:bx
+
+    description = [[[
+        on return:
+        ES:BX = address of a byte indicating whether a DOS call is
+        	in progress.  No DOS calls should be made if set.
+
+
+        - AKA the INDOS flag, this critical section flag may be checked from
+          within an interrupt handler before requesting a DOS service. It is
+          a semaphore that is non-zero when DOS is busy, and zero otherwise.
+        - though this flag indicates whether a DOS interrupt is active, it
+          should not be used alone to determine DOS is safe for re-entry;
+          Here's the standard rule for safe DOS entry: if ~INT 28~ is active
+          or this flag and the critical error flag are clear then it is safe
+          to call DOS
+        - this interrupt should be used only during TSR initialization;
+          the returned pointer should be used thereafter
+        - this flag is cleared after a critical error (~INT 24~)
+        - ES:BX-1 points to the critical error flag for DOS 3.x+
+          ES:BX+1 points to the critical error flag for DOS 2.x
+          ES:BX-1AA points to the critical error flag for COMPAQ DOS 3.0
+          ~INT 21,5D~ in DOS 3.x+ can be used to locate the critical
+          error flag
+    ]]]
+end
+
+int[INT 21,35]:
+    title = Get Interrupt Vector
+    int = 21
+    condition[ah] = 35
+    input[al] = interrupt vector number
+    returns = es:bx
+
+    description = [[[
+        on return:
+        ES:BX = pointer to interrupt handler
+
+
+        - standard method for retrieving interrupt vectors
+
+
+        - see	~INT 21,25~
+    ]]]
+end
+
+int[INT 21,36]:
+    title = Get Disk Free Space
+    int = 21
+    condition[ah] = 36
+    input[dl] = drive number (0=default, 1=A:)
+    returns = ax, bx, cx, dx
+
+    description = [[[
+        on return:
+        AX = sectors per cluster
+           = FFFF if drive is invalid
+        BX = number of available clusters
+        CX = number of bytes per sector
+        DX = number of clusters per drive
+
+
+        - used to determine available space on specified disk
+        - see	~INT 21,1B~   ~INT 21,1C~
+    ]]]
+end
+
+int[INT 21,37]:
+    title = Get/Set Switch Character (Undocumented, DOS 2.0+)
+    int = 21
+    condition[ah] = 37
+    input[al] = [[[
+        0	get switch character into DL;  some systems return "-"
+        = 1	set switch character to value in DL
+        = 2	read device prefix flag into DL;  returns DL = 0 indicating
+        devices must be accessed using /DEV/device. A non-zero value
+        indicates devices may be accessed without prefix
+        = 3	set device prefix flag, device names must begin with \DEV\.
+    ]]]
+    input[dl] = [[[
+        new switch character (AL=1)
+        = 00  \DEV\ must preceed device names (AL=3)
+        = 01  \DEV\ is not neccesary in device names (AL=3)
+    ]]]
+    returns = al, dl
+
+    description = [[[
+        on return:
+        AL = FF  illegal subfunction code specified
+        DL = current switch character (AL=0)
+           = device availability (AL=2, always FF with DOS 4.x+)
+
+
+        - subfunctions 0 and 1 were formerly available as a CONFIG.SYS
+          command in DOS versions before 3.x;	also supportedin the OS/2
+          compatibility box
+        - subfunctions 2 and 3 were available in DOS 2.x only;	they have
+          no effect in DOS 4.x+
+        - /DEV/ prefix is valid in DOS 2.x by default, setting the flag makes
+          it mandatory.  DOS internal commands like DIR, TYPE and DEL do not
+          recognize filenames the are identical to device names regardless of
+          the setting of the AVAILDEV flag.
+    ]]]
+end
+
+int[INT 21,38]:
+    title = Get/Set Country Dependent Information
+    int = 21
+    condition[ah] = 38
+    input[al] = [[[
+        00 to get current country information
+        = 00-FE country codes  (DOS 3.x+)
+        = FF for country codes >= FF, country codes are in BX
+    ]]]
+    input[bx] = country code if AL = FF (country code > 255)
+    input[dx] = FFFF to set country information
+    input[ds:dx] = pointer to buffer to contain country data (if get data)
+    returns = ax, bx, ds:dx
+
+    description = [[[
+        on return:
+        AX = error code if CF set
+           = 02 invalid country
+        BX = country code (DOS 3.x+)
+        DS:DX = pointer to returned country data (see COUNTRY CODES)
+
+
+        - returns a pointer to country specific data, for DOS 3.x+ this
+          function can be used to also set this information
+    ]]]
+end
+
+int[INT 21,39]:
+    title = Create Subdirectory (mkdir)
+    int = 21
+    condition[ah] = 39
+    input[ds:dx] = pointer to ASCIIZ path name
+    returns = cf, ax
+
+    description = [[[
+        on return:
+        CF = 0 if successful
+           = 1 if error
+        AX = error code  (see DOS ERROR CODES)
+
+
+        - creates specified subdirectory
+        - returns error if directory already exists, element of the path
+          is not found, directory full or write protected disk
+    ]]]
+end
+
+int[INT 21,3A]:
+    title = Remove Subdirectory (rmdir)
+    int = 21
+    condition[ah] = 3a
+    input[ds:dx] = pointer to ASCIIZ path name
+    returns = cf, ax
+
+    description = [[[
+        on return:
+        CF = 0 if successful
+           = 1 if error
+        AX = error code  (see DOS ERROR CODES)
+
+
+        - allows deletion of a subdirectory as long as it exists, is empty
+          and not the current directory
+    ]]]
+end
+
+int[INT 21,3B]:
+    title = Change Current Directory (chdir)
+    int = 21
+    condition[ah] = 3b
+    input[ds:dx] = pointer to ASCIIZ path name
+    returns = cf, ax
+
+    description = [[[
+        on return:
+        CF = 0 if successful
+           = 1 if error
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - changes the current directory to the directory specified
+          by pointer DS:DX
+    ]]]
+end
+
+int[INT 21,3C]:
+    title = Create File Using Handle
+    int = 21
+    condition[ah] = 3c
+    input[cx] = file attribute  (see FILE ATTRIBUTES)
+    input[ds:dx] = pointer to ASCIIZ path name
+    returns = cf, ax
+
+    description = [[[
+        on return:
+        CF = 0 if successful
+           = 1 if error
+        AX = files handle if successful
+           = error code if failure  (see DOS ERROR CODES)
+
+
+        - if file already exists, it is truncated to zero bytes on opening
+    ]]]
+end
+
+int[INT 21,3E]:
+    title = Close File Using Handle
+    int = 21
+    condition[ah] = 3e
+    input[bx] = file handle to close
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - if file is opened for update, file time and date stamp
+          as well as file size are updated in the directory
+        - handle is freed
+    ]]]
+end
+
+int[INT 21,3F]:
+    title = Read From File or Device Using Handle
+    int = 21
+    condition[ah] = 3f
+    input[bx] = file handle
+    input[cx] = number of bytes to read
+    input[ds:dx] = pointer to read buffer
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = number of bytes read is CF not set
+           = error code if CF set  (see DOS ERROR CODES)
+
+
+        - read specified number of bytes from file into buffer DS:DX
+        - when AX is not equal to CX then a partial read occurred due
+          to end of file
+        - if AX is zero, no data was read, and EOF occurred before read
+    ]]]
+end
+
+int[INT 21,40]:
+    title = Write To File or Device Using Handle
+    int = 21
+    condition[ah] = 40
+    input[bx] = file handle
+    input[cx] = [[[
+        number of bytes to write, a zero value truncates/extends
+        the file to the current file position
+    ]]]
+    input[ds:dx] = pointer to write buffer
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = number of bytes written if CF not set
+           = error code if CF set  (see DOS ERROR CODES)
+
+
+        - if AX is not equal to CX on return, a partial write occurred
+        - this function can be used to truncate a file to the current
+          file position by writing zero bytes
+    ]]]
+end
+
+int[INT 21,41]:
+    title = Delete File
+    int = 21
+    condition[ah] = 41
+    input[ds:dx] = pointer to an ASCIIZ filename
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - marks first byte of file directory entry with E5 to indicate
+          the file has been deleted.  The rest of the directory entry
+          stays intact until reused.   FAT pointers are returned to DOS
+        - documented as not accepting wildcards in filename but actually
+          does in several DOS versions
+    ]]]
+end
+
+int[INT 21,42]:
+    title = Move File Pointer Using Handle
+    int = 21
+    condition[ah] = 42
+    input[al] = [[[
+        origin of move:
+        00 = beginning of file plus offset  (SEEK_SET)
+        01 = current location plus offset	(SEEK_CUR)
+        02 = end of file plus offset  (SEEK_END)
+    ]]]
+    input[bx] = file handle
+    input[cx] = high order word of number of bytes to move
+    input[dx] = low order word of number of bytes to move
+    returns = ax, dx:ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+        DX:AX = new pointer location if CF not set
+
+
+        - seeks to specified location in file
+    ]]]
+end
+
+int[INT 21,43]:
+    title = Get/Set File Attributes
+    int = 21
+    condition[ah] = 43
+    input[al] = [[[
+        00 to get attribute
+        = 01 to set attribute
+    ]]]
+    input[ds:dx] = pointer to an ASCIIZ path name
+    input[cx] = attribute to set
+    returns = ax, cx
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+        CX = the attribute if AL was 00
+
+        - see	DIRECTORY
+    ]]]
+end
+
+int[INT 21,44]:
+    title = I/O Control for Devices  (IOCTL)
+    int = 21
+    condition[ah] = 44
+    input[al] = function value
+    input[bx] = file handle
+    input[bl] = logical device number (0=default, 1=A:, 2=B:, 3=C:, ...)
+    input[cx] = number of bytes to read or write
+    input[ds:dx] = data or buffer
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set
+        AX = # of bytes transferred if CF not set
+
+
+        For more information, see the following topics:
+
+        ~IOCTL,0~   Get Device Information
+        ~IOCTL,1~   Set Device Information
+        ~IOCTL,2~   Read From Character Device
+        ~IOCTL,3~   Write to Character Device
+        ~IOCTL,4~   Read From Block Device
+        ~IOCTL,5~   Write to Block Device
+        ~IOCTL,6~   Get Input Status
+        ~IOCTL,7~   Get Output Status
+        ~IOCTL,8~   Device Removable Query
+        ~IOCTL,9~   Device Local or Remote Query
+        ~IOCTL,A~   Handle Local or Remote Query
+        ~IOCTL,B~   Set Sharing Retry Count
+        ~IOCTL,C~   Generic I/O for Handles
+        ~IOCTL,D~   Generic I/O for Block Devices (3.2+)
+        ~IOCTL,E~   Get Logical Drive (3.2+)
+        ~IOCTL,F~   Set Logical Drive (3.2+)
+
+
+        - see:	DEVICE COMMAND CODES
+        	DEVICE REQUEST HEADER
+        	DEVICE STATUS
+        	DEVICE HEADER
+        	DEVICE ATTRIBUTES
+    ]]]
+end
+
+int[INT 21,44,0]:
+    title = Get Device Information
+    int = 21
+    condition[ah] = 44
+    condition[al] = 0
+    input[bx] = handle (must be an opened device)
+    returns = ax, dx
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+        DX = device information  (see tables below)
+
+
+        │F│E│D│C│B│A-8│7│6│5-0│  DX  Block Device Information
+         │ │ │ │ │  │  │ │  └───── drive number (0=A:,1=B:)
+         │ │ │ │ │  │  │ └─────── 0 = file has been written
+         │ │ │ │ │  │  └──────── 0 = disk file; 1 = character device
+         │ │ │ │ │  └────────── reserved, must be zero
+         │ │ │ │ └──────────── 1 = media not removable
+         │ │ │ └───────────── 1 = network device (DOS 3.x+)
+         │ │ └────────────── 1 = reserved
+         │ └─────────────── 1 = don't update file time or date (DOS 4.x+)
+         └──────────────── 1 = file is remote (DOS 3.x+)
+
+        │F│E│D│C│B│A-8│7│6│5│4│3│2│1│0│  DX  Character Device Information
+         │ │ │ │ │  │  │ │ │ │ │ │ │ └──── 1 = standard input device
+         │ │ │ │ │  │  │ │ │ │ │ │ └──── 1 = standard output device
+         │ │ │ │ │  │  │ │ │ │ │ └──── 1 = NUL device
+         │ │ │ │ │  │  │ │ │ │ └──── 1 = clock device
+         │ │ │ │ │  │  │ │ │ └──── uses DOS ~INT 29~ for fast character output
+         │ │ │ │ │  │  │ │ └──── 1 = binary mode, 0 = translated
+         │ │ │ │ │  │  │ └──── 0 = end of file on input
+         │ │ │ │ │  │  └──── 1 = character device, 0 if disk file
+         │ │ │ │ │  └───── reserved
+         │ │ │ │ └────── 1 = media not removable
+         │ │ │ └────── 1 = network device (DOS 3.x+)
+         │ │ └────── reserved
+         │ └────── 1 = supports IOCTL, via functions 2 & 3
+         └────── reserved
+
+
+        - BIT 7 of register DX can be used to detect if STDIN/STDOUT is
+          redirected to/from disk; if a call to this function has DX BIT 7
+          set it's not redirected from/to disk; if it's clear then it is
+          redirected to/from disk
+        - BIT B of register DX can be used to determine if a drive is
+          removable.
+    ]]]
+end
+
+int[INT 21,44,1]:
+    title = Set Device Information
+    int = 21
+    condition[ah] = 44
+    condition[al] = 1
+    input[bx] = handle
+    input[dh] = must be zero
+    input[dl] = device data low order byte  (see below)
+    returns = ax, dx
+
+    description = [[[
+        on return
+        AX = error code if CF set
+        DX = device information  (see below)
+
+
+        - applicable to character devices only
+        - allows setting of device data word for character devices
+        - usually used to change from binary to translated I/O
+        - handle in BX must be an opened file or device
+
+
+        Device Data Word
+
+        │F│E│D│C│B│A│9│8│7│6│5│4│3│2│1│0│  Device Data Word
+         │ │ │ │ │ │ │ │ │ │ │ │ │ │ │ └──── 1 = standard input device
+         │ │ │ │ │ │ │ │ │ │ │ │ │ │ └──── 1 = standard output device
+         │ │ │ │ │ │ │ │ │ │ │ │ │ └──── 1 = NUL device
+         │ │ │ │ │ │ │ │ │ │ │ │ └──── 1 = clock device
+         │ │ │ │ │ │ │ │ │ │ │ └──── reserved
+         │ │ │ │ │ │ │ │ │ │ └──── 1 = binary mode, 0 = translated
+         │ │ │ │ │ │ │ │ │ └──── 0 = end of file on input
+         │ │ │ │ │ │ │ │ └──── 1 = character device
+         └─┴─┴─┴─┴─┴─┴─┴──── reserved, must be zero
+    ]]]
+end
+
+int[INT 21,44,2]:
+    title = Read From Character Device
+    int = 21
+    condition[ah] = 44
+    condition[al] = 2
+    input[bx] = handle
+    input[cx] = number of bytes to read
+    input[ds:dx] = pointer to data buffer
+    returns = ax
+
+    description = [[[
+        on return
+        AX = number of bytes read if CF clear
+           = error code if CF set   (see DOS ERROR CODES)
+
+
+        - see bit 14 if IOCTL function 00h to determine if
+          driver can support IOCTL control strings
+    ]]]
+end
+
+int[INT 21,44,3]:
+    title = Write to Character Device
+    int = 21
+    condition[ah] = 44
+    condition[al] = 3
+    input[bx] = handle
+    input[cx] = number of bytes to send
+    input[ds:dx] = pointer to data buffer
+    returns = ax
+
+    description = [[[
+        on return
+        AX = number of bytes written if CF clear
+           = error code if CF set   (see DOS ERROR CODES)
+
+
+        - see bit 14 if IOCTL function 00h to determine if
+          driver can support IOCTL control strings
+    ]]]
+end
+
+int[INT 21,44,4]:
+    title = Read from Block Device
+    int = 21
+    condition[ah] = 44
+    condition[al] = 4
+    input[bl] = drive number (0=default, 1=A:, 2=B:, 3=C:, ...)
+    input[cx] = number of bytes to read
+    input[ds:dx] = pointer to data buffer
+    returns = ax
+
+    description = [[[
+        on return
+        AX = number of bytes read if CF clear
+           = error code if CF set  (see DOS ERROR CODES)
+
+
+        - block drivers are not required to support this function
+        - returns AX = 01 (invalid function code) if not supported
+    ]]]
+end
+
+int[INT 21,44,5]:
+    title = Write to Block Device
+    int = 21
+    condition[ah] = 44
+    condition[al] = 5
+    input[bl] = drive number (0=default, 1=A:, 2=B:, 3=C:, ...)
+    input[cx] = number of bytes to send
+    input[ds:dx] = pointer to data buffer
+    returns = ax
+
+    description = [[[
+        on return
+        AX = number of bytes written if CF clear
+           = error code if CF set  (see DOS ERROR CODES)
+
+
+        - block devices are not required to support this function
+        - returns AX = 01 (invalid function code) if not supported
+    ]]]
+end
+
+int[INT 21,44,6]:
+    title = Get Input Status
+    int = 21
+    condition[ah] = 44
+    condition[al] = 6
+    input[bx] = handle
+    returns = cf, ax, al
+
+    description = [[[
+        on return
+        CF = 0 if successful
+           = 1 if error
+        AX = error code if CF set  (see DOS ERROR CODES)
+        AL = 00  if EOF (files), or not ready (char devices)
+           = FF  if not EOF (files), or ready (char devices)
+
+
+        - used to determine if a file or device is ready for input
+        - can be used to determine EOF unless EOF caused by ~INT 21,42~
+    ]]]
+end
+
+int[INT 21,44,7]:
+    title = Get Output Status
+    int = 21
+    condition[ah] = 44
+    condition[al] = 7
+    input[bx] = handle
+    returns = cf, ax, al
+
+    description = [[[
+        on return
+        CF = 0 if successful
+           = 1 if error
+        AX = error code if CF set  (see DOS ERROR CODES)
+        AL = 00  if ready (files), or not ready (char devices)
+           = FF  ready (files or char device)
+
+
+        - indicates if a device or file is ready for output
+        - files always return ready, character devices don't
+    ]]]
+end
+
+int[INT 21,44,8]:
+    title = Device Removable Query
+    int = 21
+    condition[ah] = 44
+    condition[al] = 8
+    input[bl] = drive number (0=default, 1=A:, 2=B:, 3=C:, ...)
+    returns = cf, ax
+
+    description = [[[
+        on return
+        CF = 0 if successful
+           = 1 if error
+        AX = 00  removable media
+           = 01  non-removable media
+           = error code if CF set  (see DOS ERROR CODES)
+
+
+        - used to determine if a device supports removable media
+        - RAM disks are not considered removable media
+        - device drivers compatible with DOS 2.0 do not always respond
+          correctly to this query
+        - implemented from DOS 3.0;  for earlier DOS versions drive A: and
+          B: are removable media since DRIVER.SYS/SUBST are DOS 3.0+ only
+    ]]]
+end
+
+int[INT 21,44,9]:
+    title = Device Local or Remote Query
+    int = 21
+    condition[ah] = 44
+    condition[al] = 9
+    input[bl] = drive number (0=default, 1=A:, 2=B:, 3=C:, ...)
+    returns = ax, dx
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+        DX = device attribute word
+             bit 12 = 1 if drive is remote
+             bit 12 = 0 if drive is local
+
+
+        - used to determine if block device is local or remote
+        - returns invalid function if networking not started
+        - implemented from DOS 3.1
+    ]]]
+end
+
+int[INT 21,44,A]:
+    title = Handle Local or Remote Query
+    int = 21
+    condition[ah] = 44
+    condition[al] = a
+    input[bx] = handle
+    returns = ax, dx
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+        DX = device attribute word
+             bit 15 = 1 if drive is remote
+             bit 15 = 0 if drive is local
+
+
+        - used to determine if block device is local or remote
+        - returns invalid function if networking not started
+        - implemented from DOS 3.1
+    ]]]
+end
+
+int[INT 21,44,B]:
+    title = Set Sharing Retry Count
+    int = 21
+    condition[ah] = 44
+    condition[al] = b
+    input[cx] = pause between retries  (default 1)
+    input[dx] = number of retries	(default 3)
+    returns = ax
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - retry parameters are associated with file locking
+        - differences in CPU and clock speeds affect length of pauses
+        - requires SHARE be loaded or invalid function is returned
+        - implemented from DOS 3.0
+    ]]]
+end
+
+int[INT 21,44,C]:
+    title = Generic I/O for Handles
+    int = 21
+    condition[ah] = 44
+    condition[al] = c
+    input[bx] = handle
+    input[ch] = [[[
+        device type
+        = 00  unknown device type  (DOS 3.3+)
+        = 01  COMx  (DOS 3.3+)
+        = 03  CON  (DOS 3.3+)
+        = 05  LPTx  (DOS 3.3+),  printer  (DOS 3.2)
+    ]]]
+    input[cl] = [[[
+        minor function code (when CH = 3 or CH = 5)
+        = 45  set iteration count  (DOS 3.2 only)
+        = 4A  select code page (DOS 3.3+); parameter format:
+        00  word  length of data
+        02  word  code page ID
+        04 nwords character set data array (see offset 00)
+        = 4C  code page prepare start  (DOS 3.3+); parameter format:
+        00  word  flags
+        02  word  length of remainder of parameter block
+        04  word  number of code pages following
+        06 nwords code page 1,...,N
+        = 4D  code page prepare end	(DOS 3.3+); parameter format:
+        00  word  length of data
+        02  word  code page ID
+        = 5F  set display info  (DOS 4.x, when CH=3); parameter format:
+        00  byte  level  (0 for DOS 4.0)
+        01  byte  reserved
+        02  word  length of following data
+        04  word  control flags
+        bit 0 set for blink, clear for intensity
+        bits 1 to 15 reserved
+        06  byte  mode type (1=text, 2=graphics)
+        07  byte  reserved
+        08  word  colors;  0=monochrome, n=bits per pixel
+        0A  word  pixel columns
+        0C  word  pixel rows
+        0E  word  character columns
+        10  word  character rows
+        = 65  get iteration count  (DOS 3.2 only)
+        = 6A  query selected code page  (DOS 3.3+); parameter format:
+        00  word  length of data
+        02  word  code page ID
+        04 nwords character set data array  (see offset 00)
+        = 6B  query prepare list  (DOS 3.3+); Parameter format:
+        00  word  length of following data
+        02  word  number of hardware code pages
+        04 nwords hardware code page array
+        xx  word  number of prepared code pages
+        xx nwords prepared code page array
+        = 7F  get display info  (DOS 4.x, CH = 3)
+        00  byte  level  (0 for DOS 4.0)
+        01  byte  reserved
+        02  word  length of following data
+        04  word  control flags
+        bit 0 set for blink, clear for intensity
+        bits 1 to 15 reserved
+        06  byte  mode type (1=text, 2=graphics)
+        07  byte  reserved
+        08  word  colors;  0=monochrome, n=bits per pixel
+        0A  word  pixel columns
+        0C  word  pixel rows
+        0E  word  character columns
+        10  word  character rows
+    ]]]
+    input[ds:dx] = [[[
+        pointer to iteration count word  (DOS 3.2)
+        = pointer to parameter block  (DOS 3.3)
+    ]]]
+    returns = ax
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - iteration count word specifies the number of times to retry
+          an operation before aborting
+        - DOS 3.3 changed this function to handle code page switching
+        - implemented from DOS 3.2
+        - DOS 4.x adds support for double byte characters
+        - see IBM DOS Technical Reference Manual for more details
+    ]]]
+end
+
+int[INT 21,44,D]:
+    title = Generic I/O for Block Devices
+    int = 21
+    condition[ah] = 44
+    condition[al] = d
+    input[bl] = drive number (0=default, 1=A:, 2=B:, 3=C:, ...)
+    input[ch] = [[[
+        device type
+        = 08 for disk drive	(block device)
+    ]]]
+    input[cl] = [[[
+        minor function code
+        = 40  set device parameters
+        = 41  write track on logical device
+        = 42  format/verify track on logical drive
+        = 47  set access flag  (DOS 4.x)
+        = 60  get device parameters
+        = 61  read track on logical device
+        = 62  verify track on logical drive
+        = 67  get access flag  (DOS 4.x)
+    ]]]
+    input[ds:dx] = pointer to parameter block
+    returns = ax
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - provides device independent primitive control operations
+        - implemented from DOS 3.2
+        - see IBM DOS Technical Reference Manual for more details
+    ]]]
+end
+
+int[INT 21,44,E]:
+    title = Get Logical Drive
+    int = 21
+    condition[ah] = 44
+    condition[al] = e
+    input[bl] = physical drive number (0=default, 1=A:, 2=B:, 3=C:, ...)
+    returns = ax, al
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+        AL = logical drive number assigned to physical drive
+           = 0 if drive accessed by only one drive specifier
+           = 1 if drive A:, 2 if drive B:, etc
+
+
+        - used to determine the last drive designator used to access
+          a drive if more than one logical drive designation applies
+          to a device
+        - implemented from DOS 3.2
+    ]]]
+end
+
+int[INT 21,44,F]:
+    title = Set Logical Drive
+    int = 21
+    condition[ah] = 44
+    condition[al] = f
+    input[bl] = new drive number (0=default, 1=A:, 2=B:, 3=C:, ...)
+    returns = ax, al
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+        AL = logical drive number (should be equal to BL input)
+           = 0 if drive accessed by only one drive specifier
+           = 1 if drive A:, 2 if drive B:, etc
+
+
+
+        - changes the logical drive designator of the physical drive
+          to be accessed next
+        - implemented from DOS 3.2
+    ]]]
+end
+
+int[INT 21,45]:
+    title = Duplicate File Handle
+    int = 21
+    condition[ah] = 45
+    input[bx] = file handle
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = new file handle if CF not set
+           = error code if CF set  (see DOS ERROR CODES)
+
+
+        - gets another file handle for the same file
+        - both file handles move in unison
+        - often used to flush file data and update a file directory
+          entry without closing the initial file
+    ]]]
+end
+
+int[INT 21,46]:
+    title = Force Duplicate File Handle
+    int = 21
+    condition[ah] = 46
+    input[bx] = existing file handle
+    input[cx] = second file handle
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - if file handle in CX is currently open, current file
+          identified by CX is closed and the handle in BX is
+          dupped and placed in CX
+        - after duping file handles move together through file
+        - similar to ~INT 21,45~
+    ]]]
+end
+
+int[INT 21,47]:
+    title = Get Current Directory
+    int = 21
+    condition[ah] = 47
+    input[dl] = drive number (0 = default, 1 = A:)
+    input[ds:si] = pointer to a 64 byte user buffer
+    returns = ds:si, ax
+
+    description = [[[
+        on return:
+        DS:SI = pointer ASCIIZ directory path string
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - returns the current directory relative to the root directory
+        - the leading slash "\" and drive designator are omitted
+    ]]]
+end
+
+int[INT 21,48]:
+    title = Allocate Memory
+    int = 21
+    condition[ah] = 48
+    input[bx] = number of memory paragraphs requested
+    returns = ax, bx, cf
+
+    description = [[[
+        on return:
+        AX = segment address of allocated memory block (MCB + 1para)
+           = error code if CF set  (see DOS ERROR CODES)
+        BX = size in paras of the largest block of memory available
+             if CF set, and AX = 08 (Not Enough Mem)
+        CF = 0 if successful
+           = 1 if error
+
+
+        - returns segment address of allocated memory block AX:0000
+        - each allocation requires a 16 byte overhead for the MCB
+        - returns maximum block size available if error
+
+        - see  ~INT 21,49~,  ~INT 21,4A~
+    ]]]
+end
+
+int[INT 21,49]:
+    title = Free Allocated Memory
+    int = 21
+    condition[ah] = 49
+    input[es] = segment of the block to be returned (MCB + 1para)
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - releases memory and MCB allocated by ~INT 21,48~
+        - may cause unpredictable results is memory wasn't allocated using
+          INT 21,48 or if memory wasn't allocated by the current process
+        - checks for valid MCB id, but does NOT check for process ownership
+        - care must be taken when freeing the memory of another process, to
+          assure the segment isn't in use by a TSR or ISR
+        - this function is unreliable in a TSR once resident, since
+          COMMAND.COM and many other .COM files take all available memory
+          when they load
+        - see  INT 21,4A
+    ]]]
+end
+
+int[INT 21,4A]:
+    title = Modify Allocated Memory Block  (SETBLOCK)
+    int = 21
+    condition[ah] = 4a
+    input[bx] = new requested block size in paragraphs
+    input[es] = segment of the block (MCB + 1 para)
+    returns = ax, bx
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+        BX = maximum block size possible, if CF set and AX = 8
+
+
+        - modifies memory blocks allocated by  ~INT 21,48~
+        - can be used by programs to shrink or increase the size
+          of allocated memory
+        - PC-DOS version 2.1 and DOS 3.x will actually allocate the largest
+          available block if CF is set.  BX will equal the size allocated.
+        - see also  ~INT 21,49~
+    ]]]
+end
+
+int[INT 21,4B]:
+    title = EXEC/Load and Execute Program
+    int = 21
+    condition[ah] = 4b
+    input[al] = [[[
+        00  to load and execute program
+        = 01  (Undocumented)  create program segment prefix and load
+        program, but don't execute.  The CS:IP and SS:SP of the
+        program is placed in parameter block.	Used by debuggers
+        = 03  load program only
+        = 04  called by MSC spawn() when P_NOWAIT is specified
+    ]]]
+    input[ds:dx] = pointer to an ASCIIZ filename
+    input[es:bx] = pointer to a parameter block
+    returns = ax, es:bx
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+        ES:BX = when AL=1, pointer to parameter block similar to:
+
+        Offset Size	       Description
+
+          00   word   when AL=1, segment of env. or zero if using parents env.
+               word   when AL=3, segment of load point for overlay
+          02   dword  when AL=1, pointer to cmd line at PSP 80h
+               word   when AL=3, relocation factor for EXE overlay
+          06   dword  pointer to default FCB passed at PSP 5Ch
+          0A   dword  pointer to default FCB passes at PSP 6Ch
+          0E   dword  value of program SS:SP
+          12   dword  value of program CS:IP
+
+
+        - allows execution of an external program as well as overlay
+          management from within an application
+        - all registers except CS and IP are destroyed
+        - SS and SP should be preserved in code segment before call
+          since a bug in DOS version 2.x destroys these
+        - return code can be retrieved if child process exits via ~INT 21,4C~
+        - calling process must assure presence of enough unallocated memory
+        - subfunction 4 returns with an error under DOS 4.x+
+        - calls ~INT 21,55~
+
+        - see also  ~INT 21,26~
+    ]]]
+end
+
+int[INT 21,4D]:
+    title = Get Return Code of Sub-process
+    int = 21
+    condition[ah] = 4d
+    returns = ah, al
+
+    description = [[[
+        on return:
+        AH = system exit code  (indicates normal termination)
+           = 00 for normal termination
+           = 01 if terminated by ctl-break
+           = 02 if critical device error
+           = 03 if terminated by ~INT 21,31~
+        AL = child exit code
+
+
+        - retrieve child process and system exit codes
+        - this function can only be used to retrieve the exit code once
+          multiple attempts to read exit codes will cause errors
+    ]]]
+end
+
+int[INT 21,4E]:
+    title = Find First Matching File
+    int = 21
+    condition[ah] = 4e
+    input[cx] = attribute used during search  (see FILE ATTRIBUTES)
+    input[ds:dx] = pointer to ASCIIZ filespec, including wildcards
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODE)
+        DTA = data returned from call in the format:
+
+        Offset Size	 Description
+
+          00   byte    attribute of search (undocumented)
+               byte    drive letter used in search (DOS 3.1-4.x, undocumented)
+          01   byte    drive letter used in search (undocumented)
+             11bytes   search name used (DOS 3.1-4.x, undocumented)
+          02 11bytes   search name used (undocumented)
+          0C   byte    attribute of search (DOS 3.1-4.x, undocumented)
+          0D   word    directory entry number (0 based, undocumented)
+          0F   word    starting cluster number of current directory; zero
+        	       for root directory  (DOS 3.2+, undocumented)
+               dword   pointer to DTA (DOS 2.x-3.1, undocumented)
+          11   word    reserved
+          13   word    starting cluster number of current directory; zero
+        	       for root directory  (DOS 2.x+, undocumented)
+          15   byte    attribute of matching file
+          16   word    file time  (see FILE ATTRIBUTES)
+          18   word    file date  (see FILE ATTRIBUTES)
+          1A   word    file size
+          1E 13bytes   ASCIIZ filename and extension in the form NAME.EXT
+        	       with blanks stripped
+
+        - returns information on first file matching specifications
+        - use ~INT 21,4F~ to retrieve following file matches
+        - DOS 2.x cannot find . and .. entries, while DOS 3.x can unless
+          they represent the root directory
+        - character devices return a zero for size, time and date in DOS 2.x,
+          while DOS 3.0 returns a 40h attribute and current time and date.
+        - multiple calls to this function with a character device will
+          result in unpredictable results
+        - normal files are always included along with files that match the
+          requested attributes except when the LABEL attribute is requested.
+          DOS 2.x returns all normal files when label is specified but 3.x
+          doesn't.  It's up to the programmer to determine which actually
+          match the requested attributes.
+        - bit 8 of CX (file attributes) indicates Novell Netware shareable
+        - see	INT 21,1A
+    ]]]
+end
+
+int[INT 21,4F]:
+    title = Find Next Matching File
+    int = 21
+    condition[ah] = 4f
+    input[ds:dx] = unchanged from previous function 4E
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - ~INT 21,4E~ should be called to find the first file and this
+          function should be called to find all other matching files
+        - normal files are always included along with files that match
+          the requested attributes except when the LABEL attribute is
+          requested.  It's up to the programmer to determine which
+          actually match the requested attributes.
+        - see  ~INT 21,1A~  DTA  FILE ATTRIBUTES
+    ]]]
+end
+
+int[INT 21,50]:
+    title = Set Current Process ID  (Undocumented DOS 2.x)
+    int = 21
+    condition[ah] = 50
+    input[bx] = process ID number (process PSP segment address)
+
+    description = [[[
+        returns nothing
+
+
+        - the process ID number is actually the segment address of a
+          program's PSP.  This is useful for TSR's to access their own
+          file handle table inside their PSP.
+        - this function cannot be called while in an ~INT 28~ handler in
+          DOS 2.x unless the critical error flag is set or stack corruption
+          will occur
+        - safe in DOS 3.x INT 28 handlers since they use a different stack
+          by default
+        - available in OS/2 compatibility box
+        - see  ~INT 21,51~   ~INT 21,62~
+    ]]]
+end
+
+int[INT 21,51]:
+    title = Get Current Process ID  (Undocumented DOS 2.x)
+    int = 21
+    condition[ah] = 51
+    returns = bx
+
+    description = [[[
+        on return:
+        BX = process ID
+
+
+        - The process ID  number is actually the segment address of program's
+          PSP.	 This in conjunction with ~INT 21,50~ is useful for TSR's to
+          access their own file handle table in their respective PSP.
+        - this function cannot be called while in an ~INT 28~ handler in
+          DOS 2.x unless the critical error flag is set or stack corruption
+          will occur
+        - ~INT 21,62~ is highly recommended for DOS 3.x due to a possible bug
+          when activated from a TSR.  DOS may switch to the wrong internal
+          stack which may cause a problems with TSR's if called during an
+          INT 28.
+        - see INT 21,62 (Get PSP segment) for DOS 3.x applications
+    ]]]
+end
+
+int[INT 21,52]:
+    title = Get Pointer to DOS "INVARS"  (Undocumented)
+    int = 21
+    condition[ah] = 52
+    returns = es:bx
+
+    description = [[[
+        on return:
+        ES:BX = pointer to DOS "invars", a table of pointers used by DOS.
+        	Known "invars" fields follow (varies with DOS version):
+
+        Offset Size		 Description
+
+         -12   word   sharing retry count (DOS 3.1-3.3)
+         -10   word   sharing retry delay  (DOS 3.1-3.3)
+          -8   dword  pointer to current disk buffer (DOS 3.x)
+          -4   word   pointer in DOS code segment of unread CON input;
+        	      0 indicates no unread input (DOS 3.x)
+          -2   word   segment of first Memory Control Block (MCB)
+          00   dword  pointer to first DRIVE PARAMETER TABLE (A:) in chain
+          04   dword  pointer to DOS System File Table (SFT)
+          08   dword  pointer to $CLOCK device driver
+          0C   dword  pointer to CON device driver
+          10   byte   number of logical drives in system
+          11   word   maximum bytes/block of any block device
+          13   dword  pointer to DOS cache buffer header
+          17 18bytes  NUL device header, first 4 bytes of device header
+        	      point to the next device in device chain
+
+
+        DOS 3.0 Specific Information
+
+        Offset Size		Description
+
+          10   byte   number of block devices
+          11   word   max sector size used by DOS prior to loading block
+        	      device drivers;  limits allowable device sector size
+          13   dword  pointer to DOS cache buffer header
+          17   dword  pointer to drive information table
+          1B   byte   value of LASTDRIVE command in CONFIG.SYS
+          1C   dword  pointer to STRING= workspace area
+          20   word   size of STRING area (CONFIG.SYS value of STRING=x)
+          22   dword  FCB file table pointer
+          26   word   number of protected FCBs
+          28  18bytes NUL device header, first 4 bytes of device header
+        	      point to the next device in device chain
+
+
+        DOS 3.1-3.3  Specific Information
+
+        Offset Size		 Description
+
+          10   word   max sector size used by DOS prior to loading block
+        	      device drivers;  limits allowable device sector size
+          12   dword  pointer to DOS cache buffer header
+          16   dword  pointer to drive information table
+          1A   dword  FCB file table pointer
+          1E   word   number of protected FCBs
+          20   byte   number of block devices
+          21   byte   value of LASTDRIVE command in CONFIG.SYS
+          22  18bytes NUL device header, first 4 bytes of device header
+        	      point to the next device in device chain
+          34   byte   number of JOIN'ed drives
+
+
+        DOS 4.x  Specific Information
+
+        Offset Size		Description
+
+          10   word   max sector size used by DOS prior to loading block
+        	      device drivers;  limits allowable device sector size
+          12   dword  pointer to DOS cache buffer header
+          16   dword  pointer to drive information table
+          1A   dword  FCB file table pointer
+          1E   word   number of protected FCBs
+          20   byte   number of block devices
+          21   byte   value of LASTDRIVE command in CONFIG.SYS (default 5)
+          22  18bytes NUL device header, first 4 bytes of device header
+        	      point to the next device in device chain
+          34   byte   number of joined drives
+          35   word   pointer within IBMDOS code segment to list of special
+        	      program names
+          37   dword  pointer to resident IFS utility function
+          3B   dword  pointer to chain of installable file system drivers
+          3F   word   the x in BUFFERS x,y (rounded up to multiple of 30
+        	      if EMS is used)
+          41   word   the y in BUFFERS x,y
+          43   byte   boot drive (1=A:)
+          44   byte   ???
+          45   byte   extended memory size in K bytes
+
+
+        - see Bibliography references for Bernd Schemmer & "Undocumented DOS"
+        - see   INDOS  ~INT 21,5D~
+    ]]]
+end
+
+int[INT 21,53]:
+    title = Generate Drive Parameter Table  (Undocumented)
+    int = 21
+    condition[ah] = 53
+    input[ds:si] = address of BIOS Parameter Block (BPB)
+    input[es:bp] = pointer to buffer to hold first Drive Parameter Table (DPT)
+    input[es:bp] = [[[
+        pointer to buffer containing the first Drive Parameter Table
+        in chain
+    ]]]
+end
+
+int[INT 21,54]:
+    title = Get Verify Setting
+    int = 21
+    condition[ah] = 54
+    returns = al
+
+    description = [[[
+        on return:
+        AL = 00  verify off
+           = 01  verify on
+
+
+        - returns value of disk read after write verification flag
+
+        - see	~INT 21,2E~
+    ]]]
+end
+
+int[INT 21,55]:
+    title = Create New PSP  (Undocumented)
+    int = 21
+    condition[ah] = 55
+    input[dx] = New PSP segment address
+    input[si] = memory size value to place in PSP offset 02h (DOS 3+)
+
+    description = [[[
+        returns nothing
+
+        - the following should be observed when using this function
+
+          o  Allocate memory for the PSP and program code  (~INT 21,48~)
+          o  Duplicate the PSP	 (~INT 21,55~)
+          o  Load program code into allocated segment above the new PSP
+          o  Save Current PSP
+          o  Set PSP to the PSP just created  (~INT 21,50~)
+          o  Jump to start of code if .COM otherwise handle relocation,
+             setup stack and registers
+
+        - similar to ~INT 21,26~ except the PSP is setup by DOS
+        - increments reference count in SFT for all inherited files
+        - files flagged as not inheritable are marked as closed in the
+          new PSP
+        - invoked by ~INT 21,4B~
+
+        - see	UNDOC   ~INT 21,4B~   ~INT 21,26~
+    ]]]
+end
+
+int[INT 21,56]:
+    title = Rename File
+    int = 21
+    condition[ah] = 56
+    input[ds:dx] = pointer to old ASCIIZ path/filename
+    input[es:di] = pointer to new ASCIIZ path/filename
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - supports full pathnames and allows renaming files across
+          directories and in DOS 3.x allows renaming subdirectories
+        - does not support use of wildcards unless invoked from via
+          ~INT 21,5D~ in which case error code 12h is returned
+        - unpredictable result may occur if an opened file is renamed
+        - see Bibliography reference to "Undocumented DOS"
+    ]]]
+end
+
+int[INT 21,57]:
+    title = Get/Set File Date and Time Using Handle
+    int = 21
+    condition[ah] = 57
+    input[al] = [[[
+        00  get date and time
+        = 01  set date and time
+        = 02  ??? (DOS 4.0+ undocumented)
+        = 03  ??? (DOS 4.0+ undocumented)
+        = 04  ??? (DOS 4.0+ undocumented)
+    ]]]
+    input[bx] = file handle
+    input[cx] = time to set (if setting)
+    input[dx] = date to set (if setting)
+    input[es:di] = pointer to buffer to contain results
+    returns = ax, cx, dx
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see  DOS ERROR CODES)
+        CX = file time (if reading, see below)
+        DX = file date (if reading, see below)
+
+        Time encoding:
+
+        │F│E│D│C│B│A│9│8│7│6│5│4│3│2│1│0│  Time in CX
+         │ │ │ │ │ │ │ │ │ │ │ └─┴─┴─┴─┴────  two second incr (0-29)
+         │ │ │ │ │ └─┴─┴─┴─┴─┴─────────────  minutes 0-59)
+         └─┴─┴─┴─┴────────────────────────  hours (0-29)
+
+        Date Encoding
+
+        │F│E│D│C│B│A│9│8│7│6│5│4│3│2│1│0│  Date in DX
+         │ │ │ │ │ │ │ │ │ │ │ └─┴─┴─┴─┴────  day (1-31)
+         │ │ │ │ │ │ │ └─┴─┴─┴─────────────  month (1-12)
+         └─┴─┴─┴─┴─┴─┴────────────────────  year - 1980
+    ]]]
+end
+
+int[INT 21,58]:
+    title = Get/Set Memory Allocation Strategy
+    int = 21
+    condition[ah] = 58
+    input[al] = [[[
+        00  get strategy code
+        = 01  set strategy code
+    ]]]
+    input[bx] = [[[
+        strategy code (when AL = 01)
+        = 00  first fit  (default)
+        = 01  best fit
+        = 02  last fit
+    ]]]
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = strategy code if CF clear
+           = error if CF set, see  DOS ERROR CODES
+
+
+        - defaults to first fit, first block large enough is chosen
+        - in first fit, DOS searches the MCB chain from low addresses to
+          high for the first block large enough to fill the request.  For
+          best fit, DOS searches all memory blocks for the closest fit.
+          In last fit, DOS starts at high addresses and works downward
+          and uses the high part of the chosen block
+        - any strategy value greater than 2 defaults to 2, but the last value
+          set, even if incorrect, is the value returned by the get strategy
+    ]]]
+end
+
+int[INT 21,59]:
+    title = Get Extended Error Information (DOS 3.0+)
+    int = 21
+    condition[ah] = 59
+    input[bx] = 00 for versions  3.0, 3.1, 3.2
+    returns = ax, bh, bl, ch
+
+    description = [[[
+        on return:
+        AX = extended error code (see DOS ERROR CODES)
+           = 0 if no error
+        BH = error class
+        BL = suggested action
+        CH = locus
+
+
+        - may be called after any  ~INT 21~  function or from
+          ~INT 24~ when an error is returned
+        - must be called immediately after the error occurs
+        - registers CX, DX, DI, SI, BP, DS and ES are destroyed
+    ]]]
+end
+
+int[INT 21,5A]:
+    title = Create Temporary File  (DOS 3.0+)
+    int = 21
+    condition[ah] = 5a
+    input[cx] = attribute
+    input[ds:dx] = pointer to ASCIIZ path ending in '\'
+    returns = ax, ds:dx
+
+    description = [[[
+        on return:
+        AX = handle if call CF clear
+           = error code if CF set  (see DOS ERROR CODES)
+        DS:DX = pointer to updated ASCIIZ filespec
+
+
+        - creates files with random names with any combination of
+          the following attributes: normal, system and hidden
+        - ending backslash is required
+    ]]]
+end
+
+int[INT 21,5B]:
+    title = Create File  (DOS 3.0+)
+    int = 21
+    condition[ah] = 5b
+    input[cx] = attribute
+    input[ds:dx] = pointer to ASCIIZ path/filename
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = handle if CF not set
+           = error code if CF set  (see DOS ERROR CODES)
+
+
+        - standard method of opening files
+        - returns a file handle of a file opened with specified
+          attributes (combinations of normal, system and hidden)
+    ]]]
+end
+
+int[INT 21,5C]:
+    title = Lock/Unlock File Access  (DOS 3.0+)
+    int = 21
+    condition[ah] = 5c
+    input[al] = [[[
+        00  lock file
+        = 01  unlock file
+    ]]]
+    input[bx] = file handle
+    input[cx] = most significant word of region offset
+    input[dx] = least significant word of region offset
+    input[si] = most significant word of region length
+    input[di] = least significant word of region length
+    returns = ax
+
+    description = [[[
+        on return:
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - used for networking and multi-tasking system to preserve
+          data integrity
+        - duplicated handles inherit access to locked regions
+        - EXEC'd programs do not inherit access to locked regions
+    ]]]
+end
+
+int[INT 21,5D]:
+    title = Critical Error Information  (Undocumented, DOS 3.x+)
+    int = 21
+    condition[ah] = 5d
+    input[al] = [[[
+        00  server function call  (DOS 3.1+)
+        = 01  commit all files  (DOS 3.1+)
+        = 02  SHARE: close file by name  (DOS 3.1+)
+        = 03  SHARE: close all files for given computer  (DOS 3.1+)
+        = 04  SHARE: close all files for given process  (DOS 3.1+)
+        = 05  SHARE: get open file list entry  (DOS 3.1+)
+        = 06  get address of DOS swappable area into DS:SI  (DOS 3.0+)
+        = 07  get network redirected printer mode  (DOS 3.1+)
+        = 08  set network redirected printer mode  (DOS 3.1+)
+        = 09  flush network redirected printer output  (DOS 3.1+)
+        = 0A  set extended error information  (DOS 3.1+)
+        = 0B  get DOS swappable data areas  (DOS 4.x+)
+    ]]]
+    input[ds:dx] = [[[
+        pointer to 18 byte DOS Parameter List (DPL, if AL=00)
+        = pointer to 9 byte data block of the form (AL=0A):
+    ]]]
+    returns = ds:si
+
+    description = [[[
+        on return:
+        DS:SI = (if AL was 6) address of critical flag of the form:
+
+        Offset Size      Description
+
+        	00   word   extended error code
+        	02   byte   action code
+        	03   byte   class code
+        	04   byte   pointer to driver address
+
+        - function 0 copies 18 bytes from DS:SI to the DOS internal
+          register-save area;  this data will be placed in the registers
+          when DOS returns to the caller thereby circumventing the DOS
+          register save logic
+        - may be used by a TSR to prevent accidental changing of an error
+          code and causing problems in the foreground process
+        - see bibliography references for "Undocumented DOS" and "DOS
+          Programmers Reference"
+
+        - see	~INT 21,59~
+    ]]]
+end
+
+int[INT 21,5E]:
+    int = 21
+    condition[ah] = 5e
+    input[al] = 00 get machine name
+    input[ds:dx] = far pointer to buffer receiving name string
+    returns = ax, ch, cl, ds:dx
+
+    description = [[[
+        on return:
+        AX = error code if CF set, (invalid function)
+        CH = 0	if name not defined
+           > 0	if name defined
+        CL = NETBIOS name number, if CH not 0
+        DS:DX = far pointer to buffer containing string if CH not 0
+
+
+        - returns pointer to an ASCIIZ string identifying the
+          computer on a Microsoft network
+        - output string is a 15 bytes long, padded with blanks and
+          null terminated
+        - unpredictable if called without file sharing loaded
+
+
+        INT 21,5E  AL=01  Set Machine Name  (DOS 3.1+)
+
+        AH = 5E
+        AL = 01 set machine name
+        CH = 00 undefine name
+           = any other value means to define name
+        CL = name number
+        DS:DX = pointer to 15 byte, blank padded ASCIIZ name string
+
+
+        on return:
+        AX = error code if CF set, (invalid function)
+
+
+        - specifies the network machine name on a Microsoft network
+        - unpredictable if called without file sharing loaded
+
+
+        INT 21,5E  AL=02  Set Printer Setup  (DOS 3.1+)
+
+
+        AH = 5E
+        AL = 02 set printer setup
+        BX = redirection list index (see ~INT 21,5F~ AL=2)
+        CX = length of setup string
+        DS:SI = far pointer to printer setup string
+
+
+        on return:
+        AX = error code if CF set, (invalid function)
+
+
+        - see INT 21,5F subfunction 2 for information on obtaining the
+          redirection list index
+        - fails if file sharing is not loaded
+
+
+        INT 21,5E  AL=03  Get Printer Setup  (DOS 3.1+)
+
+
+        AH = 5E
+        AL = 03 get printer setup
+        BX = redirection list index (see ~INT 21,5F~ AL=2)
+        ES:DI = far pointer to buffer to receive setup string
+
+
+        on return:
+        AX = error code if CF set
+
+
+        - see INT 21,5F subfunction 2 for information on obtaining the
+          redirection list index
+        - fails if file sharing is not loaded
+
+
+        INT 21,5E  AL=04  Set Printer Mode  (DOS 3.1+)
+
+
+        AH = 5E
+        AL = 04  set printer setup
+        BX = redirection list index (see INT 21,5F AL=2)
+        DX = printer mode to set (bit zero is set for binary mode and clear
+             for translated/text mode)
+
+
+        on return:
+        AX = error code if CF set
+
+
+        - see INT 21,5F subfunction 2 for information on obtaining the
+          redirection list index
+        - fails if file sharing is not loaded
+        - issues ~INT 2F,11~  and  ~INT 2F,1F~
+
+
+        INT 21,5E  AL=05  Get Printer Mode  (DOS 3.1+)
+
+
+        AH = 5E
+        AL = 05  set printer setup
+        BX = redirection list index (see INT 21,5F AL=2)
+
+
+        on return:
+        AX = error code if CF set
+        DX = printer mode where bit zero is set for binary mode and
+             clear for translated mode
+
+
+
+        - see ~INT 21,5F~ subfunction 2 for information on obtaining the
+          redirection list index
+        - fails if file sharing is not loaded
+        - issues  ~INT 2F,11~  and  ~INT 2F,1F~
+    ]]]
+end
+
+int[INT 21,5F]:
+    int = 21
+    condition[ah] = 5f
+    input[al] = 00
+    input[bl] = [[[
+        redirection type
+        = 03  printer
+        = 04  disk drive
+    ]]]
+    returns = ax, bh
+
+    description = [[[
+        on return:
+        AX = error code if CF is set
+        BH = device redirection state
+           = 00  redirection off
+           = 01  redirection on
+
+
+        - determines if disk or printer redirection is enabled
+        - fails if file sharing is not loaded
+
+
+        INT 21,5F  AL=01  Set Redirection Mode  (DOS 3.1+)
+
+
+        AH = 5F
+        AL = 01
+        BH = device redirection state
+           = 00  turn redirection off
+           = 01  turn redirection on
+        BL = redirection type
+           = 03  printer
+           = 04  disk drive
+
+
+        on return:
+        AX = error code if CF is set
+
+
+        - enables or disables disk or printer redirection
+        - local devices are used when redirection is off
+        - fails if file sharing is not loaded
+
+
+        INT 21,5F  AL=02  Get Redirection List Entry  (DOS 3.1+)
+
+        AH = 5F
+        AL = 02
+        BX = redirection list index
+        DS:SI = far pointer to a 16 byte buffer to hold device name
+        ES:DI = far pointer to a 128 byte buffer to hold network name
+
+        on return:
+        AX = error code if CF is set
+           = 1	invalid function code
+           = 12 no more files
+        BH = device status flag,
+           bit 0 = 0  device valid
+           bit 0 = 1  device invalid
+        BL = device type
+           = 3	printer
+           = 4	drive
+        CX = stored parameter value
+        DS:SI = far pointer to ASCIIZ local device name
+        ES:DI = far pointer to ASCIIZ network name
+
+        - value returned in CX is the value previously passed to
+          INT 21,5F with subfunction 3 in register CX
+        - registers DX and BP are destroyed
+        - fails if file sharing is not loaded
+
+
+        INT 21,5F  AL=03  Redirect Device  (DOS 3.1+)
+
+        AH = 5F
+        AL = 03
+        BL = device type
+           = 3 if printer
+           = 4 if drive
+        CX = parameter to save for caller
+        DS:SI = far pointer to ASCIIZ local device name
+        ES:DI = far pointer to ASCIIZ network name followed
+        	by ASCIIZ password
+
+        on return
+        AX = error code if CF is set
+           = 1	invalid function code or
+        	invalid source or destination string format or
+        	source device already redirected
+           = 3	path not found
+           = 5	access denied
+           = 8	insufficient memory
+
+        - parameter passed in CX can later be retrieved by calls
+          to INT 21,5F subfunction 2
+        - local device name in DS:SI can be a drive designator
+          (D:), a printer name (PRN or LPTx), or a null string
+        - when a null string is followed by a password is used, DOS
+          tries granting access to the network directory using the
+          given password
+        - fails if file sharing is not loaded
+
+
+        INT 21,5F  AL=04  Cancel Device Redirection  (DOS 3.1+)
+
+
+        AH = 5F
+        AL = 04
+        DS:SI = far pointer to ASCIIZ local device name
+
+
+        on return
+        AX = error code if CF set
+           = 01  function code invalid
+        	 ASCIIZ string is not an existing source device
+           = 0F  redirection paused on server
+
+
+        - local device name in DS:SI can be a drive designator
+          (D:), a printer name (PRN or LPTx), or a string beginning
+          with 2 backslashes "\\"
+        - when two backslashes are used for the string the connection
+          between the local machine and network directory terminates
+        - fails if file sharing is not loaded
+
+        INT 21,5F  AL=05  Get Redirection List Extended Entry (DOS 4.0+)
+
+        AH = 5F
+        AL = 05
+        BX = redirection list index
+        DS:SI = pointer to buffer to receive ASCIIZ source device name
+        ES:DI = pointer to buffer to receive ASCIIZ network path
+
+        on return
+        AX = error code if CF set
+        BH = device status flag (bit 0 clear if valid)
+        BL = device type
+           = 03  printer device
+           = 04  disk device
+        CX = stored user parameter value
+        BP = NETBIOS local session number
+        DS:SI = pointer to buffer containing ASCIIZ source device name
+        ES:DI = pointer to buffer containing ASCIIZ network path
+
+
+        - retrieves the status, type, source and target of a given redirection
+        - fails if file sharing is not loaded
+
+
+        INT 21,5F  AL=06  Get Redirection List (DOS 4.0+)
+
+
+        AH = 5F
+        AL = 06
+
+        - no information is currently available for this subfunction
+    ]]]
+end
+
+int[INT 21,60]:
+    title = Get Fully Qualified File Name (Undocumented 3.x+)
+    int = 21
+    condition[ah] = 60
+    input[ds:si] = pointer to ASCIIZ string containing unqualified filename
+    input[es:di] = pointer to 128 byte buffer to contain fully qualified filename
+    returns = es:di, ah
+
+    description = [[[
+        on return:
+        ES:DI = address of fully qualified filename string
+        AH = error code if CF set
+
+
+        - undocumented, available in DOS 3.x+
+        - does not check for file existence, simple provides a fully
+          qualified filename for the given filespec
+        - this function ignores ASSIGN'ed, JOIN'ed, SUBST'ed and network
+          redirections and returns the true path name
+        - returned string is in upper case and has forward slashes replaced
+          by back slashes;  filename always begins with "d:" or "\\" format
+        - AL register is destroyed
+        - supported by OS/2 1.1 compatibility box
+    ]]]
+end
+
+int[INT 21,62]:
+    title = Get PSP address  (DOS 3.x)
+    int = 21
+    condition[ah] = 62
+    returns = bx
+
+    description = [[[
+        on return:
+        BX = segment address of current process
+
+
+
+        - this is useful for TSR's to access their own file handles
+        - for DOS 2.x use ~INT 21,51~
+
+        - see also  ~INT 21,50~
+    ]]]
+end
+
+int[INT 21,63]:
+    title = Get Lead Byte Table  (MSDOS 2.25 only)
+    int = 21
+    condition[ah] = 63
+    input[al] = [[[
+        00  get address of system lead byte table
+        = 01  set or clear interim console flag
+        = 02  get value of interim console flag
+    ]]]
+    input[dl] = [[[
+        00  clear interim console flag (when AL=01)
+        = 01  set interim console flag (when AL=01)
+    ]]]
+    returns = ax, ds:si, dl
+
+    description = [[[
+        on return
+        AX = error code if CF set
+        DS:SI = far pointer to lead byte table (AL=00)
+        DL = value of interim console flag (AL=02)
+
+        - available only in MSDOS 2.25
+        - provides multiple byte character support
+        - function 00, returns the address of system table containing
+          legal lead byte ranges
+        - function 01 & 02 set and get the interim console flag which
+          determines whether interim bytes are returned on some console
+          functions
+        - all registers except CS:IP and SS:SP may be destroyed
+
+
+        INT 21,63 - Get Lead Byte Table  (Asian DOS 3.2+)
+
+        AH = 63h
+        AL = 00  get address of Double Byte Character Set (DBCS) lead table
+           = 01  set Hongeul (Korean) input mode
+           = 02  get Hongeul (Korean) input mode
+        DL = new keyboard input mode
+           = 00  return completely formed characters only
+           = 01  return partially formed characters also
+
+
+        on return
+        AL = 00 on success
+           = FF if function not supported
+        DS:SI = pointer to DBCS table  (function 00)
+        DL = current keyboard input mode (function 02)
+           = 00  only completely formed characters are accepted
+           = 01  partially formed characters are accepted
+
+
+        - available only in Asian MSDOS 3.2+
+        - provides Asian multiple byte character support
+        - all registers except CS:IP and SS:SP may be destroyed
+        - DOS 4.0 returns an empty list
+    ]]]
+end
+
+int[INT 21,64]:
+    title = Set Device Driver Look Ahead  (Undocumented)
+    int = 21
+    condition[ah] = 64
+    input[al] = [[[
+        value for switch
+        00   causes DOS to perform look ahead to the device driver
+        before execution of ~INT 21,1~, ~INT 21,8~ and ~INT 21,A~
+        other - no look ahead is performed
+    ]]]
+end
+
+int[INT 21,65]:
+    title = Get Extended Country Information (DOS 3.3+)
+    int = 21
+    condition[ah] = 65
+    input[al] = [[[
+        01  get extended country information
+        = 02  get pointer to character translation table
+        = 04  get pointer to filename character translation table
+        = 05  get pointer to filename terminator table
+        = 06  get pointer to collating sequence
+        = 07  get segment of DCBS vector (DOS 4.x)
+        = 20  country dependant character capitalization (DOS 4+)
+        = 21  country dependant string capitalization (DOS 4+)
+        = 22  country dependant ASCIIZ string capitalization (DOS 4+)
+        = 23  determine if character represents country relative
+        Yes or No response (DOS 4+)
+        = A0  country dependant filename character capitalization (DOS 4+)
+        = A1  country dependant filename string capitalization (DOS 4+)
+        = A2  country dependant ASCIIZ filename capitalization (DOS 4+)
+    ]]]
+    input[bx] = code page (-1 = current global code page, AL < 20h)
+    input[cx] = [[[
+        amount of data to return
+        = length of string (AL=21h, A1h)
+    ]]]
+    input[dx] = country ID (-1 = current country, AL < 20h)
+    input[dl] = character to capitalize or test (AL=20h, 23h, A0h)
+    input[dh] = second character if double byte character (AL=23h)
+    input[es:di] = pointer to output buffer (AL < 20h, see tables below)
+    input[ds:dx] = pointer to string to capitalize (AL=21h, 22h, A1h, A2h)
+    returns = ax, cx, dl
+
+    description = [[[
+        on return
+        AX = error code if CF is set  (see DOS ERROR CODES)
+           = 00  NO response if (AL was 23h)
+           = 01  YES response if (AL was 23h)
+           = 02  not a yes or no response (AL was 23h)
+        CX = amount of data returned
+        DL = capitalize character (AL=20)
+        ES:DI pointer to returned table of the forms:
+
+
+        Offset Size	Table for Function 01
+
+          00   byte   country id = 01
+          01   word   size (38 or less)
+          03   word   country id
+          05   word   code Page
+          07   word   date Format
+          09  5bytes  currency symbol string (ASCIIZ)
+          0E  2bytes  thousands separator string (ASCIIZ)
+          10  2bytes  decimal separator string (ASCIIZ)
+          12  2bytes  date separator string (ASCIIZ)
+          14  2bytes  time Separator string (ASCIIZ)
+          16   byte   currency symbol location
+          17   byte   currency decimal places
+          18   byte   time format
+          19   dword  extended ASCII map call address
+          1D  2bytes  list separator string (ASCIIZ)
+          1F  10bytes reserved
+
+
+        Offset Size	Table for Function 2
+          00   byte   country Id = 02
+          01   dword  pointer to uppercase table
+
+
+        Offset Size	Table for Function 4
+          00   byte   country Id = 04
+          01   dword  pointer to filename character translation table
+
+
+        Offset Size	Table for Function 5
+          00   byte   country Id = 05
+          01   dword  pointer to filename uppercase table
+
+
+        File Terminator Table for Function 5
+          00   word   table size
+          02  7bytes  unknown
+          09   byte   length of following data
+          0A  nbytes  list of filename termination characters, ex:
+        	      < > . " / \ [ ] : | + = ; ,
+
+        Offset Size	Table for Function 6
+          00   byte   country Id = 06
+          01   dword  pointer to collating table
+
+
+        Offset Size	Table for Function 7
+          00   byte   country Id = 07
+          01   dword  pointer to byte pair table
+
+
+        - functions A0, A1, A2 are implemented in DOS 4.x but don't work
+    ]]]
+end
+
+int[INT 21,66]:
+    title = Get/Set Global Code Page  (DOS 3.3+)
+    int = 21
+    condition[ah] = 66
+    input[al] = [[[
+        01  get global code page
+        = 02  set global code page
+    ]]]
+    input[bx] = active code page if setting
+    input[dx] = system code page if setting
+    returns = ax, bx, dx
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+        BX = active code page  (for AL=1 only)
+        DX = system code page  (for AL=1 only)
+
+
+        - moves country data from COUNTRY.SYS to country memory table
+    ]]]
+end
+
+int[INT 21,67]:
+    title = Set Handle Count  (DOS 3.3+)
+    int = 21
+    condition[ah] = 67
+    input[bx] = new maximum open handles allowed
+    returns = cf, ax
+
+    description = [[[
+        on return
+        CF = 0 if successful
+           = 1 if error
+        AX = error code if CF is set  (see DOS ERROR CODES)
+
+
+        - gives program control of the number of files simultaneously open
+        - if CX is less than the current number of open files the change
+          will take effect when the number of open handles falls below
+          the new limit
+        - this function allows the application to use more than 20 files,
+          up to the FILES=N limit
+        - earlier copies of IBM DOS 3.3 sometimes incorrectly allocates
+          memory (up to 64K) if an even number of handles is requested
+        - only the first 20 files handles are copied to a child process
+          regardless of the max number of files
+        - it is possible to allocate more than 255 file handles but it is
+          difficult to use more than 255
+
+        - see  SFT   FILE HANDLES
+    ]]]
+end
+
+int[INT 21,68]:
+    title = Flush Buffer Using Handle	(DOS 3.3+)
+    int = 21
+    condition[ah] = 68
+    input[bx] = file handle
+    returns = ax
+
+    description = [[[
+        on return
+        AX = error code if CF set  (see DOS ERROR CODES)
+
+
+        - flushes DOS buffers to disk, does not update directory entry
+    ]]]
+end
+
+int[INT 21,69]:
+    title = Get/Set Disk Serial Number  (Undocumented DOS 4+)
+    int = 21
+    condition[ah] = 69
+    input[al] = [[[
+        00 get serial number
+        = 01 set serial number
+    ]]]
+    input[bl] = drive (0 = default, 1=A:, 2 = B:, ... )
+    input[ds:dx] = [[[
+        buffer to contain extended BIOS Parameter Block (BPB, AL=0)
+        = disk information to set of the form:
+    ]]]
+    input[cf] = set on error
+    input[ax] = [[[
+        error code if CF set
+        = 01  network drive not supported
+        = 05  no extended BPB found on disk
+    ]]]
+    input[cf] = clear if successful and value in AX is destroyed
+    input[al] = [[[
+        00  buffer filled from Extended BPB on disk
+        = 01  disk Extended BPB updated from buffer
+    ]]]
+    input[ds:dx] = pointer to returned data, when AL = 0
+end
+
+int[INT 21,6C]:
+    title = Extended Open/Create  (DOS 4.x+)
+    int = 21
+    condition[ah] = 6c
+    input[al] = 00
+    input[bx] = open mode (see below)
+    input[cx] = file attribute (see FILE ATTRIBUTES, bits 15-8 are zero)
+    input[dx] = function control indicator (see below)
+    input[ds:si] = ASCIIZ filespec
+    input[ax] = [[[
+        handle if CF clear
+        = error code if CF set  (see DOS ERROR CODES)
+    ]]]
+    input[cx] = [[[
+        01  file opened
+        = 02  file created and opened
+        = 03  file truncated and opened (replaced)
+    ]]]
+    input[cf] = [[[
+        0 if successful
+        = 1 if error
+    ]]]
+end
+
+int[INT 21,F8]:
+    title = Set OEM Int 21 Handler (functions F9-FF, Undocumented)
+    int = 21
+    condition[ah] = f8
+    input[ds:dx] = [[[
+        pointer to OEM handler for INT 21H calls F9 through FF
+        = FFFF:FFFF to reset to original handlers
+    ]]]
+end

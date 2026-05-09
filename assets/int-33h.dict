@@ -1,0 +1,719 @@
+int[INT 33,0]:
+    title = Mouse Reset/Get Mouse Installed Flag
+    int = 33
+    condition[ax] = 0
+    returns = ax, bx
+
+    description = [[[
+        on return:
+        AX = 0000  mouse driver not installed
+             FFFF  mouse driver installed
+        BX = number of buttons
+
+
+        - resets mouse to default driver values:
+
+          .  mouse is positioned to screen center
+          .  mouse cursor is reset and hidden
+          .  no interrupts are enabled (mask = 0)
+          .  double speed threshold set to 64 mickeys per second
+          .  horizontal mickey to pixel ratio (8 to 8)
+          .  vertical mickey to pixel ratio (16 to 8)
+          .  max width and height are set to maximum for video mode
+    ]]]
+end
+
+int[INT 33,1]:
+    title = Show Mouse Cursor
+    int = 33
+    condition[ax] = 1
+
+    description = [[[
+        returns nothing
+
+
+        - increments the cursor flag;  the cursor is displayed if flag
+          is zero;  default flag value is -1
+    ]]]
+end
+
+int[INT 33,2]:
+    title = Hide Mouse Cursor
+    int = 33
+    condition[ax] = 2
+
+    description = [[[
+        returns nothing
+
+
+        - decrements cursor flag; hides cursor if flag is not zero
+    ]]]
+end
+
+int[INT 33,3]:
+    title = Get Mouse Position and Button Status
+    int = 33
+    condition[ax] = 3
+    returns = cx, dx, bx
+
+    description = [[[
+        on return:
+        CX = horizontal (X) position  (0..639)
+        DX = vertical (Y) position  (0..199)
+        BX = button status:
+
+        	│F-8│7│6│5│4│3│2│1│0│  Button Status
+        	  │  │ │ │ │ │ │ │ └──── left button (1 = pressed)
+        	  │  │ │ │ │ │ │ └───── right button (1 = pressed)
+        	  └──┴─┴─┴─┴─┴─┴────── unused
+
+
+        - values returned in CX, DX are the same regardless of video mode
+    ]]]
+end
+
+int[INT 33,4]:
+    title = Set Mouse Cursor Position
+    int = 33
+    condition[ax] = 4
+    input[cx] = horizontal position
+    input[dx] = vertical position
+
+    description = [[[
+        returns nothing
+
+
+        - default cursor position is at the screen center
+        - the position must be within the range of the current video mode
+        - the position may be rounded to fit screen mode resolution
+    ]]]
+end
+
+int[INT 33,5]:
+    title = Get Mouse Button Press Information
+    int = 33
+    condition[ax] = 5
+    input[bx] = [[[
+        0	left button
+        1	right button
+    ]]]
+    returns = bx, cx, dx, ax
+
+    description = [[[
+        on return:
+        BX = count of button presses (0-32767), set to zero after call
+        CX = horizontal position at last press
+        DX = vertical position at last press
+        AX = status:
+
+        	│F-8│7│6│5│4│3│2│1│0│  Button Status
+        	  │  │ │ │ │ │ │ │ └──── left button (1 = pressed)
+        	  │  │ │ │ │ │ │ └───── right button (1 = pressed)
+        	  └──┴─┴─┴─┴─┴─┴────── unused
+    ]]]
+end
+
+int[INT 33,6]:
+    title = Get Mouse Button Release Information
+    int = 33
+    condition[ax] = 6
+    input[bx] = [[[
+        0	left button
+        1	right button
+    ]]]
+    returns = bx, cx, dx, ax
+
+    description = [[[
+        on return:
+        BX = count of button releases (0-32767), set to zero after call
+        CX = horizontal position at last release
+        DX = vertical position at last release
+        AX = status
+
+        	│F-8│7│6│5│4│3│2│1│0│  Button status
+        	  │  │ │ │ │ │ │ │ └──── left button (1 = pressed)
+        	  │  │ │ │ │ │ │ └───── right button (1 = pressed)
+        	  └──┴─┴─┴─┴─┴─┴────── unused
+    ]]]
+end
+
+int[INT 33,7]:
+    title = Set Mouse Horizontal Min/Max Position
+    int = 33
+    condition[ax] = 7
+    input[cx] = minimum horizontal position
+    input[dx] = maximum horizontal position
+
+    description = [[[
+        returns nothing
+
+
+        - restricts mouse horizontal movement to window
+        - if min value is greater than max value they are swapped
+    ]]]
+end
+
+int[INT 33,8]:
+    title = Set Mouse Vertical Min/Max Position
+    int = 33
+    condition[ax] = 8
+    input[cx] = minimum vertical position
+    input[dx] = maximum vertical position
+
+    description = [[[
+        returns nothing
+
+
+        - restricts mouse vertical movement to window
+        - if min value is greater than max value they are swapped
+    ]]]
+end
+
+int[INT 33,9]:
+    title = Set Mouse Graphics Cursor
+    int = 33
+    condition[ax] = 9
+    input[bx] = horizontal hot spot (-16 to 16)
+    input[cx] = vertical hot spot (-16 to 16)
+    input[es:dx] = pointer to screen and cursor masks (16 byte bitmap)
+
+    description = [[[
+        returns nothing
+
+
+        - screen mask is AND'ed to screen Cursor Mask is XOR'ed
+        - bytes 0-7 form the screen mask bitmap
+        - bytes 8-F form the cursor mask bitmap
+    ]]]
+end
+
+int[INT 33,A]:
+    title = Set Mouse Text Cursor
+    int = 33
+    condition[ax] = a
+    input[bx] = [[[
+        00  software cursor
+        01  hardware cursor
+    ]]]
+    input[cx] = start of screen mask or hardware cursor scan line
+    input[dx] = end of screen mask or hardware cursor scan line
+
+    description = [[[
+        returns nothing
+    ]]]
+end
+
+int[INT 33,B]:
+    title = Read Mouse Motion Counters
+    int = 33
+    condition[ax] = b
+    returns = cx, dx
+
+    description = [[[
+        on return:
+        CX = horizontal mickey count (-32768 to 32767)
+        DX = vertical mickey count (-32768 to 32767)
+
+
+        - count values are 1/200 inch intervals (1/200 in. = 1 mickey)
+    ]]]
+end
+
+int[INT 33,C]:
+    title = Set Mouse User Defined Subroutine and Input Mask
+    int = 33
+    condition[ax] = c
+    input[es:dx] = far pointer to user interrupt
+    input[cx] = [[[
+        user interrupt mask:
+        │F-5│4│3│2│1│0│ user interrupt mask in CX
+        │	│ │ │ │ └─── cursor position changed
+        │	│ │ │ └──── left button pressed
+        │	│ │ └───── left button released
+        │	│ └────── right button pressed
+        │	└─────── right button released
+        └───────── unused
+    ]]]
+
+    description = [[[
+        returns nothing
+
+
+        - routine at ES:DX is called if an event occurs and the
+          corresponding bit specified in user mask is set
+        - routine at ES:DX receives parameters in the following
+          registers:
+
+          AX = condition mask causing call
+          CX = horizontal cursor position
+          DX = vertical cursor position
+          DI = horizontal counts
+          SI = vertical counts
+          DS = mouse driver data segment
+          BX = button state:
+
+             │F-2│1│0│
+               │  │ └─── left button (1 = pressed)
+               │  └──── right button (1 = pressed)
+               └────── unused
+
+        - initial call mask and user routine should be restore on exit
+          from user program
+        - user program may need to set DS to it's own segment
+        - see	~INT 33,14~
+    ]]]
+end
+
+int[INT 33,D]:
+    title = Mouse Light Pen Emulation On
+    int = 33
+    condition[ax] = d
+
+    description = [[[
+        returns nothing
+
+
+        - turns on light pen emulation;  the light pen is considered
+          down when both buttons are down;   when both buttons are
+          up the pen is considered off screen
+
+        - see	~INT 33,E~
+    ]]]
+end
+
+int[INT 33,E]:
+    title = Mouse Light Pen Emulation Off
+    int = 33
+    condition[ax] = e
+
+    description = [[[
+        returns nothing
+
+
+        - disables light pen emulation
+
+        - see	~INT 33,D~
+    ]]]
+end
+
+int[INT 33,F]:
+    title = Set Mouse Mickey Pixel Ratio
+    int = 33
+    condition[ax] = f
+    input[cx] = horizontal ratio (1..32767, default 8)
+    input[dx] = vertical ratio (1..32767, default 16)
+
+    description = [[[
+        returns nothing
+
+
+        - sets the ratio between physical cursor movement (mickeys) and
+          screen coordinate changes
+        - CX and DX must be unsigned (high bit must be 0)
+    ]]]
+end
+
+int[INT 33,10]:
+    title = Mouse Conditional OFF
+    int = 33
+    condition[ax] = 10
+    input[cx] = upper X screen coordinate
+    input[dx] = upper Y screen coordinate
+    input[si] = lower X screen coordinate
+    input[di] = lower Y screen coordinate
+
+    description = [[[
+        returns nothing
+
+
+        - defines screen region for updating in which the mouse is hidden
+          if found these coordinates (INT 33,1 must be used to turn cursor
+          on again)
+
+        - see  ~INT 33,1~
+    ]]]
+end
+
+int[INT 33,13]:
+    title = Set Mouse Double Speed Threshold
+    int = 33
+    condition[ax] = 13
+    input[dx] = threshold speed (mickeys per second, default 64)
+
+    description = [[[
+        returns nothing
+
+
+        - cursor speed is doubled when the cursor moves across the screen
+          at the threshold speed
+    ]]]
+end
+
+int[INT 33,14]:
+    title = Swap Interrupt Subroutines
+    int = 33
+    condition[ax] = 14
+    input[es:dx] = far pointer to user routine
+    input[cx] = [[[
+        user interrupt mask:
+        │F-8│7│6│5│4│3│2│1│0│ user interrupt mask in CX
+        │  │ │ │ │ │ │ │ └─── cursor position changed
+        │  │ │ │ │ │ │ └──── left button pressed
+        │  │ │ │ │ │ └───── left button released
+        │  │ │ │ │ └────── right button pressed
+        │  │ │ │ └─────── right button released
+        └──┴─┴─┴──────── unused
+    ]]]
+    returns = cx, es:dx
+
+    description = [[[
+        on return:
+        CX = previous user interrupt mask
+        ES:DX = far pointer to previous user interrupt
+
+        - routine at ES:DX is called if an event occurs and the
+          corresponding bit specified in user mask is set
+        - routine at ES:DX receives parameters in the following
+          registers:
+
+          AX = condition mask causing call
+          CX = horizontal cursor position
+          DX = vertical cursor position
+          DI = horizontal counts
+          SI = vertical counts
+          DS = mouse driver data segment
+          BX = button state:
+
+             │F-2│1│0│
+               │  │ └─── left button (1 = pressed)
+               │  └──── right button (1 = pressed)
+               └────── unused
+
+        - initial call mask and user routine should be restore on exit
+          from user program
+        - user program may need to set DS to it's own segment
+        - see	~INT 33,C~
+    ]]]
+end
+
+int[INT 33,15]:
+    title = Get Mouse Driver State and Memory Requirements
+    int = 33
+    condition[ax] = 15
+    returns = bx
+
+    description = [[[
+        on return
+        BX = buffer size need to hold current mouse state
+
+
+        - used before mouse functions 16h and 17h to determine memory
+          needed to save mouse state before giving up control of mouse
+          to another program
+    ]]]
+end
+
+int[INT 33,16]:
+    title = Save Mouse Driver State
+    int = 33
+    condition[ax] = 16
+    input[es:dx] = far pointer to mouse state save buffer
+
+    description = [[[
+        returns nothing
+
+
+        - used to save mouse information before relinquishing control
+          to another programs mouse handler
+        - see ~INT 33,15~   ~INT 33,17~
+    ]]]
+end
+
+int[INT 33,17]:
+    title = Restore Mouse Driver State
+    int = 33
+    condition[ax] = 17
+    input[es:dx] = far pointer to mouse state save buffer
+
+    description = [[[
+        returns nothing
+
+
+        - used to restore mouse information after regaining control
+          from another programs mouse handler
+        - see ~INT 33,15~   ~INT 33,16~
+    ]]]
+end
+
+int[INT 33,18]:
+    title = Set alternate subroutine call mask and address
+    int = 33
+    condition[ax] = 18
+    input[dx] = offset to function
+    input[cx] = [[[
+        user interrupt mask:
+        │F-8│7│6│5│4│3│2│1│0│ user interrupt mask in CX
+        │  │ │ │ │ │ │ │ └─── alt key pressed during event
+        │  │ │ │ │ │ │ └──── ctrl key pressed during event
+        │  │ │ │ │ │ └───── shift key pressed during event
+        │  │ │ │ │ └────── right button up event
+        │  │ │ │ └─────── right button down event
+        │  │ │ └──────── left button up event
+        │  │ └───────── left button down event
+        │  └────────── cursor moved
+        └──────────── unused
+    ]]]
+end
+
+int[INT 33,19]:
+    title = Get User Alternate Interrupt Address
+    int = 33
+    condition[ax] = 19
+    input[cx] = user interrupt call mask (see below)
+    returns = bx:dx, cx
+
+    description = [[[
+        on return:
+        BX:DX = user interrupt vector
+        CX = user interrupt call mask or zero if not found
+
+        	│F-8│7│6│5│4│3│2│1│0│ user interrupt mask in CX
+        	  │  │ │ │ │ │ │ │ └─── alt key pressed during event
+        	  │  │ │ │ │ │ │ └──── ctrl key pressed during event
+        	  │  │ │ │ │ │ └───── shift key pressed during event
+        	  │  │ │ │ │ └────── right button up event
+        	  │  │ │ │ └─────── right button down event
+        	  │  │ │ └──────── left button up event
+        	  │  │ └───────── left button down event
+        	  │  └────────── cursor moved
+        	  └──────────── unused
+
+        - returns vector to function defined by ~INT 33,18~
+        - searches the event handlers defined by INT 33,18 for a routine
+          with a call mask matching CX
+    ]]]
+end
+
+int[INT 33,1A]:
+    title = Set Mouse Sensitivity
+    int = 33
+    condition[ax] = 1a
+    input[bx] = horizontal coordinates per pixel  (≤ 100)
+    input[cx] = vertical coordinates per pixel  (≤ 100)
+    input[dx] = double speed threshold
+
+    description = [[[
+        returns nothing
+
+
+        - sets mouse sensitivity by setting the ratio of the mouse
+          coordinates per screen pixel
+        - provides same results as calls to both ~INT 33,F~ and ~INT 33,13~
+        - these values are not reset by ~INT 33,0~
+    ]]]
+end
+
+int[INT 33,1B]:
+    title = Get Mouse Sensitivity
+    int = 33
+    condition[ax] = 1b
+    returns = bx, cx, dx
+
+    description = [[[
+        on return:
+        BX = horizontal coordinates per pixel  (≤ 100)
+        CX = vertical coordinates per pixel  (≤ 100)
+        DX = double speed threshold
+
+
+        - returns mouse sensitivity information as the number of mouse
+          coordinates per screen pixel
+    ]]]
+end
+
+int[INT 33,1C]:
+    title = Set Mouse Interrupt Rate  (InPort only)
+    int = 33
+    condition[ax] = 1c
+    input[bx] = [[[
+        rate code
+        = 0	no interrupts
+        = 1	30 interrupts per second
+        = 2	50 interrupts per second
+        = 3	100 interrupts per second
+        = 4	200 interrupts per second
+    ]]]
+end
+
+int[INT 33,1D]:
+    title = Set Mouse CRT Page
+    int = 33
+    condition[ax] = 1d
+    input[bx] = CRT page number
+
+    description = [[[
+        returns nothing
+
+
+        - sets the CRT page which the mouse cursor is displayed
+        - see VIDEO PAGES
+    ]]]
+end
+
+int[INT 33,1E]:
+    title = Get Mouse CRT Page
+    int = 33
+    condition[ax] = 1e
+    returns = bx
+
+    description = [[[
+        on return:
+        BX = CRT page number cursor is displayed on
+
+
+        - see VIDEO PAGES
+    ]]]
+end
+
+int[INT 33,1F]:
+    title = Disable Mouse Driver
+    int = 33
+    condition[ax] = 1f
+    returns = ax, es:bx
+
+    description = [[[
+        on return:
+        AX = 001F if successful
+             FFFF if error
+        ES:BX = previous ~INT 33~ vector
+
+
+        - restores vectors for ~INT 10~ and INT 71 (8088/86) or INT 74 (286+)
+        - ~INT 33~ interrupt vector (software) is not affected
+        - use of the vector returned in ES:BX to restore the previous INT 33
+          vector can cause problems since it contains the value of INT 33
+          before the driver was installed; any other hooks into INT 33 set
+          after driver installation will not receive service
+    ]]]
+end
+
+int[INT 33,20]:
+    title = Enable Mouse Driver
+    int = 33
+    condition[ax] = 20
+
+    description = [[[
+        returns nothing
+
+
+        - reinstalls the mouse drivers interrupt vectors for INT 10 and
+          INT 71 (8088/86) and INT 74 (286/386)
+        - see ~INT 33,1F~
+    ]]]
+end
+
+int[INT 33,21]:
+    title = Reset Mouse Software
+    int = 33
+    condition[ax] = 21
+    returns = ax, bx
+
+    description = [[[
+        on return:
+        AX = 0021  mouse driver not installed
+             FFFF  mouse driver installed
+        BX = 2	mouse driver installed
+
+        - similar to ~INT 33,0~ but does not reset the mouse hardware or
+          display variables
+        - both AX and BX must be correct for successful reset
+        - interrupt routines set through ~INT 33,18~ are preserved
+        - resets the mouse to the following defaults:
+
+          .  mouse is positioned to screen center
+          .  mouse cursor is reset and hidden
+          .  no interrupts are enabled (mask = 0)
+          .  double speed threshold set to 64 mickeys per second
+          .  horizontal mickey to pixel ratio (8 to 8)
+          .  vertical mickey to pixel ratio (16 to 8)
+          .  max width and height are set to maximum for video mode
+    ]]]
+end
+
+int[INT 33,22]:
+    title = Set Language for Messages
+    int = 33
+    condition[ax] = 22
+    input[bx] = [[[
+        language number (with /L switch value):
+        = 0	English     n/a
+        = 1	French	    F
+        = 2	Dutch	    NL
+        = 3	German	    D
+        = 4	Swedish     S
+        = 5	Finnish     SF
+        = 6	Spanish     E
+        = 7	Portuguese  P
+        = 8	Italian     I
+    ]]]
+
+    description = [[[
+        returns nothing
+
+
+        - only works with international version of the mouse driver
+        - see	~INT 33,23~
+    ]]]
+end
+
+int[INT 33,23]:
+    title = Get Language Number
+    int = 33
+    condition[ax] = 23
+    returns = bx
+
+    description = [[[
+        on return:
+        BX = language number (with /L switch value):
+           = 0	English     n/a
+           = 1	French	    F
+           = 2	Dutch	    NL
+           = 3	German	    D
+           = 4	Swedish     S
+           = 5	Finnish     SF
+           = 6	Spanish     E
+           = 7	Portuguese  P
+           = 8	Italian     I
+
+        - only works with international version of the mouse driver
+        - returns English (0) if not international version
+
+        - see	~INT 33,22~
+    ]]]
+end
+
+int[INT 33,24]:
+    title = Get Driver Version, Mouse Type & IRQ Number
+    int = 33
+    condition[ax] = 24
+    returns = bh, bl, ch, cl
+
+    description = [[[
+        on return:
+        BH = major version (see below)
+        BL = minor version (see below)
+        CH = mouse type:
+           = 1	bus mouse
+           = 2	serial mouse
+           = 3	InPort mouse
+           = 4	PS/2  mouse
+           = 5	Hewlett Packard mouse
+        CL = IRQ number:
+           = 0	PS/2
+           = 2	IRQ 2
+           = 5	IRQ 5
+           = 7	IRQ 7
+
+        - version 6.1 would be represented as BH = 06h, BL = 10h
+    ]]]
+end

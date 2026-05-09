@@ -1,0 +1,929 @@
+int[INT 10,0]:
+    title = Set Video Mode
+    int = 10
+    condition[ah] = 0
+    input[al] = [[[
+        00  40x25 B/W text (CGA,EGA,MCGA,VGA)
+        = 01  40x25 16 color text (CGA,EGA,MCGA,VGA)
+        = 02  80x25 16 shades of gray text (CGA,EGA,MCGA,VGA)
+        = 03  80x25 16 color text (CGA,EGA,MCGA,VGA)
+        = 04  320x200 4 color graphics (CGA,EGA,MCGA,VGA)
+        = 05  320x200 4 color graphics (CGA,EGA,MCGA,VGA)
+        = 06  640x200 B/W graphics (CGA,EGA,MCGA,VGA)
+        = 07  80x25 Monochrome text (MDA,HERC,EGA,VGA)
+        = 08  160x200 16 color graphics (PCjr)
+        = 09  320x200 16 color graphics (PCjr)
+        = 0A  640x200 4 color graphics (PCjr)
+        = 0B  Reserved (EGA BIOS function 11)
+        = 0C  Reserved (EGA BIOS function 11)
+        = 0D  320x200 16 color graphics (EGA,VGA)
+        = 0E  640x200 16 color graphics (EGA,VGA)
+        = 0F  640x350 Monochrome graphics (EGA,VGA)
+        = 10  640x350 16 color graphics (EGA or VGA with 128K)
+        640x350 4 color graphics (64K EGA)
+        = 11  640x480 B/W graphics (MCGA,VGA)
+        = 12  640x480 16 color graphics (VGA)
+        = 13  320x200 256 color graphics (MCGA,VGA)
+        = 8x  EGA, MCGA or VGA ignore bit 7, see below
+        = 9x  EGA, MCGA or VGA ignore bit 7, see below
+    ]]]
+end
+
+int[INT 10,1]:
+    title = Set Cursor Type
+    int = 10
+    condition[ah] = 1
+    input[ch] = cursor starting scan line (cursor top) (low order 5 bits)
+    input[cl] = cursor ending scan line (cursor bottom) (low order 5 bits)
+
+    description = [[[
+        returns nothing
+
+
+        - cursor scan lines are zero based
+        - cursor size can also be set via the 6845 CRT controller
+        - cursor size can be determined using the CRTC,  ~INT 10,3~  or the
+          BIOS Data Area bytes 40:60 (ending scan line) and 40:61 (starting
+          scan line)
+        - the following is a list of the cursor scan lines associated with
+          most common adapters;  screen sizes over 40 lines may differ
+          depending on adapters.
+
+        Line	 Starting     Ending	  Character
+        Video	Count	 Scan Line    Scan Line   Point Size
+
+        CGA	 25	    06		 07	      08
+        MDA	 25	    0B		 0C	      0E
+        EGA	 25	    06		 07	      0E
+        EGA	 43	  04/06 	 07	      08
+        VGA	 25	    0D		 0E	      10
+        VGA	 40	    08		 09	      0A
+        VGA	 50	    06		 07	      08
+
+        - use CX = 2000h to disable cursor
+    ]]]
+end
+
+int[INT 10,2]:
+    title = Set Cursor Position
+    int = 10
+    condition[ah] = 2
+    input[bh] = page number (0 for graphics modes)
+    input[dh] = row
+    input[dl] = column
+
+    description = [[[
+        returns nothing
+
+
+        - positions relative to 0,0 origin
+        - 80x25 uses coordinates 0,0 to 24,79;	40x25 uses 0,0 to 24,39
+        - the 6845 can also be used to perform this function
+        - setting the data in the BIOS Data Area at location 40:50 does not
+          take immediate effect and is not recommended
+        - see	VIDEO PAGES   6845   BDA
+    ]]]
+end
+
+int[INT 10,3]:
+    title = Read Cursor Position and Size
+    int = 10
+    condition[ah] = 3
+    input[bh] = video page
+    returns = ch, cl, dh, dl
+
+    description = [[[
+        on return:
+        CH = cursor starting scan line (low order 5 bits)
+        CL = cursor ending scan line (low order 5 bits)
+        DH = row
+        DL = column
+
+
+        - returns data from BIOS DATA AREA locations 40:50, 40:60 and 40:61
+        - the 6845 can also be used to read the cursor position
+        - the return data can be circumvented by direct port I/O to the 6845
+          CRT Controller since this function returns the data found in the
+          BIOS Data Area without actually checking the controller
+    ]]]
+end
+
+int[INT 10,4]:
+    title = Read Light Pen Position
+    int = 10
+    condition[ah] = 4
+    returns = ah, bx, ch, cx, dh, dl
+
+    description = [[[
+        on return:
+        AH = 0	light pen switch not triggered
+           = 1	light pen triggered
+        BX = pixel column (0-319 or 0-639, mode dependent)
+        CH = raster line (0-199) (CGA and EGA modes 4, 5 and 6)
+        CX = raster line (EGA modes except 4, 5 and 6)
+        DH = row (0-24)
+        DL = column (0-79 or 0-79 mode dependent)
+
+
+        - data returned as a byte coordinate, leaving horizontal
+          accuracy to within 2 pixels (320) or 4 pixels (640)
+        - vertical accuracy within 2 lines
+        - PS/2's don't support the light pen interface
+    ]]]
+end
+
+int[INT 10,5]:
+    title = Select Active Display Page
+    int = 10
+    condition[ah] = 5
+    input[al] = new page number, see VIDEO PAGES
+    input[al] = [[[
+        80h to read CRT/CPU page registers
+        81h to set CPU page register
+    ]]]
+    input[bl] = CPU page register
+    input[bh] = CRT page register
+    input[bh] = CRT page register
+    input[bl] = CPU page register
+    returns = bh, bl
+
+    description = [[[
+        on return: (PCjr only)
+        BH = CRT page register
+        BL = CPU page register
+    ]]]
+end
+
+int[INT 10,6]:
+    title = Scroll Window Up
+    int = 10
+    condition[ah] = 6
+    input[al] = [[[
+        number of lines to scroll, previous lines are
+        blanked, if 0 or AL > screen size, window is blanked
+    ]]]
+    input[bh] = attribute to be used on blank line
+    input[ch] = row of upper left corner of scroll window
+    input[cl] = column of upper left corner of scroll window
+    input[dh] = row of lower right corner of scroll window
+    input[dl] = column of lower right corner of scroll window
+
+    description = [[[
+        returns nothing
+
+
+        - in video mode 4 (300x200 4 color) on the EGA, MCGA and VGA
+          this function scrolls page 0 regardless of the current page
+        - can be used to scroll graphics screens, using character coords
+        - on CGA's this function disables video adapter, causing flitter
+    ]]]
+end
+
+int[INT 10,7]:
+    title = Scroll Window Down
+    int = 10
+    condition[ah] = 7
+    input[al] = [[[
+        number of lines to scroll, previous lines are
+        blanked, if 0 or AL > screen size, window is blanked
+    ]]]
+    input[bh] = attribute to be used on blank line
+    input[ch] = row of upper left corner of scroll window
+    input[cl] = column of upper left corner of scroll window
+    input[dh] = row of lower right corner of scroll window
+    input[dl] = column of lower right corner of scroll window
+
+    description = [[[
+        returns nothing
+
+
+        - in video mode 4 (300x200 4 color) on the EGA, MCGA and VGA
+          this function scrolls page 0 regardless of the current page
+        - can be used to scroll graphics screens, using character coords
+        - on CGA's this function disables video adapter, causing flitter
+    ]]]
+end
+
+int[INT 10,8]:
+    title = Read Character and Attribute at Cursor Position
+    int = 10
+    condition[ah] = 8
+    input[bh] = display page
+    returns = ah, al
+
+    description = [[[
+        on return:
+        AH = attribute of character (alpha modes only)
+        AL = character at cursor position
+
+
+        - in video mode 4 (300x200 4 color) on the EGA, MCGA and VGA
+          this function works only on page zero
+    ]]]
+end
+
+int[INT 10,9]:
+    title = Write Character and Attribute at Cursor Position
+    int = 10
+    condition[ah] = 9
+    input[al] = ASCII character to write
+    input[bh] = display page  (or mode 13h, background pixel value)
+    input[bl] = character attribute (text) foreground color (graphics)
+    input[cx] = count of characters to write (CX >= 1)
+
+    description = [[[
+        returns nothing
+
+
+        - does not move the cursor
+        - in graphics mode (except mode 13h), if BL bit 7=1 then
+          value of BL is XOR'ed with the background color
+    ]]]
+end
+
+int[INT 10,A]:
+    title = Write Character Only at Current Cursor Position
+    int = 10
+    condition[ah] = a
+    input[al] = ASCII character to write
+    input[bh] = display page  (or mode 13h, background pixel value)
+    input[bl] = foreground color (graphics mode only)
+    input[cx] = count of characters to write (CX >= 1)
+end
+
+int[INT 10,B]:
+    title = Set Color Palette
+    int = 10
+    condition[ah] = b
+    input[bh] = [[[
+        palette color ID
+        = 0	to set background and border color
+        = 1	to select 4 color palette
+    ]]]
+    input[bl] = [[[
+        color value (when BH = 0)
+        = palette value (when BH = 1)
+    ]]]
+end
+
+int[INT 10,C]:
+    title = Write Graphics Pixel at Coordinate
+    int = 10
+    condition[ah] = c
+    input[al] = color value (XOR'ED with current pixel if bit 7=1)
+    input[bh] = page number, see VIDEO PAGES
+    input[cx] = column number (zero based)
+    input[dx] = row number (zero based)
+
+    description = [[[
+        returns nothing
+
+
+        - if bit 7 is 1, color specified is XOR'ed with current pixel
+        - page number in BH ignored for 320x200 4 color graphics mode
+        - this function is known to destroy AX and possibly SI and DI on
+          on some PS/2 VGA systems
+    ]]]
+end
+
+int[INT 10,D]:
+    title = Read Graphics Pixel at Coordinate
+    int = 10
+    condition[ah] = d
+    input[bh] = page number, see VIDEO PAGES
+    input[cx] = column number (zero based)
+    input[dx] = row number (zero based)
+    returns = al
+
+    description = [[[
+        on return:
+        AL = color of pixel read
+
+
+        - 64K IBM EGAs with BIOS dated 9/13/84 in 350 line video
+          modes,  return invalid data in AL
+        - page number in BH ignored for 320x200 4 color graphics mode
+    ]]]
+end
+
+int[INT 10,E]:
+    title = Write Text in Teletype Mode
+    int = 10
+    condition[ah] = e
+    input[al] = ASCII character to write
+    input[bh] = page number (text modes)
+    input[bl] = foreground pixel color (graphics modes)
+
+    description = [[[
+        returns nothing
+
+
+        - cursor advances after write
+        - characters BEL (7), BS (8), LF (A), and CR (D) are
+          treated as control codes
+        - for some older BIOS (10/19/81), the BH register must point
+          to the currently displayed page
+        - on CGA adapters this function can disable the video signal while
+          performing the output which causes flitter.
+    ]]]
+end
+
+int[INT 10,F]:
+    title = Get Video State
+    int = 10
+    condition[ah] = f
+    returns = ah, al, bh
+
+    description = [[[
+        on return:
+        AH = number of screen columns
+        AL = mode currently set (see VIDEO MODES)
+        BH = current display page
+
+
+        - video modes greater than 13h on EGA, MCGA and VGA indicate
+          ~INT 10,0~ was called with the high bit of the mode (AL) set
+          to 1, meaning the display does not need cleared
+        - function returns byte value at 40:49;  On EGA, MCGA and
+          VGA bit 7 of register AL is determined by bit 7 of BIOS Data
+          Area byte 40:87.   This bit is usually set by INT 10,0
+          with bit 7 of the requested mode (in AL) set to 1
+    ]]]
+end
+
+int[INT 10,10]:
+    title = Set/Get Palette Registers (EGA/VGA)
+    int = 10
+    condition[ah] = 10
+    input[bh] = color value
+    input[bl] = palette register
+    input[bh] = color value
+    input[es:dx] = [[[
+        pointer to 17 byte table representing 16 palette
+        registers and border color register
+    ]]]
+    input[bl] = [[[
+        0  enable intensity
+        1  enable blinking
+    ]]]
+    input[bl] = palette register to read (0-15)
+    returns = bh
+
+    description = [[[
+        on return:
+          BH = value of palette register
+
+
+        AL = 08  read border color (overscan register, PS/2)
+
+        on return:
+          BH = value of border color (overscan register)
+
+
+        AL = 09  read palette registers and border (PS/2)
+           ES:DX = pointer to 17 byte table representing 16 palette
+        	   registers and border color register
+
+        on return:
+        ES:DX = pointer to table provided as input
+
+
+        AL = 10  set DAC color register
+           BX = color register to set
+           CH = green value
+           CL = blue value
+           DH = red value
+
+
+        AL = 12  set block of DAC color registers
+           BX = first color register to set
+           CX = number of color registers to set
+           ES:DX = pointer to table of color values to set
+
+
+        AL = 13  set attribute controller color select state
+           BL = 0  set Mode Control register bit 7
+              BH = value for bit 7
+           BL = 1  set color select register
+              BH = value for color select register
+
+
+        AL = 15  read DAC color register (PS/2)
+           BX = color register to read
+
+        on return:
+        CH = green value
+        CL = blue value
+        DH = red value
+
+
+        AL = 17  read block of DAC color registers
+           BX = first color register to read
+           CX = number of color registers to read
+           ES:DX = pointer to buffer for color registers
+
+        on return:
+        ES:DX = pointer to color table provided as input
+
+
+        AL = 18  update video DAC mask register
+           BL = new mask
+
+
+        AL = 19  read video DAC mask register
+
+        on return:
+        BL = value read from video DAC mask register
+
+
+        AL = 1A  read color page state
+           BL = bit 7 of Mode Control Register
+           BH = bits 2 thru 3 of Color select register if BL = 0
+              = bits 0 thru 3 of Color select register if BL = 1
+
+        on return:
+        BL = current paging mode
+        CX = current page
+
+
+
+        AL = 1B  sum color values to shades of gray
+           BX = first color register to sum
+           CX = number of color registers to sum
+
+
+        - controls the pixel color mapping bit values
+        - BIOS extension to EGA/VGA systems
+    ]]]
+end
+
+int[INT 10,11]:
+    title = Character Generator Routine (EGA/VGA)
+    int = 10
+    condition[ah] = 11
+    input[bh] = number of bytes per character
+    input[bl] = table in character generator RAM
+    input[cx] = count of characters in table
+    input[dx] = ASCII code of first character defined
+    input[es:bp] = pointer to user table
+    input[bl] = table in character generator RAM
+    input[bl] = table in character generator RAM
+    input[bl] = [[[
+        value for character Map Select register (EGA,VGA)
+        = character generator RAM table numbers (MCGA)
+    ]]]
+    input[bl] = table in character generator RAM
+    input[bh] = bytes per character (points)
+    input[bl] = table in character generator RAM
+    input[cx] = number of characters defined in table
+    input[dx] = ASCII code of first character defined
+    input[es:bp] = pointer to user table
+    input[bl] = table in character generator RAM
+    input[bl] = table in character generator RAM
+    input[bl] = table in character generator RAM
+    input[es:bp] = pointer to user table
+    input[bl] = [[[
+        row specifier
+        = 0 - user specified  (DL = rows)
+        = 1 is 14 rows
+        = 2 is 25 rows
+        = 3 is 43 rows
+    ]]]
+    input[cx] = bytes per character (points)
+    input[dl] = rows (when BL = 0)
+    input[es:bp] = pointer to user table
+    input[bl] = number of rows (see AL=21)
+    input[dl] = rows (when BL = 0)
+    input[bl] = row specifier (see AL=21)
+    input[dl] = rows (when BL = 0)
+    input[bl] = row specifier (see AL=21)
+    input[dl] = rows (when BL = 0)
+    input[bh] = [[[
+        information desired:
+        = 0  ~INT 1F~ pointer
+        = 1  INT 44h pointer
+        = 2  ROM 8x14 pointer
+        = 3  ROM 8x8 double dot pointer (base)
+        = 4  ROM 8x8 double dot pointer (top)
+        = 5  ROM 9x14 alpha alternate pointer
+        = 6  ROM 8x16 character table pointer
+        = 7  ROM 9x16 alternate character table pointer
+    ]]]
+    returns = cx, dl, es:bp
+
+    description = [[[
+        on return:
+        CX = bytes per character (points)
+        DL = rows (less 1)
+        ES:BP = pointer to table
+    ]]]
+end
+
+int[INT 10,12]:
+    title = Video Subsystem Configuration (EGA/VGA)
+    int = 10
+    condition[ah] = 12
+    returns = bh, bl, ch, cl
+
+    description = [[[
+        on return:
+        BH = 0 if color mode in effect
+           = 1 if mono mode in effect
+        BL = 0 if 64k EGA memory
+           = 1 if 128k EGA memory
+           = 2 if 192k EGA memory
+           = 3 if 256k EGA memory
+        CH = feature bits
+        CL = switch settings
+
+
+        BL = 20  select alternate print screen routine
+
+        BL = 30  select scan lines for alphanumeric modes
+           AL = 0  200 scan lines
+              = 1  350 scan lines
+              = 2  400 scan lines
+
+        on return:
+        AL = 12
+
+
+        BL = 31  select default palette loading
+           AL = 0 enable default palette loading
+              = 1 disable default palette loading
+
+        on return:
+        AL = 12
+
+
+        BL = 32  CPU access to video RAM
+           AL = 0  enable CPU access to video RAM and I/O ports
+              = 1  disable CPU access to video RAM and I/O ports
+
+        on return:
+        AL = 12
+
+
+        BL = 33  Gray scale summing
+           AL = 0  enable gray scale summing
+              = 2  disable gray scale summing
+
+        on return:
+        AL = 12
+
+
+        BL = 34  cursor emulation
+           AL = 0  enable cursor emulation
+              = 1  disable cursor emulation
+
+        on return:
+        AL = 12
+
+
+        BL = 35  PS/2 video display switching
+           AL = 0 initial adapter video off
+              = 1 initial planar video on
+              = 2 switch active video off
+              = 3 switch inactive video on
+           ES:DX pointer to 128 byte save area (when AL = 0, 2 or 3)
+
+        on return:
+        AL = 12
+
+
+        BL = 36  video refresh control
+           AL = 0 enable refresh
+              = 1 disable refresh
+
+        on return:
+        AL = 12
+    ]]]
+end
+
+int[INT 10,13]:
+    title = Write String (BIOS versions from 1/10/86)
+    int = 10
+    condition[ah] = 13
+    input[al] = [[[
+        write mode (see bit settings below)
+        = 0 string is chars only, attribute in BL, cursor not moved
+        = 1 string is chard only, attribute in BL, cursor moved
+        = 2 string contains chars and attributes, cursor not moved
+        = 3 string contains chars and attributes, cursor moved
+    ]]]
+    input[bh] = video page number
+    input[bl] = attribute if mode 0 or 1 (AL bit 1=0)
+    input[cx] = length of string (ignoring attributes)
+    input[dh] = row coordinate
+    input[dl] = column coordinate
+    input[es:bp] = pointer to string
+
+    description = [[[
+        returns nothing
+
+
+        - BEL, BS, CR, LF are treated as ASCII control codes
+        - wraps data and scrolls if unable to fit data on one line
+    ]]]
+end
+
+int[INT 10,14]:
+    title = Load LCD Character Font (convertible only)
+    int = 10
+    condition[ah] = 14
+    input[es:di] = pointer to character font
+    input[cx] = number of characters to store
+    input[dx] = char offset into ram font area
+    input[bh] = number of bytes per character
+    input[bl] = [[[
+        0  load main font (block 0)
+        = 1  load alternate font (block 1)
+    ]]]
+    input[bl] = [[[
+        0  load main font (block 0)
+        = 1  load alternate font (block 1)
+    ]]]
+    input[bl] = [[[
+        0  ignore high intensity attribute
+        = 1  map high intensity to underscore
+        = 2  map high intensity to reverse video
+        = 3  map high intensity to select alternate font
+    ]]]
+end
+
+int[INT 10,15]:
+    title = Return Physical Display Parms (convertible)
+    int = 10
+    condition[ah] = 15
+    returns = ax, es:di
+
+    description = [[[
+        on return:
+        AX = alternate display adapter type
+        ES:DI = pointer to parameter table:
+
+
+        Offset Size	  Description
+
+          01   word   monitor model number
+          02   word   vertical pels per meter
+          03   word   horizontal pels per meter
+          04   word   total number of vertical pels
+          05   word   total number of horizontal pels
+          06   word   horizontal pel separation in micrometers
+          07   word   vertical pel separation in micrometers
+    ]]]
+end
+
+int[INT 10,1A]:
+    title = Video Display Combination (VGA)
+    int = 10
+    condition[ah] = 1a
+    input[al] = [[[
+        00 get video display combination
+        = 01 set video display combination
+    ]]]
+    input[bl] = active display  (see table below)
+    input[bh] = inactive display
+    returns = al, bl, bh
+
+    description = [[[
+        on return:
+        AL = 1A, if a valid function was requested in AH
+        BL = active display  (AL=00, see table below)
+        BH = inactive display  (AL=00)
+
+        Valid display codes:
+
+         FF  Unrecognized video system
+         00  No display
+         01  MDA with monochrome display
+         02  CGA with color display
+         03  Reserved
+         04  EGA with color display
+         05  EGA with monochrome display
+         06  Professional graphics controller
+         07  VGA with analog monochrome display
+         08  VGA with analog color display
+         09  Reserved
+         0A  MCGA with digital color display
+         0B  MCGA with analog monochrome display
+         0C  MCGA with analog color display
+
+        - returns value at byte 40:8A indicating display combination status
+        - used to detect video display capabilities
+    ]]]
+end
+
+int[INT 10,1B]:
+    title = Video BIOS Functionality and
+    int = 10
+    condition[ah] = 1b
+    input[bx] = implementation type (must be zero)
+    input[es:di] = pointer to 64 byte buffer
+    returns = al, es:di
+
+    description = [[[
+        on return:
+        AL = 1B
+        ES:DI = pointer to updated buffer  (see below)
+
+
+        - returns static and dynamic information about the current
+          state and capabilities of the current video system
+        - bytes 0-3 of the dynamic data table at ES:DI contain a far
+          pointer to the video static information table
+
+
+        Video BIOS Dynamic Functionality State Table (MCGA/VGA)
+
+        Dynamic Video State Table
+
+        00  dword   address of static functionality table
+        04  byte    video mode
+        05  word    number of columns
+        07  word    length of displayed video buffer (# bytes)
+        09  word    start address of upper left corner of video buffer
+        0B  16bytes cursor position table for 8 pages (col,row)
+        1B  byte    cursor end line
+        1C  byte    cursor start line
+        1D  byte    active video page
+        1E  word    I/O port for CRTC address register
+        20  byte    current value of CRTC 3x8 register
+        21  byte    current value of CRTC 3x9 register
+        22  byte    number of displayed character rows
+        23  word    height of character matrix (points)
+        25  byte    active display combination code
+        26  byte    inactive display combination code
+        27  word    number of displayed colors (mono = 0)
+        29  byte    number of supported video pages
+        2A  byte    raster scan lines 0=200, 1=350, 2=400, 3=480
+        2B  byte    text character table used
+        2C  byte    text character table used
+        2D  byte    other state information:
+
+        	│7│6│5│4│3│2│1│0│ State Information byte at offset 2D
+        	 │ │ │ │ │ │ │ └─── 1 = all modes active (MCGA always 0)
+        	 │ │ │ │ │ │ └──── 1 = gray scale summing enabled
+        	 │ │ │ │ │ └───── 1 = monochrome display attached
+        	 │ │ │ │ └────── 1 = default palette loading disabled
+        	 │ │ │ └─────── 1 = cursor emulation enabled
+        	 │ │ └──────── 1 = blinking attribute enabled
+        	 └─┴───────── 1 = reserved
+
+        2E 3bytes   reserved
+        31  byte    video RAM available 0=64K, 1=128K, 2=192K, 3=256K
+        32  byte    save area status
+
+        	│7│6│5│4│3│2│1│0│ Save Area Status
+        	 │ │ │ │ │ │ │ └─── 1 = two text char sets are active
+        	 │ │ │ │ │ │ └──── 1 = dynamic save area is active
+        	 │ │ │ │ │ └───── 1 = text char set override is active
+        	 │ │ │ │ └────── 1 = graphics char set is override active
+        	 │ │ │ └─────── 1 = palette override is active
+        	 │ │ └──────── 1 = display combination code ext. active
+        	 └─┴───────── 1 = reserved
+
+        33  dword   reserved
+
+
+        Video BIOS Static Functionality Table	(EGA/VGA)
+
+        	│7│6│5│4│3│2│1│0│ Video modes supported, byte at offset 00
+        	 │ │ │ │ │ │ │ └─── 1 = mode 0
+        	 │ │ │ │ │ │ └──── 1 = mode 1
+        	 │ │ │ │ │ └───── 1 = mode 2
+        	 │ │ │ │ └────── 1 = mode 3
+        	 │ │ │ └─────── 1 = mode 4
+        	 │ │ └──────── 1 = mode 5
+        	 │ └───────── 1 = mode 6
+        	 └────────── 1 = mode 7
+
+        	│7│6│5│4│3│2│1│0│ Video modes supported, byte at offset 01
+        	 │ │ │ │ │ │ │ └─── 1 = mode 8
+        	 │ │ │ │ │ │ └──── 1 = mode 9
+        	 │ │ │ │ │ └───── 1 = mode A
+        	 │ │ │ │ └────── 1 = mode B
+        	 │ │ │ └─────── 1 = mode C
+        	 │ │ └──────── 1 = mode D
+        	 │ └───────── 1 = mode E
+        	 └────────── 1 = mode F
+
+        	│7│6│5│4│3│2│1│0│ Video modes supported, byte at offset 02
+        	 │ │ │ │ │ │ │ └─── 1 = mode 10
+        	 │ │ │ │ │ │ └──── 1 = mode 11
+        	 │ │ │ │ │ └───── 1 = mode 12
+        	 │ │ │ │ └────── 1 = mode 13
+        	 └─┴─┴─┴─────── reserved
+
+        03  dword  reserved
+        07  byte   scan lines supported in text modes
+
+        	│7│6│5│4│3│2│1│0│ Scan lines supported, byte at offset 07
+        	 │ │ │ │ │ │ │ └─── 1 = 200 lines
+        	 │ │ │ │ │ │ └──── 1 = 350 lines
+        	 └─┴─┴─┴─┴─┴───── 1 = 400 lines
+
+        08  byte   max number of displayable text character sets
+        09  byte   # of text definition tables in char generator RAM
+        0A  byte   other capability flags
+
+        	│7│6│5│4│3│2│1│0│ Other flags, byte at offset 0A
+        	 │ │ │ │ │ │ │ └─── 1 = all modes (0 on MCGA)
+        	 │ │ │ │ │ │ └──── 1 = gray scale summing
+        	 │ │ │ │ │ └───── 1 = character set loading
+        	 │ │ │ │ └────── 1 = default palette loading
+        	 │ │ │ └─────── 1 = cursor emulation
+        	 │ │ └──────── 1 = 64 color palette
+        	 │ └───────── 1 = video DAC loading
+        	 └────────── 1 = DAC controlled by ACCS
+
+        0B  byte   other capability flags
+
+        	│7│6│5│4│3│2│1│0│ Other flags, byte at offset 0B
+        	 │ │ │ │ │ │ │ └─── 1 = light pen support
+        	 │ │ │ │ │ │ └──── 1 = save/restore video state
+        	 │ │ │ │ │ └───── 1 = blinking/background intensity
+        	 │ │ │ │ └────── 1 = display combination code
+        	 └─┴─┴─┴─────── reserved
+
+        0C  word   reserved
+        0E  byte   save area capabilities
+
+        	│7│6│5│4│3│2│1│0│  save area capabilities at offset 0E
+        	 │ │ │ │ │ │ │ └──── 1 = multiple text character sets
+        	 │ │ │ │ │ │ └───── 1 = dynamic save area
+        	 │ │ │ │ │ └────── 1 = text character set override
+        	 │ │ │ │ └─────── 1 = graphics character set override
+        	 │ │ │ └──────── 1 = palette override
+        	 │ │ └───────── 1 = display combination code extension
+        	 └─┴────────── reserved
+
+        0F  byte    reserved
+    ]]]
+end
+
+int[INT 10,1C]:
+    title = Save/Restore Video State  (VGA only)
+    int = 10
+    condition[ah] = 1c
+    input[cx] = [[[
+        requested states
+        bit 0: video hardware state
+        bit 1: video BIOS data areas
+        bit 2: video DAC state
+    ]]]
+    returns = al, bx
+
+    description = [[[
+        on return:
+        AL = 1C
+        BX = buffer size in 64 byte blocks
+
+        AL = 1	save requested state
+           CX = requested states (see AL = 0)
+           ES:BX = pointer to buffer
+
+        returns nothing
+
+        AL = 2	restore requested states
+           CX = requested states (see AL = 0)
+           ES:BX = pointer to buffer
+
+        returns nothing
+    ]]]
+end
+
+int[INT 10,FE]:
+    title = Get DESQView/TopView Virtual Screen Regen Buffer
+    int = 10
+    condition[ah] = fe
+    input[es:di] = set to sentinel value (test for INT 10,FE supported)
+    input[es:di] = [[[
+        address of DESQView/TopView video buffer, DI will always
+        be zero
+    ]]]
+end
+
+int[INT 10,FF]:
+    title = Update DESQView/TopView Virtual Screen Regen Buffer
+    int = 10
+    condition[ah] = ff
+    input[cx] = number of characters changed
+    input[es:di] = [[[
+        pointer to first character in buffer to change,  ES is
+        set to segment returned by ~INT 10,FE~
+    ]]]
+
+    description = [[[
+        returns nothing
+
+
+        - the physical screen does not get updated until INT 10,FF is
+          called in TopView
+        - it is not necessary to make this call under DESQView since it
+          handles updates automatically
+        - calling this function under DESQView will cancel the automatic
+          update mode
+    ]]]
+end
