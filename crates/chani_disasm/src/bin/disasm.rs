@@ -6,7 +6,7 @@ use std::{
 
 use chani_disasm::{
     Address,
-    layout::{WidgetKind, generate_widgets},
+    layout::{LayoutOptions, WidgetKind, generate_widgets_with_options},
     project::Project,
     seg_dataflow::SegVal,
 };
@@ -15,12 +15,13 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let show_dataflow = args.iter().any(|a| a == "--dataflow");
     let show_html = args.iter().any(|a| a == "--html");
+    let show_call_state = args.iter().any(|a| a == "--show-call-state");
     let path = args.into_iter().skip(1).find(|a| !a.starts_with('-'));
 
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("Usage: disasm [--dataflow] [--html] <file>");
+            eprintln!("Usage: disasm [--dataflow] [--html] [--show-call-state] <file>");
             std::process::exit(1);
         }
     };
@@ -51,6 +52,8 @@ fn main() {
 
     let mut stdout = io::BufWriter::new(io::stdout().lock());
 
+    let options = LayoutOptions { show_call_state };
+
     if show_dataflow {
         if let Err(e) = print_dataflow(&project, &mut stdout)
             && e.kind() != io::ErrorKind::BrokenPipe
@@ -62,7 +65,7 @@ fn main() {
     }
 
     if show_html {
-        if let Err(e) = print_listing_html(&project, &path, &mut stdout)
+        if let Err(e) = print_listing_html(&project, &path, &mut stdout, options)
             && e.kind() != io::ErrorKind::BrokenPipe
         {
             eprintln!("error: {e}");
@@ -71,7 +74,7 @@ fn main() {
         return;
     }
 
-    if let Err(e) = print_listing(&project, &mut stdout)
+    if let Err(e) = print_listing(&project, &mut stdout, options)
         && e.kind() != io::ErrorKind::BrokenPipe
     {
         eprintln!("error: {e}");
@@ -79,9 +82,9 @@ fn main() {
     }
 }
 
-fn print_listing<W: Write>(project: &Project, w: &mut W) -> io::Result<()> {
+fn print_listing<W: Write>(project: &Project, w: &mut W, options: LayoutOptions) -> io::Result<()> {
     let t0 = std::time::Instant::now();
-    let (widgets, total_rows) = generate_widgets(project);
+    let (widgets, total_rows) = generate_widgets_with_options(project, options);
     let t1 = std::time::Instant::now();
 
     let mut buf = String::with_capacity(120);
@@ -135,6 +138,7 @@ fn widget_class(kind: &WidgetKind) -> &'static str {
         WidgetKind::AssumeDir => "assume",
         WidgetKind::Comment => "comment",
         WidgetKind::XrefIn => "xref-in",
+        WidgetKind::XrefOut => "xref-out",
     }
 }
 
@@ -150,7 +154,12 @@ fn html_escape(s: &str, out: &mut String) {
     }
 }
 
-fn print_listing_html<W: Write>(project: &Project, path: &str, w: &mut W) -> io::Result<()> {
+fn print_listing_html<W: Write>(
+    project: &Project,
+    path: &str,
+    w: &mut W,
+    options: LayoutOptions,
+) -> io::Result<()> {
     let title = Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -201,7 +210,7 @@ a:hover {{ text-decoration: underline; }}
     }
 
     let t0 = std::time::Instant::now();
-    let (widgets, total_rows) = generate_widgets(project);
+    let (widgets, total_rows) = generate_widgets_with_options(project, options);
     let t1 = std::time::Instant::now();
 
     let block_break_rows: HashSet<u32> = widgets
@@ -242,29 +251,34 @@ a:hover {{ text-decoration: underline; }}
                     buf.push_str("</span>");
                 }
                 WidgetKind::Operand { .. } => {
-                    let anchor = widget.link_addr
-                        .map(|a| addr_to_anchor(project, a))
-                        .or_else(|| label_to_anchor.get(widget.text.as_str()).cloned());
-                    if let Some(anchor) = anchor {
-                        buf.push_str("<a href=\"#");
-                        buf.push_str(&anchor);
-                        buf.push_str("\" class=\"operand\">");
-                        html_escape(&widget.text, &mut buf);
-                        buf.push_str("</a>");
-                    } else {
-                        buf.push_str("<span class=\"operand\">");
-                        html_escape(&widget.text, &mut buf);
-                        buf.push_str("</span>");
-                    }
+                    render_operand_html(
+                        &widget.text,
+                        widget.link_addr,
+                        project,
+                        &label_to_anchor,
+                        &mut buf,
+                    );
                 }
                 WidgetKind::XrefIn => {
                     buf.push_str("<span class=\"xref-in\">");
-                    render_xref_html(&widget.text, widget.link_addr, project, &label_to_anchor, &mut buf);
+                    render_xref_html(
+                        &widget.text,
+                        widget.link_addr,
+                        project,
+                        &label_to_anchor,
+                        &mut buf,
+                    );
                     buf.push_str("</span>");
                 }
                 WidgetKind::Data => {
                     buf.push_str("<span class=\"data\">");
-                    render_data_html(&widget.text, widget.link_addr, project, &label_to_anchor, &mut buf);
+                    render_data_html(
+                        &widget.text,
+                        widget.link_addr,
+                        project,
+                        &label_to_anchor,
+                        &mut buf,
+                    );
                     buf.push_str("</span>");
                 }
                 _ => {
@@ -306,7 +320,7 @@ fn render_xref_html(
     buf: &mut String,
 ) {
     // text format: "; ← src (kind)"
-    let prefix = "; \u{2190} ";
+    let prefix = "; <- ";
     let Some(rest) = text.strip_prefix(prefix) else {
         html_escape(text, buf);
         return;
@@ -336,6 +350,73 @@ fn render_xref_html(
     html_escape(src, buf);
     buf.push_str("</a>");
     html_escape(suffix, buf);
+}
+
+/// Render an operand widget's HTML. Handles three cases, in order:
+///   1. `link_addr` is set (e.g. branch target on a `call`/`jmp`): wrap the
+///      whole text in an `<a>` pointing at that address.
+///   2. The whole text exactly matches a known label name: wrap the whole
+///      text. (Bare-name operands like `mov ax, my_label`.)
+///   3. Otherwise scan the text for identifier-shaped tokens and wrap any
+///      that match a known label. This is what makes data references inside
+///      a memory-expression operand clickable — e.g. `byte ptr [data_03810]`
+///      gets rendered as `byte ptr [<a>data_03810</a>]`.
+fn render_operand_html(
+    text: &str,
+    link_addr: Option<Address>,
+    project: &Project,
+    label_map: &HashMap<&str, String>,
+    buf: &mut String,
+) {
+    if let Some(addr) = link_addr {
+        let anchor = addr_to_anchor(project, addr);
+        buf.push_str("<a href=\"#");
+        buf.push_str(&anchor);
+        buf.push_str("\" class=\"operand\">");
+        html_escape(text, buf);
+        buf.push_str("</a>");
+        return;
+    }
+
+    if let Some(anchor) = label_map.get(text) {
+        buf.push_str("<a href=\"#");
+        buf.push_str(anchor);
+        buf.push_str("\" class=\"operand\">");
+        html_escape(text, buf);
+        buf.push_str("</a>");
+        return;
+    }
+
+    buf.push_str("<span class=\"operand\">");
+    let bytes = text.as_bytes();
+    let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+    let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0usize;
+    let mut last = 0usize;
+    while i < bytes.len() {
+        if !is_id_start(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i + 1;
+        while end < bytes.len() && is_id_cont(bytes[end]) {
+            end += 1;
+        }
+        let ident = &text[start..end];
+        if let Some(anchor) = label_map.get(ident) {
+            html_escape(&text[last..start], buf);
+            buf.push_str("<a href=\"#");
+            buf.push_str(anchor);
+            buf.push_str("\">");
+            html_escape(ident, buf);
+            buf.push_str("</a>");
+            last = end;
+        }
+        i = end;
+    }
+    html_escape(&text[last..], buf);
+    buf.push_str("</span>");
 }
 
 fn render_data_html(

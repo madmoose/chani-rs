@@ -53,7 +53,10 @@ impl Document {
                 }
                 Token::DictEnd { name, line } => {
                     let dict = stack.pop().ok_or_else(|| {
-                        format!("line {line}: unexpected 'end' for '{}' with no open dictionary", name)
+                        format!(
+                            "line {line}: unexpected 'end' for '{}' with no open dictionary",
+                            name
+                        )
                     })?;
                     if dict.name != name {
                         return Err(format!(

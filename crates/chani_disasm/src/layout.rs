@@ -6,9 +6,18 @@ use crate::{
     DataWidth, DecodedInstruction, DisplayContext, SmallString,
     data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType},
     disassemble,
-    opcode_table::ArgType,
+    opcode_table::{ArgType, Opcode},
     project::{self, AttrType, FileFormat, Project, Segment, SegmentIdx},
+    seg_dataflow::SegVal,
 };
+
+/// Per-listing rendering options.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct LayoutOptions {
+    /// Append an inline comment after each direct `call` summarizing every
+    /// DS/ES/SS register the callee summary changed to a `Known(_)` value.
+    pub show_call_state: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WidgetKind {
@@ -27,6 +36,7 @@ pub enum WidgetKind {
     AssumeDir,
     Comment,
     XrefIn,
+    XrefOut,
 }
 
 #[derive(Debug, Clone)]
@@ -55,8 +65,10 @@ pub struct LayoutBuilder<'a> {
     y: u32,
     line_state: LineState,
     ctx: &'a DisplayContext<'a>,
+    options: LayoutOptions,
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum LineState {
     StartOfLine,
@@ -71,6 +83,16 @@ impl<'a> LayoutBuilder<'a> {
         seg_idx: SegmentIdx,
         ofs: u32,
         ctx: &'a DisplayContext<'a>,
+    ) -> Self {
+        Self::new_with_options(project, seg_idx, ofs, ctx, LayoutOptions::default())
+    }
+
+    pub fn new_with_options(
+        project: &'a Project,
+        seg_idx: SegmentIdx,
+        ofs: u32,
+        ctx: &'a DisplayContext<'a>,
+        options: LayoutOptions,
     ) -> Self {
         let widgets = Widgets::new();
         let label_x0 = project.segments[seg_idx].name.len() as u32 + 1 + 4 + 1;
@@ -89,6 +111,7 @@ impl<'a> LayoutBuilder<'a> {
             y,
             line_state: LineState::StartOfLine,
             ctx,
+            options,
         }
     }
 
@@ -175,8 +198,19 @@ impl<'a> LayoutBuilder<'a> {
         }
     }
 
+    /// Rightmost column already occupied on row `y`, i.e. the smallest x at
+    /// which a new widget would not overlap any existing content.
+    fn line_end_x(&self, y: u32) -> u32 {
+        self.widgets
+            .iter()
+            .filter(|w| w.y == y)
+            .map(|w| w.x + w.text.len() as u32)
+            .max()
+            .unwrap_or(0)
+    }
+
     fn layout_inline_comment(&mut self, comment: &str) {
-        let x = self.comment_x0;
+        let x = self.comment_x0.max(self.line_end_x(self.y) + 1);
         self.widgets.push(Widget {
             kind: WidgetKind::Comment,
             seg_idx: self.seg_idx,
@@ -189,11 +223,12 @@ impl<'a> LayoutBuilder<'a> {
     }
 
     fn layout_inline_comment_at(&mut self, comment: &str, y: u32) {
+        let x = self.comment_x0.max(self.line_end_x(y) + 1);
         self.widgets.push(Widget {
             kind: WidgetKind::Comment,
             seg_idx: self.seg_idx,
             ofs: self.base_ofs,
-            x: self.comment_x0,
+            x,
             y,
             text: format!("; {comment}"),
             link_addr: None,
@@ -220,7 +255,7 @@ impl<'a> LayoutBuilder<'a> {
                 .map(|i| i.opcode.as_str())
                 .unwrap_or("jmp");
             let label = self.fmt_xref_src(src);
-            let text: SmallString = format!("; <- {label} ({kind})").into();
+            let text: SmallString = format!("; <- {label} ({kind})");
             self.add(self.label_x0, WidgetKind::XrefIn, text);
             self.set_last_link(src);
             self.new_line();
@@ -231,7 +266,7 @@ impl<'a> LayoutBuilder<'a> {
             let srcs: Vec<_> = srcs.iter().copied().collect();
             for src in srcs {
                 let label = self.fmt_xref_src(src);
-                let text: SmallString = format!("; <- {label} (data)").into();
+                let text: SmallString = format!("; <- {label} (data)");
                 self.add(self.label_x0, WidgetKind::XrefIn, text);
                 self.set_last_link(src);
                 self.new_line();
@@ -253,7 +288,12 @@ impl<'a> LayoutBuilder<'a> {
     pub fn layout(&mut self) {
         let attr = self.project.attr_at(self.seg_idx, self.base_ofs);
         let label = attr.and_then(|attr| attr.name.as_deref());
-        let comment = attr.and_then(|attr| attr.comment.as_deref());
+        let comment = attr.and_then(|attr| attr.comment.as_deref()).or_else(|| {
+            self.project
+                .auto_comments
+                .get(&(self.seg_idx, self.base_ofs))
+                .map(String::as_str)
+        });
         let seg = &self.project.segments[self.seg_idx];
         let is_code = seg.addr_attributes.is_op(self.base_ofs);
 
@@ -365,32 +405,15 @@ impl<'a> LayoutBuilder<'a> {
 
         self.layout_xrefs_in();
 
-        if let Some(p) = self
+        if let Some(s) = self
             .project
-            .function_preserves
+            .function_summary
             .get(&(self.seg_idx, self.base_ofs))
         {
-            let mut parts: Vec<&str> = Vec::new();
-            if p.ds {
-                parts.push("DS");
+            for line in crate::function_summary::render_summary_comment_lines(self.project, s) {
+                self.add(self.label_x0, WidgetKind::Comment, format!("; {line}"));
+                self.new_line();
             }
-            if p.es {
-                parts.push("ES");
-            }
-            if p.ss {
-                parts.push("SS");
-            }
-            let summary = if parts.is_empty() {
-                "-".to_string()
-            } else {
-                parts.join(", ")
-            };
-            self.add(
-                self.label_x0,
-                WidgetKind::Comment,
-                format!("; preserves: {summary}"),
-            );
-            self.new_line();
         }
 
         if let Some(label) = label {
@@ -467,9 +490,76 @@ impl<'a> LayoutBuilder<'a> {
 
         if let [single] = comment_lines {
             self.layout_inline_comment(single);
+        } else if self.options.show_call_state && inst.opcode == Opcode::Call {
+            if let Some(text) = self.call_state_annotation(inst) {
+                self.layout_inline_comment(&text);
+            }
         }
 
         self.new_line();
+
+        self.layout_manual_targets();
+    }
+
+    /// For a `call` at `self.base_ofs`, return a comment like
+    /// `ds=seg001, es=seg002` listing every DS/ES/SS the callee summary
+    /// changed to a `Known(_)` value. Returns `None` when nothing changed
+    /// (typical for indirect calls and for preserve-only callees) or when
+    /// the dataflow has no state at this address.
+    fn call_state_annotation(&self, inst: &DecodedInstruction) -> Option<String> {
+        let pre = self
+            .project
+            .seg_dataflow
+            .state_at(self.project, self.seg_idx, self.base_ofs)?;
+        let after_ofs = self.base_ofs + inst.bytes.len() as u32;
+        let post = self
+            .project
+            .seg_dataflow
+            .state_at(self.project, self.seg_idx, after_ofs)?;
+
+        let mut parts: Vec<String> = Vec::new();
+        for (i, name) in [(0u8, "es"), (2, "ss"), (3, "ds")] {
+            let i = i as usize;
+            if let SegVal::Known(idx) = &post.sregs[i]
+                && pre.sregs[i] != post.sregs[i]
+            {
+                parts.push(format!("{name}={}", self.project.segments[*idx].name));
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    }
+
+    fn layout_manual_targets(&mut self) {
+        let Some(attr) = self.project.attr_at(self.seg_idx, self.base_ofs) else {
+            return;
+        };
+        if attr.targets.is_empty() {
+            return;
+        }
+        let mut targets = attr.targets.clone();
+        targets.sort_by(|a, b| {
+            self.project.segments[a.0]
+                .name
+                .cmp(&self.project.segments[b.0].name)
+                .then(a.1.cmp(&b.1))
+        });
+        targets.dedup();
+        for target in targets {
+            let label = self
+                .project
+                .resolve_label(target.0, target.1)
+                .unwrap_or_else(|| {
+                    format!("{}:{:04x}", self.project.segments[target.0].name, target.1)
+                });
+            let text: SmallString = format!("; -> {label}");
+            self.add(self.label_x0, WidgetKind::XrefOut, text);
+            self.set_last_link(target);
+            self.new_line();
+        }
     }
 
     fn layout_data(&mut self, x: u32, data: &DataType) {
@@ -571,7 +661,7 @@ impl<'a> LayoutBuilder<'a> {
                     && let Some(name) = self.project.resolve_label(ofs_seg_idx, v)
                 {
                     self.add(x, WidgetKind::Data, format!("dw {}", name));
-                    self.set_last_link((ofs_seg_idx, v as u32));
+                    self.set_last_link((ofs_seg_idx, v));
                 } else {
                     self.add(
                         x,
@@ -799,6 +889,7 @@ fn push_addr_widget(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_header_line(
     widgets: &mut Vec<Widget>,
     kind: WidgetKind,
@@ -821,17 +912,6 @@ fn push_header_line(
         text: s,
         link_addr: None,
     });
-    *y += 1;
-}
-
-fn push_header_blank(
-    widgets: &mut Vec<Widget>,
-    seg_idx: SegmentIdx,
-    seg_name: &str,
-    ofs: u32,
-    y: &mut u32,
-) {
-    push_addr_widget(widgets, seg_idx, seg_name, ofs, *y);
     *y += 1;
 }
 
@@ -883,7 +963,6 @@ fn generate_file_header(
         );
     };
 
-    hl(widgets, global_y, ";");
     for line in &centered_box_lines(&[
         "",
         "This file is generated by Chani Disassembler",
@@ -936,8 +1015,21 @@ fn generate_file_header(
         hl(widgets, global_y, line);
     }
 
+    // Free-form project-level notes (top-level `notes = [[[ … ]]]`),
+    // bracketed by a blank "; " separator so they're visually distinct from
+    // the labeled "File Name / Format / Input SHA1" block above.
+    if !project.notes.is_empty() {
+        hl(widgets, global_y, ";");
+        for note in &project.notes {
+            if note.is_empty() {
+                hl(widgets, global_y, ";");
+            } else {
+                hl(widgets, global_y, &format!("; {note}"));
+            }
+        }
+    }
+
     hl(widgets, global_y, ";");
-    push_header_blank(widgets, seg_idx, seg_name, 0, global_y);
 }
 
 fn generate_segment_header(
@@ -1023,6 +1115,13 @@ fn generate_segment_header(
 /// Build a globally-y-positioned flat widget list for the entire project.
 /// Returns the widgets and the total number of rows.
 pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
+    generate_widgets_with_options(project, LayoutOptions::default())
+}
+
+pub fn generate_widgets_with_options(
+    project: &Project,
+    options: LayoutOptions,
+) -> (Vec<Widget>, u32) {
     let mut all_widgets: Vec<Widget> = Vec::new();
     let mut global_y = 0u32;
 
@@ -1051,7 +1150,7 @@ pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
 
         let mut ofs = seg_start;
         while ofs < seg_end {
-            let sreg_map = project
+            let mut sreg_map = project
                 .seg_dataflow
                 .state_at(project, seg_idx, ofs + seg_start)
                 .map(|s| s.to_sreg_map())
@@ -1059,6 +1158,20 @@ pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
                     cs: Some(seg_idx),
                     ..Default::default()
                 });
+
+            // If the dataflow analysis couldn't pin down DS at this address,
+            // fall back to whatever the segment's `assume ds:<seg>` directive
+            // declared. Lets `ofs16` data references render with proper labels
+            // when control reaches a basic block whose entry state still has
+            // DS as unknown (e.g. blocks that have no resolved predecessors).
+            if sreg_map.ds.is_none() {
+                for (reg, assume_seg) in &seg.assume {
+                    if reg.as_str() == "ds" {
+                        sreg_map.ds = project.segment_by_name(assume_seg);
+                        break;
+                    }
+                }
+            }
 
             let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|attr| attr.ofs_seg);
 
@@ -1073,7 +1186,7 @@ pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
                 arg_fmts: [None; 2],
             };
 
-            let mut builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
+            let mut builder = LayoutBuilder::new_with_options(project, seg_idx, ofs, &ctx, options);
             builder.layout();
             let local_widgets = builder.widgets();
 

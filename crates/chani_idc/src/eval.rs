@@ -152,7 +152,10 @@ impl Evaluator {
                 Ok(None)
             }
 
-            Stmt::Directive(Directive::Define { name, value: Some(target) }) => {
+            Stmt::Directive(Directive::Define {
+                name,
+                value: Some(target),
+            }) => {
                 scope.add_alias(name.clone(), target.clone());
                 Ok(None)
             }
@@ -206,33 +209,11 @@ impl Evaluator {
             // ---------------------------------------------------------------
             // No-ops: IDA metadata we don't need
             // ---------------------------------------------------------------
-            "DeleteAll"
-            | "SetPrcsr"
-            | "StringStp"
-            | "Tabs"
-            | "Comments"
-            | "Voids"
-            | "XrefShow"
-            | "AutoShow"
-            | "Indent"
-            | "CmtIndent"
-            | "TailDepth"
-            | "SetEnumBf"
-            | "SegClass"
-            | "SetSegmentType"
-            | "LowVoids"
-            | "HighVoids"
-            | "ExtLinA"
-            | "OpHex"
-            | "OpDecimal"
-            | "OpBinary"
-            | "OpSeg"
-            | "SetFunctionFlags"
-            | "MakeLocal"
-            | "MakeFrame"
-            | "SetReg"
-            | "AddXref"
-            | "AddCodeXref" => Ok(Value::Void),
+            "DeleteAll" | "SetPrcsr" | "StringStp" | "Tabs" | "Comments" | "Voids" | "XrefShow"
+            | "AutoShow" | "Indent" | "CmtIndent" | "TailDepth" | "SetEnumBf" | "SegClass"
+            | "SetSegmentType" | "LowVoids" | "HighVoids" | "ExtLinA" | "OpHex" | "OpDecimal"
+            | "OpBinary" | "OpSeg" | "SetFunctionFlags" | "MakeLocal" | "MakeFrame" | "SetReg"
+            | "AddXref" | "AddCodeXref" => Ok(Value::Void),
 
             // ---------------------------------------------------------------
             // Segments
@@ -252,7 +233,10 @@ impl Evaluator {
 
             "SegRename" => {
                 let addr = args.first().map(|v| v.as_u32()).unwrap_or(0);
-                let name = args.get(1).map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let name = args
+                    .get(1)
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 if let Some(seg) = self.db.segments.iter_mut().find(|s| s.start == addr) {
                     seg.name = name;
                 }
@@ -263,7 +247,10 @@ impl Evaluator {
             // Enums
             // ---------------------------------------------------------------
             "AddEnum" => {
-                let name = args.get(1).map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let name = args
+                    .get(1)
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 let id = self.alloc_id();
                 self.db.enums.insert(
                     id,
@@ -278,7 +265,10 @@ impl Evaluator {
 
             "AddConstEx" => {
                 let id = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
-                let const_name = args.get(1).map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let const_name = args
+                    .get(1)
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 let value = args.get(2).map(|v| v.as_u32()).unwrap_or(0);
                 if let Some(en) = self.db.enums.get_mut(&id) {
                     en.constants.insert(value, const_name);
@@ -287,7 +277,10 @@ impl Evaluator {
             }
 
             "GetEnum" => {
-                let name = args.first().map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let name = args
+                    .first()
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 let id = self.db.enum_name_to_id.get(&name).copied().unwrap_or(-1);
                 Ok(Value::Int(id))
             }
@@ -296,7 +289,10 @@ impl Evaluator {
             // Structs
             // ---------------------------------------------------------------
             "AddStrucEx" => {
-                let name = args.get(1).map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let name = args
+                    .get(1)
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 let id = self.alloc_id();
                 self.db.structs.insert(
                     id,
@@ -310,15 +306,20 @@ impl Evaluator {
             }
 
             "GetStrucIdByName" => {
-                let name = args.first().map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let name = args
+                    .first()
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 let id = self.db.struct_name_to_id.get(&name).copied().unwrap_or(-1);
                 Ok(Value::Int(id))
             }
 
             "AddStrucMember" => {
                 let id = args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
-                let member_name =
-                    args.get(1).map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let member_name = args
+                    .get(1)
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 let offset = args.get(2).map(|v| v.as_u32()).unwrap_or(0);
                 let flag = args.get(3).map(|v| v.as_u32()).unwrap_or(0);
                 let target_id = args.get(4).and_then(|v| v.as_int().ok()).unwrap_or(-1);
@@ -346,21 +347,30 @@ impl Evaluator {
 
             "MakeName" => {
                 let addr = args.first().map(|v| v.as_u32()).unwrap_or(0);
-                let name = args.get(1).map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let name = args
+                    .get(1)
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 self.db.attrs.entry(addr).or_default().name = Some(name);
                 Ok(Value::Void)
             }
 
             "MakeComm" => {
                 let addr = args.first().map(|v| v.as_u32()).unwrap_or(0);
-                let comment = args.get(1).map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let comment = args
+                    .get(1)
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 self.db.attrs.entry(addr).or_default().comment = Some(comment);
                 Ok(Value::Void)
             }
 
             "MakeRptCmt" => {
                 let addr = args.first().map(|v| v.as_u32()).unwrap_or(0);
-                let comment = args.get(1).map(|v| v.as_str().to_owned()).unwrap_or_default();
+                let comment = args
+                    .get(1)
+                    .map(|v| v.as_str().to_owned())
+                    .unwrap_or_default();
                 self.db.attrs.entry(addr).or_default().repeat_comment = Some(comment);
                 Ok(Value::Void)
             }

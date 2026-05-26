@@ -18,7 +18,7 @@ use crate::address::{Address, addr};
 use crate::clock::Clock;
 use crate::cpu::CpuContext;
 use crate::memory::Memory;
-use crate::{DUNE_DNADL, DUNE_DNVGA, DUNE_SEG001};
+use crate::{DUNE_DNADL, DUNE_DNVGA, DUNE_SEG000, DUNE_SEG001};
 use std::collections::HashMap;
 use std::fmt::LowerHex;
 use std::mem::swap;
@@ -251,6 +251,16 @@ impl Cpu {
         let csip = self.register_file.get_csip();
         self.instruction_address = csip;
 
+        if csip == (DUNE_SEG000, 0x3a84) {
+            println!(
+                "add_room_frame_task: location_and_room = {:04x}",
+                self.get_ax()
+            );
+        }
+        if csip == (DUNE_SEG000, 0x058f) {
+            self.set_si(self.get_si() + 12 * 38);
+        }
+
         // if csip == (DUNE_SEG000, 0xb713) {
         //     self.logging = false;
         // }
@@ -385,6 +395,10 @@ impl Cpu {
         // if csip == (DUNE_DNADL, 0x0b34) {
         //     println!("out 0x388 {:02x} = {:02x}", self.get_al(), self.get_ah());
         // }
+
+        if csip == (DUNE_DNVGA, 0x0c06) {
+            println!("set_global_y_offset: {}", self.get_ax());
+        }
 
         for i in 0..7 {
             // if i == 5 {

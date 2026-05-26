@@ -153,7 +153,8 @@ pub fn tokenize(src: &str) -> Result<Vec<(Token, usize)>, LexError> {
         }
 
         // Hex literal: 0x... or 0X...
-        if b == b'0' && pos + 1 < bytes.len() && (bytes[pos + 1] == b'x' || bytes[pos + 1] == b'X') {
+        if b == b'0' && pos + 1 < bytes.len() && (bytes[pos + 1] == b'x' || bytes[pos + 1] == b'X')
+        {
             pos += 2;
             let start = pos;
             while pos < bytes.len() && bytes[pos].is_ascii_hexdigit() {
@@ -216,7 +217,7 @@ pub fn tokenize(src: &str) -> Result<Vec<(Token, usize)>, LexError> {
                 return Err(LexError {
                     line: tok_line,
                     msg: format!("unexpected character: 0x{b:02x}"),
-                })
+                });
             }
         };
         tokens.push((tok, tok_line));

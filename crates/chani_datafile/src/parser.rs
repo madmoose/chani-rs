@@ -123,7 +123,10 @@ fn key_value<'a>(original: &str, i: &'a str) -> IResult<&'a str, Token> {
 
 fn single_line_pairs<'a>(original: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
     let (i, first) = key_value(original, i)?;
-    let (i, rest) = many0(preceded((ws, char(';'), ws), move |i| key_value(original, i))).parse(i)?;
+    let (i, rest) = many0(preceded((ws, char(';'), ws), move |i| {
+        key_value(original, i)
+    }))
+    .parse(i)?;
     let (i, _) = opt((ws, char(';'))).parse(i)?; // optional trailing semicolon
     let mut pairs = vec![first];
     pairs.extend(rest);
@@ -160,7 +163,10 @@ fn dict_body<'a>(original: &str, name: &str, i: &'a str) -> IResult<&'a str, Vec
         if let Ok((rest, _)) = end_keyword(input) {
             let line = line_of(original, input);
             let (rest, _) = skip_blanks(rest)?;
-            tokens.push(Token::DictEnd { name: name.into(), line });
+            tokens.push(Token::DictEnd {
+                name: name.into(),
+                line,
+            });
             return Ok((rest, tokens));
         }
 
@@ -228,7 +234,10 @@ fn dict_block<'a>(original: &str, i: &'a str) -> IResult<&'a str, Vec<Token>> {
             line,
         }];
         tokens.extend(pairs);
-        tokens.push(Token::DictEnd { name: name.into(), line });
+        tokens.push(Token::DictEnd {
+            name: name.into(),
+            line,
+        });
         Ok((i, tokens))
     }
 }
@@ -268,6 +277,19 @@ pub fn parse(input: &str) -> Result<Vec<Token>, String> {
     }
 }
 
+fn parse_error_message(original: &str, remaining: &str) -> String {
+    let offset = remaining.as_ptr() as usize - original.as_ptr() as usize;
+    let prefix = &original[..offset];
+    let line_num = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
+    let col = prefix.rfind('\n').map_or(offset, |p| offset - p - 1);
+    let line_text = remaining.lines().next().unwrap_or("(end of input)");
+    format!(
+        "parse error at line {line_num}, column {}: unexpected input\n  {line_text}\n  {arrow}",
+        col + 1,
+        arrow = " ".repeat(col) + "^",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,17 +321,4 @@ mod tests {
         assert_eq!(tokens.len(), 3); // DictStart, x=1, DictEnd
         assert!(matches!(tokens[2], Token::DictEnd { .. }));
     }
-}
-
-fn parse_error_message(original: &str, remaining: &str) -> String {
-    let offset = remaining.as_ptr() as usize - original.as_ptr() as usize;
-    let prefix = &original[..offset];
-    let line_num = prefix.bytes().filter(|&b| b == b'\n').count() + 1;
-    let col = prefix.rfind('\n').map_or(offset, |p| offset - p - 1);
-    let line_text = remaining.lines().next().unwrap_or("(end of input)");
-    format!(
-        "parse error at line {line_num}, column {}: unexpected input\n  {line_text}\n  {arrow}",
-        col + 1,
-        arrow = " ".repeat(col) + "^",
-    )
 }

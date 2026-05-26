@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use smallvec::SmallVec;
 
-use crate::{Address, Opcode, decode, project::{Project, SegmentIdx}};
+use crate::{
+    Address, Opcode, decode,
+    project::{Project, SegmentIdx},
+};
 
 #[derive(Debug, Clone)]
 pub struct BasicBlock {
@@ -84,7 +87,10 @@ impl BasicBlockMap {
             let last_is_call = decode(
                 seg_val,
                 last_ofs as u16,
-                project.bytes_at_seg(block.seg_idx, last_ofs).iter().copied(),
+                project
+                    .bytes_at_seg(block.seg_idx, last_ofs)
+                    .iter()
+                    .copied(),
             )
             .is_some_and(|i| i.opcode == Opcode::Call);
 

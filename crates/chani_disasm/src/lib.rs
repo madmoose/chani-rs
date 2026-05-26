@@ -1,3 +1,4 @@
+pub mod abstract_register_value_flow;
 pub mod address_attributes;
 pub mod basic_block;
 pub mod branch_map;
@@ -5,7 +6,8 @@ pub mod data_type;
 mod decoded_instruction;
 mod disassemble;
 pub mod exe_mz;
-pub mod function_preserves;
+pub mod function_map;
+pub mod function_summary;
 pub mod int_descriptions;
 pub mod layout;
 mod opcode_table;
@@ -25,7 +27,7 @@ pub use opcode_table::Opcode;
 
 use crate::project::SegmentIdx;
 
-type SmallString = String; //smallstr::SmallString<[u8; 55]>;
+type SmallString = String;
 
 pub type Address = (SegmentIdx, u32);
 

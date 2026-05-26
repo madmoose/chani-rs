@@ -40,7 +40,11 @@ enum Cmd {
     /// Show cross-references to an address (requires binary)
     Xref { addr: String },
     /// Show disassembly of the function body at an address (requires binary)
-    Func { addr: String },
+    Func(FuncArgs),
+    /// Print the seg_dataflow abstract register state immediately before
+    /// the instruction at <addr>. Use the address of the instruction
+    /// following a `call` to see the post-call state. (requires binary)
+    State { addr: String },
     /// Show callers of the function at an address (requires binary)
     Callers { addr: String },
     /// Show callees of the function at an address (requires binary)
@@ -66,7 +70,8 @@ struct SetArgs {
     /// Set the type, e.g. "code", "u16", "dec(u16)", "[u8; 16]"
     #[arg(long = "type", value_name = "TYPE")]
     r#type: Option<String>,
-    /// Set the comment (empty string clears it)
+    /// Set the comment (empty string clears it). The escape sequences
+    /// `\n`, `\t`, and `\\` are interpreted as newline, tab, and backslash.
     #[arg(long)]
     comment: Option<String>,
     /// Set the ofs_seg field (segment name used to resolve ofs16 immediates)
@@ -89,6 +94,16 @@ struct SetArgs {
     /// Write output to stdout instead of modifying the file in place
     #[arg(long)]
     stdout: bool,
+}
+
+#[derive(Args)]
+struct FuncArgs {
+    /// Address in the form seg:ofs (hex offset), e.g. seg001:22cb
+    addr: String,
+    /// Inline-annotate each direct call with the DS/ES/SS values its
+    /// callee summary establishes (when they differ from the pre-call state).
+    #[arg(long = "show-call-state")]
+    show_call_state: bool,
 }
 
 #[derive(Args)]
@@ -115,7 +130,8 @@ fn main() -> Result<()> {
         Cmd::List { range } => cmd_list(path, &range),
         Cmd::Search(args) => cmd_search(path, &args),
         Cmd::Xref { addr } => cmd_xref(path, &addr),
-        Cmd::Func { addr } => cmd_func(path, &addr),
+        Cmd::Func(args) => cmd_func(path, &args),
+        Cmd::State { addr } => cmd_state(path, &addr),
         Cmd::Callers { addr } => cmd_callers(path, &addr),
         Cmd::Callees { addr } => cmd_callees(path, &addr),
         Cmd::Clobbers { addr } => cmd_clobbers(path, addr.as_deref()),
@@ -188,8 +204,13 @@ fn decode_at(
     )
 }
 
-fn render_addr(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> String {
-    let sreg_map = project
+// Build the segment-register map for the instruction at `(seg_idx, ofs)`,
+// matching the disassembly listing (see layout::generate_widgets_with_options):
+// start from the dataflow state, then fall back to the segment's `assume ds:<seg>`
+// directive when DS is still unknown so `ofs16` data references resolve to their
+// labels (e.g. `[data_03810]` instead of `[3810h]`).
+fn sreg_map_at(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> SRegMap {
+    let mut sreg_map = project
         .seg_dataflow
         .state_at(project, seg_idx, ofs)
         .map(|s| s.to_sreg_map())
@@ -197,6 +218,19 @@ fn render_addr(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> String {
             cs: Some(seg_idx),
             ..Default::default()
         });
+    if sreg_map.ds.is_none() {
+        for (reg, assume_seg) in &project.segments[seg_idx].assume {
+            if reg.as_str() == "ds" {
+                sreg_map.ds = project.segment_by_name(assume_seg);
+                break;
+            }
+        }
+    }
+    sreg_map
+}
+
+fn render_addr(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> String {
+    let sreg_map = sreg_map_at(project, seg_idx, ofs);
     let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|a| a.ofs_seg);
     let lookup = ProjectLookup {
         project,
@@ -217,15 +251,13 @@ fn render_addr(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> String {
     buf
 }
 
-fn print_addr_block(project: &Project, seg_idx: SegmentIdx, ofs: u32) {
-    let sreg_map = project
-        .seg_dataflow
-        .state_at(project, seg_idx, ofs)
-        .map(|s| s.to_sreg_map())
-        .unwrap_or(SRegMap {
-            cs: Some(seg_idx),
-            ..Default::default()
-        });
+fn print_addr_block(
+    project: &Project,
+    seg_idx: SegmentIdx,
+    ofs: u32,
+    options: chani_disasm::layout::LayoutOptions,
+) {
+    let sreg_map = sreg_map_at(project, seg_idx, ofs);
     let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|a| a.ofs_seg);
     let lookup = ProjectLookup {
         project,
@@ -237,7 +269,7 @@ fn print_addr_block(project: &Project, seg_idx: SegmentIdx, ofs: u32) {
         lookup: &lookup,
         arg_fmts: [None; 2],
     };
-    let mut builder = LayoutBuilder::new(project, seg_idx, ofs, &ctx);
+    let mut builder = LayoutBuilder::new_with_options(project, seg_idx, ofs, &ctx, options);
     builder.layout();
     let n = builder.lines();
     let mut buf = String::new();
@@ -249,6 +281,28 @@ fn print_addr_block(project: &Project, seg_idx: SegmentIdx, ofs: u32) {
 }
 
 // ── Parse helpers ─────────────────────────────────────────────────────────────
+
+fn unescape_comment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
 
 fn parse_display_fmt(s: &str) -> Result<DisplayFmt> {
     match s {
@@ -362,7 +416,7 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             attr.comment = if comment.is_empty() {
                 None
             } else {
-                Some(comment)
+                Some(unescape_comment(&comment))
             };
         }
         if parsed_ofs_seg.is_some() {
@@ -570,14 +624,7 @@ fn cmd_list(path: &Path, range_str: &str) -> Result<()> {
 // ── cmd_search ────────────────────────────────────────────────────────────────
 
 fn collect_rendered_lines(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> Vec<String> {
-    let sreg_map = project
-        .seg_dataflow
-        .state_at(project, seg_idx, ofs)
-        .map(|s| s.to_sreg_map())
-        .unwrap_or(SRegMap {
-            cs: Some(seg_idx),
-            ..Default::default()
-        });
+    let sreg_map = sreg_map_at(project, seg_idx, ofs);
     let ofs_seg = project.attr_at(seg_idx, ofs).and_then(|a| a.ofs_seg);
     let lookup = ProjectLookup {
         project,
@@ -650,11 +697,11 @@ fn cmd_search(path: &Path, args: &SearchArgs) -> Result<()> {
     for &m in &matches {
         let start = m.saturating_sub(before);
         let end = (m + after + 1).min(all_lines.len());
-        if let Some(last) = groups.last_mut() {
-            if start <= last.1 {
-                last.1 = last.1.max(end);
-                continue;
-            }
+        if let Some(last) = groups.last_mut()
+            && start <= last.1
+        {
+            last.1 = last.1.max(end);
+            continue;
         }
         groups.push((start, end));
     }
@@ -785,31 +832,78 @@ fn ofs16_points_to(
 
 // ── cmd_func ──────────────────────────────────────────────────────────────────
 
-fn cmd_func(path: &Path, addr_str: &str) -> Result<()> {
+fn cmd_func(path: &Path, args: &FuncArgs) -> Result<()> {
     let project = load_analyzed(path)?;
+    let addr_str = args.addr.as_str();
     let (seg_idx, ofs) = parse_addr(&project, addr_str)?;
+    let options = chani_disasm::layout::LayoutOptions {
+        show_call_state: args.show_call_state,
+    };
 
-    // Find entry block — accept if addr is inside a block (snap to block start).
-    let entry_block_start = project
+    // Snap to the basic block containing the address.
+    let block_start_addr: Address = project
         .blocks
         .block_containing(seg_idx, ofs)
-        .map(|b| b.start)
+        .map(|b| (b.seg_idx, b.start))
         .ok_or_else(|| anyhow::anyhow!("{} is not inside a decoded basic block", addr_str))?;
 
-    let block_addrs = function_blocks(&project, (seg_idx, entry_block_start));
-
-    if block_addrs.is_empty() {
-        bail!("no basic blocks found at {addr_str}");
-    }
+    // Resolve the function via Project::functions:
+    //   1. block_start_addr itself is a function entry → use that function;
+    //   2. otherwise pick a function whose block set contains this block.
+    //      If several match (shared block), prefer the one whose entry has
+    //      the largest address ≤ block_start_addr; emit a comment listing the
+    //      other candidates so the user can rerun against an exact entry.
+    //   3. if no function claims the block, fall back to the on-the-fly CFG
+    //      walk so orphan-but-reachable blocks still render.
+    let (entry_addr, block_addrs, alt_entries) =
+        if let Some(f) = project.functions.function_at(block_start_addr) {
+            (f.entry, f.blocks.clone(), Vec::new())
+        } else {
+            let mut candidates: Vec<Address> = project
+                .functions
+                .functions_with_block(block_start_addr)
+                .map(|f| f.entry)
+                .collect();
+            if let Some(&best) = candidates
+                .iter()
+                .filter(|&&e| e <= block_start_addr)
+                .max()
+                .or_else(|| candidates.iter().min())
+            {
+                candidates.retain(|&e| e != best);
+                let f = project.functions.function_at(best).unwrap();
+                (f.entry, f.blocks.clone(), candidates)
+            } else {
+                // No function owns this block — fall back to the legacy walk.
+                let blocks = project.blocks.function_blocks(&project, block_start_addr);
+                if blocks.is_empty() {
+                    bail!("no basic blocks found at {addr_str}");
+                }
+                (block_start_addr, blocks, Vec::new())
+            }
+        };
 
     let label = project
-        .name_at(seg_idx, entry_block_start)
+        .name_at(entry_addr.0, entry_addr.1)
         .unwrap_or("(unnamed)");
     println!(
         "; function: {} at {}",
         label,
-        fmt_addr(&project, (seg_idx, entry_block_start))
+        fmt_addr(&project, entry_addr)
     );
+    if !alt_entries.is_empty() {
+        let alt_str = alt_entries
+            .iter()
+            .map(|&a| {
+                let n = project.name_at(a.0, a.1).unwrap_or("(unnamed)");
+                format!("{} {n}", fmt_addr(&project, a))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "; (block also belongs to: {alt_str}; rerun with an explicit entry to view those)"
+        );
+    }
     println!();
 
     let mut prev_end: Option<u32> = None;
@@ -827,7 +921,7 @@ fn cmd_func(path: &Path, addr_str: &str) -> Result<()> {
         let seg = &project.segments[bseg];
         let mut ofs = bstart;
         while ofs < block.end {
-            print_addr_block(&project, bseg, ofs);
+            print_addr_block(&project, bseg, ofs, options);
             let Some(next) = seg.addr_attributes.next(ofs) else {
                 break;
             };
@@ -846,6 +940,47 @@ fn cmd_func(path: &Path, addr_str: &str) -> Result<()> {
 
 fn function_blocks(project: &Project, entry: Address) -> Vec<Address> {
     project.blocks.function_blocks(project, entry)
+}
+
+// ── cmd_state ─────────────────────────────────────────────────────────────────
+
+fn cmd_state(path: &Path, addr_str: &str) -> Result<()> {
+    use chani_disasm::seg_dataflow::SegVal;
+
+    let project = load_analyzed(path)?;
+    let (seg_idx, ofs) = parse_addr(&project, addr_str)?;
+    let addr = (seg_idx, ofs);
+
+    let Some(state) = project.seg_dataflow.state_at(&project, seg_idx, ofs) else {
+        println!(
+            "{}  <no dataflow state at this address>",
+            fmt_addr(&project, addr)
+        );
+        return Ok(());
+    };
+
+    let fmt = |v: &SegVal| -> String {
+        match v {
+            SegVal::Known(idx) => project.segments[*idx].name.clone(),
+            SegVal::Unknown => "?".to_string(),
+        }
+    };
+
+    println!(
+        "{}  (state immediately before this instruction)",
+        fmt_addr(&project, addr)
+    );
+    for (i, name) in [(0u8, "es"), (1, "cs"), (2, "ss"), (3, "ds")] {
+        println!("  {name} = {}", fmt(&state.sregs[i as usize]));
+    }
+    let gp_names = ["ax", "cx", "dx", "bx", "sp", "bp", "si", "di"];
+    for (i, name) in gp_names.iter().enumerate() {
+        if let SegVal::Known(idx) = &state.gpregs[i] {
+            println!("  {name} = {}", project.segments[*idx].name);
+        }
+    }
+
+    Ok(())
 }
 
 // ── cmd_callers ───────────────────────────────────────────────────────────────
@@ -950,17 +1085,17 @@ fn cmd_clobbers(path: &Path, addr_str: Option<&str>) -> Result<()> {
         Some(s) => {
             let (seg_idx, ofs) = parse_addr(&project, s)?;
             let entry = (seg_idx, ofs);
-            if !project.function_preserves.contains_key(&entry) {
+            if !project.function_summary.contains_key(&entry) {
                 bail!("{s} is not a known function entry");
             }
             print_clobbers_for(&project, entry);
         }
         None => {
-            let entries: Vec<Address> = project.function_preserves.keys().copied().collect();
+            let entries: Vec<Address> = project.function_summary.keys().copied().collect();
             let mut first = true;
             for entry in entries {
                 let records =
-                    chani_disasm::function_preserves::trace_function_clobbers(&project, entry);
+                    chani_disasm::function_summary::trace_function_clobbers(&project, entry);
                 if records.is_empty() {
                     continue;
                 }
@@ -981,7 +1116,7 @@ fn cmd_clobbers(path: &Path, addr_str: Option<&str>) -> Result<()> {
 
 fn print_clobbers_for(project: &Project, entry: Address) {
     print_clobber_header(project, entry);
-    let records = chani_disasm::function_preserves::trace_function_clobbers(project, entry);
+    let records = chani_disasm::function_summary::trace_function_clobbers(project, entry);
     if records.is_empty() {
         println!("  (none)");
     } else {
@@ -993,33 +1128,22 @@ fn print_clobbers_for(project: &Project, entry: Address) {
 
 fn print_clobber_header(project: &Project, entry: Address) {
     let label = project.name_at(entry.0, entry.1).unwrap_or("(unnamed)");
-    let p = project
-        .function_preserves
+    let summary_lines = project
+        .function_summary
         .get(&entry)
-        .copied()
-        .unwrap_or(chani_disasm::function_preserves::FunctionPreserves::BOTTOM);
-    let mut parts: Vec<&str> = Vec::new();
-    if p.ds {
-        parts.push("DS");
-    }
-    if p.es {
-        parts.push("ES");
-    }
-    if p.ss {
-        parts.push("SS");
-    }
-    let summary = if parts.is_empty() {
-        "-".to_string()
-    } else {
-        parts.join(", ")
-    };
+        .map(|s| chani_disasm::function_summary::render_summary_comment_lines(project, s))
+        .unwrap_or_else(|| vec!["preserves: -".to_string()]);
+    let head = summary_lines.first().cloned().unwrap_or_default();
     println!(
-        "clobbers in {}  {label}  (preserves: {summary})",
+        "clobbers in {}  {label}  ({head})",
         fmt_addr(project, entry)
     );
+    for line in summary_lines.iter().skip(1) {
+        println!("  ({line})");
+    }
 }
 
-fn print_clobber_line(project: &Project, rec: &chani_disasm::function_preserves::ClobberRecord) {
+fn print_clobber_line(project: &Project, rec: &chani_disasm::function_summary::ClobberRecord) {
     let mut tags = Vec::new();
     if rec.clobbers_ds {
         tags.push("DS");
@@ -1117,7 +1241,9 @@ fn cmd_targets(path: &Path, addr_opt: Option<&str>) -> Result<()> {
         let line = render_addr(&project, addr.0, addr.1);
         println!("{line}");
         for target in targets {
-            let label = project.resolve_label(target.0, target.1).unwrap_or_default();
+            let label = project
+                .resolve_label(target.0, target.1)
+                .unwrap_or_default();
             println!("    -> {}  {label}", fmt_addr(&project, target));
         }
     }
@@ -1132,14 +1258,15 @@ fn cmd_check(path: &Path) -> Result<()> {
 
     // 1. ofs16 attrs with no resolvable segment
     for (&addr, attr) in &project.attrs {
-        if let Some(AttrType::Data(dt)) = &attr.r#type {
-            if contains_unresolved_ofs16(dt) && attr.ofs_seg.is_none() {
-                println!(
-                    "warn: {}  ofs16 without ofs_seg (segment unknown)",
-                    fmt_addr(&project, addr)
-                );
-                issues += 1;
-            }
+        if let Some(AttrType::Data(dt)) = &attr.r#type
+            && contains_unresolved_ofs16(dt)
+            && attr.ofs_seg.is_none()
+        {
+            println!(
+                "warn: {}  ofs16 without ofs_seg (segment unknown)",
+                fmt_addr(&project, addr)
+            );
+            issues += 1;
         }
     }
 

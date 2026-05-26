@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{fmt::Display, str::FromStr};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Architecture {
@@ -19,11 +19,10 @@ impl FromStr for Architecture {
     }
 }
 
-impl ToString for Architecture {
-    fn to_string(&self) -> String {
+impl Display for Architecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Architecture::_8086 => "8086",
+            Architecture::_8086 => write!(f, "8086"),
         }
-        .to_string()
     }
 }

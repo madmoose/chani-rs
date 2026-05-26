@@ -33,6 +33,7 @@ pub struct Machine {
 pub struct Devices {
     pub keyboard_device_id: usize,
     pub pit_device_id: usize,
+    pub opl3_device_id: usize,
     pub vga_device_id: usize,
     pub devices: DeviceList,
     pub io_map: Vec<IoMapEntry>,
@@ -67,6 +68,13 @@ impl Devices {
 
     pub fn pit(&mut self) -> &mut Pit {
         self.get_mut(self.pit_device_id)
+            .as_any_mut()
+            .downcast_mut()
+            .unwrap()
+    }
+
+    pub fn opl3_mut(&mut self) -> &mut OPL3 {
+        self.get_mut(self.opl3_device_id)
             .as_any_mut()
             .downcast_mut()
             .unwrap()
@@ -295,6 +303,7 @@ impl Machine {
             Devices {
                 keyboard_device_id,
                 pit_device_id,
+                opl3_device_id,
                 vga_device_id,
                 devices,
                 io_map,

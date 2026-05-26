@@ -653,7 +653,10 @@ pub(super) fn parse_attr(
                             continue;
                         }
                         let target = parse_addr(tok, segments).map_err(|e| {
-                            format!("line {line}: invalid target '{tok}' in attr '{}': {e}", dict.key)
+                            format!(
+                                "line {line}: invalid target '{tok}' in attr '{}': {e}",
+                                dict.key
+                            )
                         })?;
                         targets.push(target);
                     }

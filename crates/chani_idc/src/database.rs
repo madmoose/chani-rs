@@ -61,6 +61,8 @@ pub struct IdcDatabase {
 
 impl IdcDatabase {
     pub fn segment_for_addr(&self, addr: u32) -> Option<&IdcSegment> {
-        self.segments.iter().find(|s| addr >= s.start && addr < s.end)
+        self.segments
+            .iter()
+            .find(|s| addr >= s.start && addr < s.end)
     }
 }

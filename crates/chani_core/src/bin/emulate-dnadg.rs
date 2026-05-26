@@ -13,6 +13,11 @@ struct Args {
     dump_mem_writes: bool,
     #[arg(long)]
     dump_port_writes: bool,
+    /// Log each I/O write hitting the OPL3 device in the form
+    /// `OPL3: I/O write at port 0xXXX <- VV` (matches the format the
+    /// reverse-engineered dune-rs play_herad driver emits).
+    #[arg(long)]
+    dump_opl3_writes: bool,
     #[arg(long)]
     dump_func_names: bool,
     #[arg(long)]
@@ -77,6 +82,8 @@ fn main() {
     // ready; in emulation the port never clears, so we skip them entirely.
     machine.memory.write_u8(addr(0x1000, 0x1149), 0xc3);
     machine.memory.write_u8(addr(0x1000, 0x1158), 0xc3);
+
+    machine.devices.opl3_mut().dump_writes = args.dump_opl3_writes;
 
     let (cpu, mut ctx) = machine.get_cpu_and_context();
 

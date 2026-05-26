@@ -197,7 +197,7 @@ impl Parser {
                             "expected ',' or ';' in auto declaration, got {:?}",
                             self.peek()
                         ),
-                    })
+                    });
                 }
             }
         }
@@ -231,13 +231,14 @@ impl Parser {
         let base = self.parse_primary()?;
         // Only identifiers can be called in IDC
         if let Expr::Ident(ref name) = base
-            && matches!(self.peek(), Some(Token::LParen)) {
-                let name = name.clone();
-                self.advance(); // consume '('
-                let args = self.parse_arg_list()?;
-                self.expect(Token::RParen)?;
-                return Ok(Expr::Call(name, args));
-            }
+            && matches!(self.peek(), Some(Token::LParen))
+        {
+            let name = name.clone();
+            self.advance(); // consume '('
+            let args = self.parse_arg_list()?;
+            self.expect(Token::RParen)?;
+            return Ok(Expr::Call(name, args));
+        }
         Ok(base)
     }
 
