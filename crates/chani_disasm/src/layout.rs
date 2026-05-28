@@ -843,9 +843,17 @@ fn format_value(v: u32, width: DataWidth, fmt: DisplayFmt) -> SmallString {
         DisplayFmt::SignedDec => {
             let _ = write!(s, "{}", width.sign_extend(v));
         }
-        DisplayFmt::Bin => {
-            let _ = write!(s, "0b{v:b}");
-        }
+        DisplayFmt::Bin => match width {
+            DataWidth::Byte => {
+                let _ = write!(s, "0b{v:08b}");
+            }
+            DataWidth::Word => {
+                let _ = write!(s, "0b{v:016b}");
+            }
+            DataWidth::Dword => {
+                let _ = write!(s, "0b{v:032b}");
+            }
+        },
     }
     s
 }
