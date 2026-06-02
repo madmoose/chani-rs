@@ -7,10 +7,6 @@ edition = "2024"
 name = "idc_to_chani"
 path = "src/bin/idc_to_chani.rs"
 
-[[bin]]
-name = "chaniq"
-path = "src/bin/chaniq.rs"
-
 [dependencies]
 chani_disasm = { path = "../chani_disasm" }
 anyhow = "1.0"

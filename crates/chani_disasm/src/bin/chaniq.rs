@@ -531,7 +531,7 @@ fn cmd_find(path: &Path, pattern: &str) -> Result<()> {
         let type_str = attr
             .r#type
             .as_ref()
-            .map(|t| format!("[{}]", t.type_str(&project.segments, &project.structs)))
+            .map(|t| t.type_str(&project.segments, &project.structs))
             .unwrap_or_default();
         let comment_first = attr
             .comment

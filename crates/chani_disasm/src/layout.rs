@@ -862,6 +862,8 @@ fn format_string_value(bytes: &[u8], n: usize) -> SmallString {
     let slice = &bytes[..bytes.len().min(n)];
     let mut s = SmallString::new();
 
+    s.push('\'');
+
     for &b in slice {
         if (0x20..0x7f).contains(&b) && b != b'\'' && b != b'\\' {
             let _ = write!(s, "{}", b as char);

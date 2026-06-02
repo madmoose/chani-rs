@@ -1303,6 +1303,28 @@ impl Project {
         self.name_at(seg_idx, ofs).map(String::from)
     }
 
+    /// Whether a register-indexed access `[sym + reg]` resolving to `ofs`
+    /// denotes genuine array indexing.
+    ///
+    /// True when an array-typed label sits exactly at `ofs`, or when `ofs`
+    /// falls inside a typed array/struct (the covering typed-path case). False
+    /// for a scalar symbol at `ofs`: appending `[reg]` there would name an
+    /// unrelated global that merely happens to live at that offset (e.g.
+    /// `rand_bits[si]` for a pointer in `si`), so the caller should fall back
+    /// to the raw `[base+index+disp]` form instead.
+    fn is_register_indexable(&self, seg_idx: SegmentIdx, ofs: u32) -> bool {
+        if let Some(attr) = self.attr_at(seg_idx, ofs)
+            && attr.name.is_some()
+        {
+            return attr
+                .r#type
+                .as_ref()
+                .and_then(|t| t.as_data())
+                .is_some_and(|d| d.is_array());
+        }
+        self.resolve_typed_label(seg_idx, ofs).is_some()
+    }
+
     fn resolve_typed_label(&self, seg_idx: SegmentIdx, ofs: u32) -> Option<String> {
         for (&(_, attr_ofs), attr) in self.attrs.range((seg_idx, 0)..=(seg_idx, ofs)).rev() {
             let rel = (ofs - attr_ofs) as usize;
@@ -1467,10 +1489,6 @@ impl SymbolLookup for ProjectLookup<'_> {
         disp: u16,
         _width: crate::DataWidth,
     ) -> Option<String> {
-        // println!(
-        //     "lookup_indirect: seg={seg:?} base={base:?} index={index:?} disp={disp:#04x} w={_width:?}\n"
-        // );
-
         let seg = self.sreg_map.get(seg)?;
         let mut base = base;
         let mut index = index;
@@ -1485,26 +1503,28 @@ impl SymbolLookup for ProjectLookup<'_> {
                 disp = disp.wrapping_add(index_val);
                 index = None;
             }
-            // println!("seg={seg:?} base={base:?} index={index:?} disp={disp:#04x} w={width:?}\n");
+            // println!("\tseg={seg:?} base={base:?} index={index:?} disp={disp:#04x} w={_width:?}\n");
         }
 
-        // let base = base.map(|b| rf.get_base_reg(b));
-        // let idx = index.map(|i| rf.get_index_reg(i));
-
         match (base, index) {
+            // No register: a plain direct reference; keep its label unconditionally.
             (None, None) => self.project.resolve_label(seg, disp as u32),
-            (None, Some(index)) => Some({
+            // A register is present, so this is an indexed access. Only emit
+            // `name[reg]` when `disp` is covered by an array; otherwise fall
+            // back to the raw `[base+index+disp]` form so a scalar global does
+            // not masquerade as an array (see `is_register_indexable`).
+            (base, index) => {
+                if !self.project.is_register_indexable(seg, disp as u32) {
+                    return None;
+                }
                 let name = self.project.resolve_label(seg, disp as u32)?;
-                format!("{name}[{index}]")
-            }),
-            (Some(base), None) => Some({
-                let name = self.project.resolve_label(seg, disp as u32)?;
-                format!("{name}[{base}]")
-            }),
-            (Some(base), Some(index)) => Some({
-                let name = self.project.resolve_label(seg, disp as u32)?;
-                format!("{name}[{base}+{index}]")
-            }),
+                Some(match (base, index) {
+                    (Some(base), None) => format!("{name}[{base}]"),
+                    (None, Some(index)) => format!("{name}[{index}]"),
+                    (Some(base), Some(index)) => format!("{name}[{base}+{index}]"),
+                    (None, None) => unreachable!(),
+                })
+            }
         }
     }
 

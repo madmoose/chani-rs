@@ -9,18 +9,19 @@ manual-is-multiple-of = "allow"
 new-without-default = "allow"
 
 [workspace.dependencies]
+anyhow = "1.0"
 bytes_ext = { path = "crates/bytes_ext" }
 chani_core = { path = "crates/chani_core" }
 chani_datafile = { path = "crates/chani_datafile" }
 chani_disasm = { path = "crates/chani_disasm" }
+clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 eframe = "0.34.0"
 flate2 = "1.1.2"
 nom = "8.0.0"
 ratatui = "0.29"
-clap = { version = "4", features = ["derive"] }
 serde = { version = "1.0.221", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"
-smallvec = { version = "1.15.1", features = ["const_generics", "union"] }
 smallstr = { version = "0.3.1", features = ["union"] }
+smallvec = { version = "1.15.1", features = ["const_generics", "union"] }

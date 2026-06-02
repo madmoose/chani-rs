@@ -669,8 +669,10 @@ dependencies = [
 name = "chani_disasm"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "bytes_ext",
  "chani_datafile",
+ "clap",
  "sha1",
  "smallstr",
  "smallvec",

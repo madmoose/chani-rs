@@ -7,8 +7,10 @@ edition = "2024"
 workspace = true
 
 [dependencies]
+anyhow.workspace = true
 bytes_ext.workspace = true
 chani_datafile.workspace = true
+clap.workspace = true
 sha1.workspace = true
-smallvec.workspace = true
 smallstr.workspace = true
+smallvec.workspace = true
