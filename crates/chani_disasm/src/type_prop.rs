@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::binding::{Binding, Location};
 use crate::data_type::DataType;
+use crate::function_summary::{ExitVal, RegId};
 use crate::{
     Address, DisasmCtx, GpReg8, GpReg16, Operand, SReg, SmallString,
     basic_block::BasicBlock,
@@ -158,12 +159,54 @@ impl TypeState {
         }
     }
 
-    fn clobber_caller_saved(&mut self) {
+    /// Clobber every register/flag — the conservative model for an indirect
+    /// call or interrupt with no usable summary.
+    fn clobber_all_regs(&mut self) {
         self.gp16 = std::array::from_fn(|_| TypedVal::Unknown);
         self.gp8 = std::array::from_fn(|_| TypedVal::Unknown);
+        self.sregs = std::array::from_fn(|_| TypedVal::Unknown);
+        self.flags = std::array::from_fn(|_| TypedVal::Unknown);
+    }
+
+    /// Clobber the registers a callee does not preserve. A register the
+    /// summary reports as exiting with its entry value (`Entry(self)`) keeps
+    /// its type; everything else is dropped. Flags are always dropped.
+    fn clobber_for_call(&mut self, summary: &crate::function_summary::FunctionSummary) {
+        for (i, reg) in GP16_BY_IDX.into_iter().enumerate() {
+            let preserved =
+                matches!(summary.gpregs[i], ExitVal::Entry(RegId::Gp16(r)) if r as usize == i);
+            if !preserved {
+                self.gp16[i] = TypedVal::Unknown;
+                // The two 8-bit halves go with their 16-bit parent.
+                for h in gp8_halves(reg) {
+                    self.gp8[*h as usize] = TypedVal::Unknown;
+                }
+            }
+        }
+        for (i, sreg) in [SReg::ES, SReg::CS, SReg::SS, SReg::DS]
+            .into_iter()
+            .enumerate()
+        {
+            let preserved = matches!(summary.sregs[i], ExitVal::Entry(RegId::Sreg(r)) if r == sreg);
+            if !preserved {
+                self.sregs[i] = TypedVal::Unknown;
+            }
+        }
         self.flags = std::array::from_fn(|_| TypedVal::Unknown);
     }
 }
+
+/// 16-bit registers in `GpReg16 as usize` order.
+const GP16_BY_IDX: [GpReg16; 8] = [
+    GpReg16::AX,
+    GpReg16::CX,
+    GpReg16::DX,
+    GpReg16::BX,
+    GpReg16::SP,
+    GpReg16::BP,
+    GpReg16::SI,
+    GpReg16::DI,
+];
 
 fn sreg_idx(r: SReg) -> usize {
     match r {
@@ -343,10 +386,22 @@ fn transfer_block_until(
                     state.set(loc, TypedVal::Unknown);
                 }
             }
-            // Calls / interrupts clobber caller-saved registers. Types do not
-            // flow across the call boundary except via explicit seeds.
-            Opcode::Call | Opcode::Int | Opcode::Into => {
-                state.clobber_caller_saved();
+            // A direct call drops the types of every register the callee does
+            // not preserve (per its function summary); a preserved register
+            // (e.g. a `si` the callee leaves untouched) keeps its type. An
+            // indirect call or interrupt with no summary clobbers everything.
+            Opcode::Call => {
+                let summary = inst.branch_destination().and_then(|(seg, ofs)| {
+                    let seg_idx = project.segment_index_for(seg)?;
+                    project.function_summary.get(&(seg_idx, ofs as u32))
+                });
+                match summary {
+                    Some(summary) => state.clobber_for_call(summary),
+                    None => state.clobber_all_regs(),
+                }
+            }
+            Opcode::Int | Opcode::Into => {
+                state.clobber_all_regs();
             }
             Opcode::Pushf | Opcode::Popf => {
                 abstract_stack.clear();
@@ -477,6 +532,39 @@ mod tests {
         });
         p.analyze();
         p
+    }
+
+    /// Encode a `call rel16` at `at_ofs` targeting `target_ofs`.
+    fn call_rel16(at_ofs: u32, target_ofs: u32) -> [u8; 3] {
+        let disp = (target_ofs as i32 - at_ofs as i32 - 3) as i16 as u16;
+        [0xE8, disp as u8, (disp >> 8) as u8]
+    }
+
+    #[test]
+    fn preserved_register_keeps_type_across_call() {
+        // F @ 0x00: ret             — preserves every register.
+        // caller @ 0x10 (fn: si = *Troop): call F ; cmp byte ptr [si+3], 0 ; ret.
+        // Because F preserves si, the type survives the call and `[si+3]`
+        // still resolves at 0x13.
+        let mut code = vec![0xC3]; // F: ret
+        code.resize(0x10, 0x90);
+        code.extend_from_slice(&call_rel16(0x10, 0x00)); // 0x10: call F
+        code.extend_from_slice(&[0x80, 0x7C, 0x03, 0x00]); // 0x13: cmp byte ptr [si+3], 0
+        code.push(0xC3); // 0x17: ret
+
+        let extra = "attr[seg000:0]: type = code\n\
+                     attr[seg000:10]: type = code; fn = in troop: *Troop @si\n";
+        let p = make_project(extra, &code);
+        let seg = SegmentIdx::from(0);
+
+        // si is still *Troop at the post-call `cmp` (0x13).
+        let v = p
+            .type_prop
+            .type_at(&p, seg, 0x13, Location::Gp16(GpReg16::SI));
+        assert!(
+            matches!(v, Some(TypedVal::Typed { ref ty, .. }) if ty.as_ptr().is_some()),
+            "si should stay typed across a preserving call, got {v:?}"
+        );
     }
 
     #[test]
