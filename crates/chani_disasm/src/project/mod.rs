@@ -25,10 +25,12 @@ use crate::project::architecure::Architecture;
 use crate::project::loadexpr::LoadExpr;
 use crate::seg_dataflow::SegDataflow;
 use crate::simple_const_propagation::SimpleConstPropagation;
+use crate::type_prop::TypeProp;
 use crate::work_queue::WorkQueue;
 use crate::{Address, MemRef, SymbolLookup, decode};
 use crate::{address_attributes::AddressAttributes, exe_mz::ExeMz};
 
+pub(crate) use parse::split_top_level_commas;
 use parse::{
     UnresolvedStructDef, fmt_load_expr, fmt_u32, parse_attr, parse_attr_type_str, parse_file_def,
     parse_load_expr, parse_segment, parse_struct, resolve_structs, validate_no_struct_cycles,
@@ -67,6 +69,8 @@ pub struct Project {
     pub seg_dataflow: SegDataflow,
     pub simple_const_propagation: SimpleConstPropagation,
     pub function_summary: FunctionSummaryMap,
+    /// Per-address register/stack types propagated from `let`/`fn` bindings.
+    pub type_prop: TypeProp,
     pub data_xrefs: BTreeMap<Address, BTreeSet<Address>>,
     /// Built-in interrupt documentation, parsed from `assets/*.dict`.
     pub int_descriptions: IntDescriptions,
@@ -186,6 +190,13 @@ pub struct Attr {
     /// branch instructions. When present, these are authoritative — they
     /// supersede any statically-resolved target during disassembly.
     pub targets: Vec<Address>,
+    /// Direction-less `let` type assertions: each names a typed value living in
+    /// a register/flag/stack slot, valid from this address onward. Seeds for
+    /// type propagation.
+    pub lets: Vec<crate::binding::Binding>,
+    /// A `fn` signature on a function-entry attribute: a flat list of `in` /
+    /// `out` / `inout` bindings. `None` when the attr carries no signature.
+    pub signature: Option<Vec<crate::binding::Binding>>,
 }
 
 // ── Project implementation ────────────────────────────────────────────────────
@@ -393,6 +404,7 @@ impl Project {
             seg_dataflow: SegDataflow::new(),
             simple_const_propagation: SimpleConstPropagation::new(),
             function_summary: FunctionSummaryMap::new(),
+            type_prop: TypeProp::new(),
             data_xrefs: BTreeMap::new(),
             int_descriptions: IntDescriptions::load_embedded(),
             auto_comments: BTreeMap::new(),
@@ -518,6 +530,7 @@ impl Project {
             seg_dataflow: SegDataflow::new(),
             simple_const_propagation: SimpleConstPropagation::new(),
             function_summary: FunctionSummaryMap::new(),
+            type_prop: TypeProp::new(),
             data_xrefs: BTreeMap::new(),
             int_descriptions: IntDescriptions::load_embedded(),
             auto_comments: BTreeMap::new(),
@@ -630,6 +643,22 @@ impl Project {
                         .join(" ");
                     attr_dict.prop("assume", &assume_str);
                 }
+                if !attr.lets.is_empty() {
+                    let s = crate::binding::binding_list_to_string(
+                        &attr.lets,
+                        &self.segments,
+                        &self.structs,
+                    );
+                    attr_dict.prop_encoded("let", &s);
+                }
+                if let Some(signature) = &attr.signature {
+                    let s = crate::binding::binding_list_to_string(
+                        signature,
+                        &self.segments,
+                        &self.structs,
+                    );
+                    attr_dict.prop_encoded("fn", &s);
+                }
                 for (i, fmt) in attr.arg_fmts.iter().enumerate() {
                     if let Some(fmt) = fmt {
                         attr_dict.prop(format!("arg[{i}]"), fmt.as_str());
@@ -678,6 +707,7 @@ impl Project {
         self.functions = crate::function_map::compute(self);
         self.function_summary = crate::function_summary::compute(self);
         self.seg_dataflow = crate::seg_dataflow::compute(self);
+        self.type_prop = crate::type_prop::compute(self);
 
         self.populate_int_auto_comments();
         self.generate_auto_labels();
@@ -1365,6 +1395,8 @@ impl Project {
             assume: Assumes::default(),
             arg_fmts: [None; 2],
             targets: Vec::new(),
+            lets: Vec::new(),
+            signature: None,
         });
         attr.name = Some(label);
         attr.is_auto_label = true;
@@ -1374,6 +1406,20 @@ impl Project {
     pub fn parse_type_str(&self, s: &str) -> Result<AttrType, String> {
         let struct_names: Vec<SmallString> = self.structs.iter().map(|s| s.name.clone()).collect();
         parse_attr_type_str(s, &self.segments, &struct_names)
+    }
+
+    /// Resolve a byte offset into a (pointee) type to a field accessor path,
+    /// e.g. `occupation`, `pos.x`, or `[3]` for an array element. Returns
+    /// `None` if the offset falls outside the type or lands mid-field on a
+    /// variable-size/scalar boundary. Packed layout (no gaps/unions) is assumed.
+    ///
+    /// Used by the listing renderer to rewrite `[si+3]` → `troop->occupation`
+    /// when `si` carries a `*Troop` binding.
+    pub fn field_path_in(&self, pointee: &DataType, offset: u32) -> Option<String> {
+        let path = path_in_type(pointee, offset as usize, "", &self.structs)?;
+        // `path_in_type` prefixes struct fields with '.'; strip the leading dot
+        // so callers can compose `name->field` or `name[i]` themselves.
+        Some(path.strip_prefix('.').unwrap_or(&path).to_string())
     }
 
     /// Find a segment by name.
@@ -1416,6 +1462,10 @@ fn fixed_size(dt: &DataType, structs: &Structs) -> Option<usize> {
             Some(total)
         }
         DataType::Formatted(_, inner) => fixed_size(inner, structs),
+        // Near pointer is 2 bytes; tuples are binding-only and have no fixed
+        // data-layout size.
+        DataType::Ptr(_) => Some(2),
+        DataType::Tuple(_) => None,
     }
 }
 
@@ -1456,29 +1506,146 @@ fn path_in_type(dt: &DataType, rel: usize, prefix: &str, structs: &Structs) -> O
             None
         }
         DataType::Formatted(_, inner) => path_in_type(inner, rel, prefix, structs),
-        DataType::Scalar(_) => {
+        DataType::Scalar(_) | DataType::Ptr(_) => {
             if rel == 0 {
                 Some(prefix.to_string())
             } else {
                 None
             }
         }
+        DataType::Tuple(_) => None,
+    }
+}
+
+/// Parse and resolve a binding type string (any `DataType`; `code` is rejected).
+/// Used by [`crate::binding`] when parsing `let`/`fn` bindings.
+pub(crate) fn parse_data_type_str(
+    s: &str,
+    segments: &Segments,
+    struct_names: &[SmallString],
+) -> Result<DataType, String> {
+    match parse_attr_type_str(s, segments, struct_names)? {
+        AttrType::Data(d) => Ok(d),
+        AttrType::Code => Err("'code' is not a valid binding type".to_owned()),
     }
 }
 
 // ── Symbol lookup ─────────────────────────────────────────────────────────────
+
+/// The default display name for a location (its register/flag/stack spelling),
+/// used when a binding is unnamed (`_`).
+fn loc_default_name(loc: crate::binding::Location) -> String {
+    use crate::binding::Location;
+    match loc {
+        Location::Gp16(r) => r.to_string(),
+        Location::Gp8(r) => r.to_string(),
+        Location::Seg(r) => r.to_string(),
+        Location::Flag(f) => f.as_str().to_string(),
+        Location::Stack(n) => format!("bp{n:+}"),
+    }
+}
 
 pub struct ProjectLookup<'a> {
     pub project: &'a Project,
     pub sreg_map: crate::SRegMap,
     pub register_file: Option<crate::RegisterFile>,
     pub default_seg: Option<SegmentIdx>,
+    /// Address of the instruction being rendered, used to query
+    /// `type_prop` for binding-derived register/field names. `None` disables
+    /// the type-driven rewrites (raw register/operand names are emitted).
+    pub addr: Option<Address>,
+}
+
+impl ProjectLookup<'_> {
+    /// If a base/index register at the current address carries a `*T` binding,
+    /// render the dereference as `name->field` (or `name[i]` for arrays).
+    fn typed_indirect(
+        &self,
+        base: Option<crate::BaseReg>,
+        index: Option<crate::IndexReg>,
+        disp: u16,
+    ) -> Option<String> {
+        let (seg_idx, ofs) = self.addr?;
+        let locs = [
+            index.map(|i| match i {
+                crate::IndexReg::SI => crate::binding::Location::Gp16(crate::GpReg16::SI),
+                crate::IndexReg::DI => crate::binding::Location::Gp16(crate::GpReg16::DI),
+            }),
+            base.map(|b| match b {
+                crate::BaseReg::BX => crate::binding::Location::Gp16(crate::GpReg16::BX),
+                crate::BaseReg::BP => crate::binding::Location::Gp16(crate::GpReg16::BP),
+            }),
+        ];
+        for loc in locs.into_iter().flatten() {
+            let Some(crate::type_prop::TypedVal::Typed { name, ty }) = self
+                .project
+                .type_prop
+                .type_at(self.project, seg_idx, ofs, loc)
+            else {
+                continue;
+            };
+            let Some(pointee) = ty.as_ptr() else {
+                continue;
+            };
+            let base_name = name.unwrap_or_else(|| loc_default_name(loc));
+            let path = self.project.field_path_in(pointee, disp as u32)?;
+            return Some(if path.starts_with('[') {
+                format!("{base_name}{path}")
+            } else {
+                format!("{base_name}->{path}")
+            });
+        }
+        None
+    }
 }
 
 impl SymbolLookup for ProjectLookup<'_> {
     fn lookup_direct(&self, seg: u16, ofs: u16, _width: crate::DataWidth) -> Option<String> {
         let idx = self.project.segment_index_for(seg)?;
         self.project.resolve_label(idx, ofs as u32)
+    }
+
+    fn lookup_register(&self, reg: crate::NamedReg) -> Option<String> {
+        use crate::binding::Location;
+        use crate::type_prop::{TypedVal, gp8_is_high, gp16_parent};
+        let (seg_idx, ofs) = self.addr?;
+        let tp = &self.project.type_prop;
+        match reg {
+            crate::NamedReg::Gp16(r) => {
+                match tp.type_at(self.project, seg_idx, ofs, Location::Gp16(r)) {
+                    Some(TypedVal::Typed {
+                        name: Some(name), ..
+                    }) => Some(name),
+                    _ => None,
+                }
+            }
+            crate::NamedReg::Seg(r) => {
+                match tp.type_at(self.project, seg_idx, ofs, Location::Seg(r)) {
+                    Some(TypedVal::Typed {
+                        name: Some(name), ..
+                    }) => Some(name),
+                    _ => None,
+                }
+            }
+            crate::NamedReg::Gp8(r) => {
+                // A direct 8-bit binding wins; otherwise a 16-bit parent binding
+                // renders as `name.lo` / `name.hi`.
+                if let Some(TypedVal::Typed {
+                    name: Some(name), ..
+                }) = tp.type_at(self.project, seg_idx, ofs, Location::Gp8(r))
+                {
+                    return Some(name);
+                }
+                if let Some(TypedVal::Typed {
+                    name: Some(name), ..
+                }) = tp.type_at(self.project, seg_idx, ofs, Location::Gp16(gp16_parent(r)))
+                {
+                    let half = if gp8_is_high(r) { "hi" } else { "lo" };
+                    return Some(format!("{name}.{half}"));
+                }
+                None
+            }
+        }
     }
 
     fn lookup_indirect(
@@ -1489,6 +1656,16 @@ impl SymbolLookup for ProjectLookup<'_> {
         disp: u16,
         _width: crate::DataWidth,
     ) -> Option<String> {
+        // A `*T` binding on a base/index register rewrites `[si+3]` →
+        // `troop->occupation`. This is segment-independent (near pointer, offset
+        // only), so it runs before the segment-register resolution below and
+        // only for static rendering (no live register file).
+        if self.register_file.is_none()
+            && let Some(name) = self.typed_indirect(base, index, disp)
+        {
+            return Some(name);
+        }
+
         let seg = self.sreg_map.get(seg)?;
         let mut base = base;
         let mut index = index;
@@ -1509,10 +1686,10 @@ impl SymbolLookup for ProjectLookup<'_> {
         match (base, index) {
             // No register: a plain direct reference; keep its label unconditionally.
             (None, None) => self.project.resolve_label(seg, disp as u32),
-            // A register is present, so this is an indexed access. Only emit
-            // `name[reg]` when `disp` is covered by an array; otherwise fall
-            // back to the raw `[base+index+disp]` form so a scalar global does
-            // not masquerade as an array (see `is_register_indexable`).
+            // A register is present, so this is an indexed access. Emit
+            // `name[reg]` only when `disp` is covered by an array (so a scalar
+            // global does not masquerade as one — see `is_register_indexable`).
+            // The `*T` binding rewrite was already handled at the top.
             (base, index) => {
                 if !self.project.is_register_indexable(seg, disp as u32) {
                     return None;
@@ -1628,5 +1805,39 @@ fn collect_ofs16_targets(
         DataType::Formatted(_, inner) => {
             collect_ofs16_targets(inner, bytes, structs, fallback_seg, targets);
         }
+        // Pointers and tuples are binding-only types; they carry no data-table
+        // ofs16 targets.
+        DataType::Ptr(_) | DataType::Tuple(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod field_path_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_struct_field_offsets() {
+        // Troop: occupation at +3, armyskill at +0x17 (matching the design note).
+        let chani = "project[t]:\n\
+                     arch = 8086\n\
+                     segment[seg000]: type = code; start = 0; end = 0x100\n\
+                     struct[Troop]: _pad0 = [u8; 3]; occupation = u8; _pad1 = [u8; 19]; armyskill = u8\n\
+                     end\n";
+        let p = Project::from_str(chani).unwrap();
+        let troop = DataType::Composite(CompositeDataType::Struct(0));
+
+        assert_eq!(p.field_path_in(&troop, 3).as_deref(), Some("occupation"));
+        assert_eq!(p.field_path_in(&troop, 0x17).as_deref(), Some("armyskill"));
+        // Offset 0 lands on the start of the leading field (no index suffix).
+        assert_eq!(p.field_path_in(&troop, 0).as_deref(), Some("_pad0"));
+        // Out of range.
+        assert_eq!(p.field_path_in(&troop, 0x100), None);
+
+        // A pointer to an array resolves to an index accessor.
+        let arr = DataType::Composite(CompositeDataType::Array {
+            elem: Box::new(DataType::Scalar(ScalarDataType::U16)),
+            count: 4,
+        });
+        assert_eq!(p.field_path_in(&arr, 4).as_deref(), Some("[2]"));
     }
 }

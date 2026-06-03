@@ -88,6 +88,16 @@ struct SetArgs {
     /// Use "" once to clear.
     #[arg(long = "target", value_name = "SEG:OFS")]
     target: Vec<String>,
+    /// Set direction-less `let` type assertions, a comma-separated binding list,
+    /// e.g. "troop: *Troop @si, count: u16 @ -2". Replaces all existing; use ""
+    /// to clear.
+    #[arg(long = "let", value_name = "BINDINGS")]
+    r#let: Option<String>,
+    /// Set the `fn` signature, a comma-separated binding list with directions,
+    /// e.g. "in troop: *Troop @si, inout count: u16 @cx". Replaces any existing;
+    /// use "" to clear.
+    #[arg(long = "fn", value_name = "BINDINGS")]
+    r#fn: Option<String>,
     /// Remove the attr entirely
     #[arg(long)]
     delete: bool,
@@ -237,6 +247,7 @@ fn render_addr(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> String {
         sreg_map,
         register_file: None,
         default_seg: ofs_seg,
+        addr: Some((seg_idx, ofs)),
     };
     let ctx = DisplayContext {
         lookup: &lookup,
@@ -264,6 +275,7 @@ fn print_addr_block(
         sreg_map,
         register_file: None,
         default_seg: ofs_seg,
+        addr: Some((seg_idx, ofs)),
     };
     let ctx = DisplayContext {
         lookup: &lookup,
@@ -334,9 +346,11 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             && args.assume.is_empty()
             && args.arg_fmt.is_empty()
             && args.target.is_empty()
+            && args.r#let.is_none()
+            && args.r#fn.is_none()
         {
             bail!(
-                "specify at least one of --name, --type, --comment, --ofs-seg, --assume, --arg, --target (or --delete)"
+                "specify at least one of --name, --type, --comment, --ofs-seg, --assume, --arg, --target, --let, --fn (or --delete)"
             );
         }
 
@@ -393,6 +407,31 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             parsed_targets.push(parse_addr(&project, s)?);
         }
 
+        let struct_names: Vec<String> = project.structs.iter().map(|s| s.name.clone()).collect();
+        let parsed_lets = args
+            .r#let
+            .as_deref()
+            .map(|s| {
+                let bindings =
+                    chani_disasm::binding::parse_binding_list(s, &project.segments, &struct_names)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                for b in &bindings {
+                    if b.dir.is_some() {
+                        bail!("--let bindings must not carry a direction (in/out/inout)");
+                    }
+                }
+                Ok::<_, anyhow::Error>(bindings)
+            })
+            .transpose()?;
+        let parsed_signature = args
+            .r#fn
+            .as_deref()
+            .map(|s| {
+                chani_disasm::binding::parse_binding_list(s, &project.segments, &struct_names)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+            })
+            .transpose()?;
+
         let attr = project.attrs.entry((seg_idx, ofs)).or_insert_with(|| Attr {
             addr: (seg_idx, ofs),
             r#type: None,
@@ -403,6 +442,8 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             assume: Assumes::default(),
             arg_fmts: [None; 2],
             targets: Vec::new(),
+            lets: Vec::new(),
+            signature: None,
         });
 
         if let Some(name) = args.name {
@@ -430,6 +471,17 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
         }
         if !args.target.is_empty() {
             attr.targets = parsed_targets;
+        }
+        // An empty --let string clears; a non-empty one replaces.
+        if let Some(lets) = parsed_lets {
+            attr.lets = lets;
+        }
+        if let Some(signature) = parsed_signature {
+            attr.signature = if signature.is_empty() {
+                None
+            } else {
+                Some(signature)
+            };
         }
     }
 
@@ -477,6 +529,26 @@ fn cmd_get(path: &Path, addr_str: &str) -> Result<()> {
             .map(|(r, seg)| format!("{r}:{seg}"))
             .collect();
         println!("  assume:  {}", s.join(" "));
+    }
+    if !attr.lets.is_empty() {
+        println!(
+            "  let:     {}",
+            chani_disasm::binding::binding_list_to_string(
+                &attr.lets,
+                &project.segments,
+                &project.structs,
+            )
+        );
+    }
+    if let Some(signature) = &attr.signature {
+        println!(
+            "  fn:      {}",
+            chani_disasm::binding::binding_list_to_string(
+                signature,
+                &project.segments,
+                &project.structs,
+            )
+        );
     }
     for (i, fmt) in attr.arg_fmts.iter().enumerate() {
         if let Some(f) = fmt {
@@ -631,6 +703,7 @@ fn collect_rendered_lines(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> V
         sreg_map,
         register_file: None,
         default_seg: ofs_seg,
+        addr: Some((seg_idx, ofs)),
     };
     let ctx = DisplayContext {
         lookup: &lookup,
@@ -1337,5 +1410,7 @@ fn contains_unresolved_ofs16(dt: &DataType) -> bool {
         }
         DataType::Composite(CompositeDataType::Struct(_)) => false,
         DataType::Formatted(_, inner) => contains_unresolved_ofs16(inner),
+        DataType::Ptr(inner) => contains_unresolved_ofs16(inner),
+        DataType::Tuple(members) => members.iter().any(contains_unresolved_ofs16),
     }
 }

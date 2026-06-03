@@ -19,6 +19,7 @@ enum UnresolvedAttrType {
     U8,
     U16,
     U32,
+    Bool,
     Str(usize),
     Ofs16(Option<String>),
     Struct(String),
@@ -28,6 +29,8 @@ enum UnresolvedAttrType {
     },
     CStr,
     Formatted(DisplayFmt, Box<UnresolvedAttrType>),
+    Ptr(Box<UnresolvedAttrType>),
+    Tuple(Vec<UnresolvedAttrType>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -403,8 +406,50 @@ fn try_parse_fmt_wrapper(s: &str) -> Option<(DisplayFmt, &str)> {
     Some((fmt, inner))
 }
 
+/// Split `s` on commas that are not nested inside `[]` or `()`. Used for tuple
+/// members and binding lists.
+pub(crate) fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(s[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = s[start..].trim();
+    if !tail.is_empty() || !parts.is_empty() {
+        parts.push(tail);
+    }
+    parts
+}
+
 fn parse_attr_type(s: &str) -> Result<UnresolvedAttrType, ()> {
     let s = s.trim();
+
+    // *T — near pointer
+    if let Some(inner) = s.strip_prefix('*') {
+        return Ok(UnresolvedAttrType::Ptr(Box::new(parse_attr_type(inner)?)));
+    }
+
+    // (T, U, …) — tuple of multiple values
+    if let Some(inner) = s.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+        let inner = inner.trim();
+        if inner.is_empty() {
+            return Ok(UnresolvedAttrType::Tuple(Vec::new()));
+        }
+        let members = split_top_level_commas(inner)
+            .iter()
+            .map(|m| parse_attr_type(m))
+            .collect::<Result<Vec<_>, ()>>()?;
+        return Ok(UnresolvedAttrType::Tuple(members));
+    }
 
     // [elem; count]
     if let Some(inner) = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
@@ -441,6 +486,7 @@ fn parse_attr_type(s: &str) -> Result<UnresolvedAttrType, ()> {
         "u8" => Ok(UnresolvedAttrType::U8),
         "u16" => Ok(UnresolvedAttrType::U16),
         "u32" => Ok(UnresolvedAttrType::U32),
+        "bool" => Ok(UnresolvedAttrType::Bool),
         "cstr" => Ok(UnresolvedAttrType::CStr),
         _ => {
             if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -515,6 +561,7 @@ fn resolve_data_type(
         UnresolvedAttrType::U8 => Ok(DataType::Scalar(ScalarDataType::U8)),
         UnresolvedAttrType::U16 => Ok(DataType::Scalar(ScalarDataType::U16)),
         UnresolvedAttrType::U32 => Ok(DataType::Scalar(ScalarDataType::U32)),
+        UnresolvedAttrType::Bool => Ok(DataType::Scalar(ScalarDataType::Bool)),
         UnresolvedAttrType::Str(n) => Ok(DataType::Scalar(ScalarDataType::Str(*n))),
         UnresolvedAttrType::CStr => Ok(DataType::Scalar(ScalarDataType::CStr)),
         UnresolvedAttrType::Ofs16(None) => Ok(DataType::Scalar(ScalarDataType::Ofs16(None))),
@@ -544,6 +591,17 @@ fn resolve_data_type(
         UnresolvedAttrType::Formatted(fmt, inner) => {
             let inner = resolve_data_type(inner, segments, struct_names)?;
             Ok(DataType::Formatted(*fmt, Box::new(inner)))
+        }
+        UnresolvedAttrType::Ptr(inner) => {
+            let inner = resolve_data_type(inner, segments, struct_names)?;
+            Ok(DataType::Ptr(Box::new(inner)))
+        }
+        UnresolvedAttrType::Tuple(members) => {
+            let members = members
+                .iter()
+                .map(|m| resolve_data_type(m, segments, struct_names))
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(DataType::Tuple(members))
         }
     }
 }
@@ -606,6 +664,8 @@ pub(super) fn parse_attr(
     let mut assume = Assumes::default();
     let mut arg_fmts: [Option<DisplayFmt>; 2] = [None; 2];
     let mut targets: Vec<(SegmentIdx, u32)> = Vec::new();
+    let mut lets: Vec<crate::binding::Binding> = Vec::new();
+    let mut signature: Option<Vec<crate::binding::Binding>> = None;
 
     for item in &dict.items {
         if let Item::Property { key, value, line } = item {
@@ -674,6 +734,26 @@ pub(super) fn parse_attr(
                     })?;
                     arg_fmts[idx] = Some(fmt);
                 }
+                "let" => {
+                    let bindings =
+                        crate::binding::parse_binding_list(value, segments, struct_names)
+                            .map_err(|e| format!("line {line}: in 'let' of '{}': {e}", dict.key))?;
+                    for b in &bindings {
+                        if b.dir.is_some() {
+                            return Err(format!(
+                                "line {line}: 'let' binding in '{}' must not carry a direction",
+                                dict.key
+                            ));
+                        }
+                    }
+                    lets.extend(bindings);
+                }
+                "fn" => {
+                    let bindings =
+                        crate::binding::parse_binding_list(value, segments, struct_names)
+                            .map_err(|e| format!("line {line}: in 'fn' of '{}': {e}", dict.key))?;
+                    signature = Some(bindings);
+                }
                 _ => {
                     return Err(format!(
                         "line {line}: unknown key '{}' in attr '{}'",
@@ -694,6 +774,8 @@ pub(super) fn parse_attr(
         assume,
         arg_fmts,
         targets,
+        lets,
+        signature,
     })
 }
 

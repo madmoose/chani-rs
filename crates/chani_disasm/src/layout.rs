@@ -574,6 +574,15 @@ impl<'a> LayoutBuilder<'a> {
                 self.layout_array_fmt(x, elem, *count, fmt)
             }
             DataType::Composite(CompositeDataType::Struct(idx)) => self.layout_struct(x, *idx),
+            // Pointers render as a 2-byte near offset; tuples are binding-only
+            // and never reach data layout, but render their members as a
+            // best-effort fallback.
+            DataType::Ptr(_) => self.layout_scalar(x, &ScalarDataType::Ofs16(None), fmt),
+            DataType::Tuple(members) => {
+                for m in members {
+                    self.layout_data_fmt(x, m, fmt);
+                }
+            }
         }
     }
 
@@ -594,6 +603,15 @@ impl<'a> LayoutBuilder<'a> {
                     }
                 }
                 self.add(x, WidgetKind::Data, s);
+                self.ofs += 1;
+            }
+            ScalarDataType::Bool => {
+                let v = read_u8(bytes);
+                self.add(
+                    x,
+                    WidgetKind::Data,
+                    format!("db {}", format_numeric_value(v)),
+                );
                 self.ofs += 1;
             }
             ScalarDataType::U8 => {
@@ -1190,6 +1208,7 @@ pub fn generate_widgets_with_options(
                 sreg_map,
                 register_file: None,
                 default_seg: ofs_seg,
+                addr: Some((seg_idx, ofs)),
             };
             let ctx = DisplayContext {
                 lookup: &lookup,

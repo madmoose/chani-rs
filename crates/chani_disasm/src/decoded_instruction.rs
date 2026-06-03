@@ -430,9 +430,34 @@ impl DecodedInstruction {
     }
 }
 
+/// A register operand identity, passed to [`SymbolLookup::lookup_register`] so
+/// a renderer can substitute a binding name (e.g. `cx` → `count`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum NamedReg {
+    Gp16(GpReg16),
+    Gp8(GpReg8),
+    Seg(SReg),
+}
+
+impl std::fmt::Display for NamedReg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NamedReg::Gp16(r) => write!(f, "{r}"),
+            NamedReg::Gp8(r) => write!(f, "{r}"),
+            NamedReg::Seg(r) => write!(f, "{r}"),
+        }
+    }
+}
+
 pub trait SymbolLookup {
     /// For `MemRef::Direct { seg, ofs, width }`.
     fn lookup_direct(&self, seg: u16, ofs: u16, width: DataWidth) -> Option<String>;
+
+    /// Resolve a register operand to a binding-derived display name (e.g.
+    /// `count`, `skill_sum.lo`) at the address being rendered. Default: none.
+    fn lookup_register(&self, _reg: NamedReg) -> Option<String> {
+        None
+    }
 
     /// For `MemRef::Indirect { seg, base, index, disp, width }`.
     /// Resolves base/index registers and the segment register internally.
@@ -510,6 +535,15 @@ impl RegisterFile {
             IndexReg::SI => self.reg[4],
             IndexReg::DI => self.reg[5],
         }
+    }
+}
+
+/// Render a register operand, substituting a binding name from the lookup when
+/// one is available (e.g. `cx` → `count`), otherwise the raw register name.
+fn write_reg<W: Write>(w: &mut W, ctx: &DisplayContext, reg: NamedReg) -> std::fmt::Result {
+    match ctx.lookup.lookup_register(reg) {
+        Some(name) => write!(w, "{name}"),
+        None => write!(w, "{reg}"),
     }
 }
 
@@ -611,29 +645,31 @@ impl DecodedInstruction {
             ArgType::None => unreachable!(),
             ArgType::Const1 => write!(w, "1")?,
             ArgType::Const3 => write!(w, "3")?,
-            ArgType::AL => write!(w, "al")?,
-            ArgType::CL => write!(w, "cl")?,
-            ArgType::DL => write!(w, "dl")?,
-            ArgType::BL => write!(w, "bl")?,
-            ArgType::AH => write!(w, "ah")?,
-            ArgType::CH => write!(w, "ch")?,
-            ArgType::DH => write!(w, "dh")?,
-            ArgType::BH => write!(w, "bh")?,
-            ArgType::AX => write!(w, "ax")?,
-            ArgType::CX => write!(w, "cx")?,
-            ArgType::DX => write!(w, "dx")?,
-            ArgType::BX => write!(w, "bx")?,
-            ArgType::SP => write!(w, "sp")?,
-            ArgType::BP => write!(w, "bp")?,
-            ArgType::SI => write!(w, "si")?,
-            ArgType::DI => write!(w, "di")?,
-            ArgType::ES => write!(w, "es")?,
-            ArgType::CS => write!(w, "cs")?,
-            ArgType::SS => write!(w, "ss")?,
-            ArgType::DS => write!(w, "ds")?,
-            ArgType::Reg8 => write!(w, "{}", GpReg8::from_bits(self.modrm >> 3))?,
-            ArgType::Reg16 => write!(w, "{}", GpReg16::from_bits(self.modrm >> 3))?,
-            ArgType::SReg => write!(w, "{}", SReg::from_bits(self.modrm >> 3))?,
+            ArgType::AL => write_reg(w, ctx, NamedReg::Gp8(GpReg8::AL))?,
+            ArgType::CL => write_reg(w, ctx, NamedReg::Gp8(GpReg8::CL))?,
+            ArgType::DL => write_reg(w, ctx, NamedReg::Gp8(GpReg8::DL))?,
+            ArgType::BL => write_reg(w, ctx, NamedReg::Gp8(GpReg8::BL))?,
+            ArgType::AH => write_reg(w, ctx, NamedReg::Gp8(GpReg8::AH))?,
+            ArgType::CH => write_reg(w, ctx, NamedReg::Gp8(GpReg8::CH))?,
+            ArgType::DH => write_reg(w, ctx, NamedReg::Gp8(GpReg8::DH))?,
+            ArgType::BH => write_reg(w, ctx, NamedReg::Gp8(GpReg8::BH))?,
+            ArgType::AX => write_reg(w, ctx, NamedReg::Gp16(GpReg16::AX))?,
+            ArgType::CX => write_reg(w, ctx, NamedReg::Gp16(GpReg16::CX))?,
+            ArgType::DX => write_reg(w, ctx, NamedReg::Gp16(GpReg16::DX))?,
+            ArgType::BX => write_reg(w, ctx, NamedReg::Gp16(GpReg16::BX))?,
+            ArgType::SP => write_reg(w, ctx, NamedReg::Gp16(GpReg16::SP))?,
+            ArgType::BP => write_reg(w, ctx, NamedReg::Gp16(GpReg16::BP))?,
+            ArgType::SI => write_reg(w, ctx, NamedReg::Gp16(GpReg16::SI))?,
+            ArgType::DI => write_reg(w, ctx, NamedReg::Gp16(GpReg16::DI))?,
+            ArgType::ES => write_reg(w, ctx, NamedReg::Seg(SReg::ES))?,
+            ArgType::CS => write_reg(w, ctx, NamedReg::Seg(SReg::CS))?,
+            ArgType::SS => write_reg(w, ctx, NamedReg::Seg(SReg::SS))?,
+            ArgType::DS => write_reg(w, ctx, NamedReg::Seg(SReg::DS))?,
+            ArgType::Reg8 => write_reg(w, ctx, NamedReg::Gp8(GpReg8::from_bits(self.modrm >> 3)))?,
+            ArgType::Reg16 => {
+                write_reg(w, ctx, NamedReg::Gp16(GpReg16::from_bits(self.modrm >> 3)))?
+            }
+            ArgType::SReg => write_reg(w, ctx, NamedReg::Seg(SReg::from_bits(self.modrm >> 3)))?,
             ArgType::Imm8 => {
                 if let Some(name) = ctx.lookup.lookup_offset(self.imm[i] as u16) {
                     return write!(w, "{name}");
@@ -744,9 +780,9 @@ impl DecodedInstruction {
                     if matches!(arg, ArgType::Mem16 | ArgType::Mem32) {
                         write!(w, "invalid")?;
                     } else if wd {
-                        write!(w, "{}", GpReg16::from_bits(rm))?;
+                        write_reg(w, ctx, NamedReg::Gp16(GpReg16::from_bits(rm)))?;
                     } else {
-                        write!(w, "{}", GpReg8::from_bits(rm))?;
+                        write_reg(w, ctx, NamedReg::Gp8(GpReg8::from_bits(rm)))?;
                     }
                 } else {
                     if needs_width_specifier {
@@ -891,7 +927,7 @@ impl Display for DecodedInstruction {
 }
 
 /// 16-bit general-purpose register, indexed in standard 8086 modrm.reg / modrm.rm order.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GpReg16 {
     AX,
     CX,
@@ -939,7 +975,7 @@ impl Display for GpReg16 {
 }
 
 /// 8-bit general-purpose register, indexed in standard 8086 modrm.reg / modrm.rm order.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GpReg8 {
     AL,
     CL,

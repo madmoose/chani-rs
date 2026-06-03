@@ -1,6 +1,7 @@
 pub mod abstract_register_value_flow;
 pub mod address_attributes;
 pub mod basic_block;
+pub mod binding;
 pub mod branch_map;
 pub mod data_type;
 mod decoded_instruction;
@@ -14,13 +15,14 @@ mod opcode_table;
 pub mod project;
 pub mod seg_dataflow;
 pub mod simple_const_propagation;
+pub mod type_prop;
 pub mod work_queue;
 
 use std::fmt::Display;
 
 pub use decoded_instruction::{
     BaseReg, DataWidth, DecodedInstruction, DisplayContext, GpReg8, GpReg16, IndexReg, MemRef,
-    Operand, RegisterFile, SRegMap, SymbolLookup,
+    NamedReg, Operand, RegisterFile, SRegMap, SymbolLookup,
 };
 pub use disassemble::{DisasmCtx, decode, decode_with_ctx};
 pub use opcode_table::Opcode;
@@ -31,7 +33,7 @@ type SmallString = String;
 
 pub type Address = (SegmentIdx, u32);
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SReg {
     ES,
     CS,
