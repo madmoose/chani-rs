@@ -610,6 +610,46 @@ mod tests {
         inst.to_string_opts(ctx)
     }
 
+    /// Render every line of the block starting at `ofs` through the layout.
+    fn render_block_lines(p: &Project, seg: SegmentIdx, ofs: u32) -> Vec<String> {
+        let lookup = crate::project::ProjectLookup {
+            project: p,
+            sreg_map: crate::SRegMap::default(),
+            register_file: None,
+            default_seg: None,
+            addr: Some((seg, ofs)),
+        };
+        let ctx = crate::DisplayContext {
+            lookup: &lookup,
+            arg_fmts: [None; 2],
+        };
+        let mut b = crate::layout::LayoutBuilder::new(p, seg, ofs, &ctx);
+        b.layout();
+        (0..b.lines())
+            .map(|y| {
+                let mut s = String::new();
+                b.render(&mut s, y);
+                s
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fn_signature_shown_as_listing_header() {
+        let code = [0x80, 0x7C, 0x03, 0x04, 0xC3]; // cmp byte ptr [si+3], 4 ; ret
+        let extra =
+            "attr[seg000:0]: type = code; fn = in troop: *Troop @si, inout count: u16 @cx\n";
+        let p = make_project(extra, &code);
+        let lines = render_block_lines(&p, SegmentIdx::from(0), 0x0);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("; fn = in troop: *Troop @si, inout count: u16 @cx")),
+            "fn header missing from listing:\n{}",
+            lines.join("\n")
+        );
+    }
+
     #[test]
     fn renders_section_5_3_accumulator_callback() {
         // The §5.3 worked example:

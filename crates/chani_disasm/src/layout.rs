@@ -355,6 +355,7 @@ impl<'a> LayoutBuilder<'a> {
             }
 
             self.layout_xrefs_in();
+            self.layout_binding_comments();
 
             if let Some(label) = label {
                 self.add(self.label_x0, WidgetKind::Label, format!("{label}:"));
@@ -375,6 +376,35 @@ impl<'a> LayoutBuilder<'a> {
         }
 
         self.widgets.sort_by_key(|w| (w.y, w.x));
+    }
+
+    /// Emit the `fn` signature and `let` type assertions attached to this
+    /// address as block-header comment lines, e.g.
+    /// `; fn = in troop: *Troop @si, inout count: u16 @cx`.
+    fn layout_binding_comments(&mut self) {
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(attr) = self.project.attr_at(self.seg_idx, self.base_ofs) {
+            if let Some(signature) = &attr.signature {
+                let s = crate::binding::binding_list_to_string(
+                    signature,
+                    &self.project.segments,
+                    &self.project.structs,
+                );
+                lines.push(format!("; fn = {s}"));
+            }
+            if !attr.lets.is_empty() {
+                let s = crate::binding::binding_list_to_string(
+                    &attr.lets,
+                    &self.project.segments,
+                    &self.project.structs,
+                );
+                lines.push(format!("; let = {s}"));
+            }
+        }
+        for line in lines {
+            self.add(self.label_x0, WidgetKind::Comment, line);
+            self.new_line();
+        }
     }
 
     fn layout_instruction(
@@ -415,6 +445,8 @@ impl<'a> LayoutBuilder<'a> {
                 self.new_line();
             }
         }
+
+        self.layout_binding_comments();
 
         if let Some(label) = label {
             self.add(self.label_x0, WidgetKind::Label, format!("{label}:"));
