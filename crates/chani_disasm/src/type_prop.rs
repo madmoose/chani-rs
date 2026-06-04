@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::binding::{Binding, Location};
+use crate::binding::{Binding, Direction, Location};
 use crate::data_type::DataType;
 use crate::function_summary::{ExitVal, RegId};
 use crate::{
@@ -305,7 +305,9 @@ fn apply_seeds(state: &mut TypeState, project: &Project, seg_idx: SegmentIdx, of
     };
     if let Some(signature) = &attr.signature {
         for b in signature {
-            seed(state, b);
+            if matches!(b.dir, None | Some(Direction::In | Direction::InOut)) {
+                seed(state, b);
+            }
         }
     }
     for b in &attr.lets {
