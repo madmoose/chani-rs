@@ -127,6 +127,11 @@ where
                 imm_ofs[i] = Some(ofs);
                 imm[i] = fetch() as u32;
             }
+            ArgType::Imm8Sx => {
+                imm_ofs[i] = Some(ofs);
+                // Sign extend imm byte
+                imm[i] = fetch() as i8 as i16 as u16 as u32;
+            }
             ArgType::IMem8 | ArgType::IMem16 | ArgType::Imm16 | ArgType::Rel16 => {
                 imm_ofs[i] = Some(ofs);
                 imm[i] = fetch16() as u32;

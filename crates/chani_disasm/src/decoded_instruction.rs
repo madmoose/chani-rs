@@ -343,6 +343,10 @@ impl DecodedInstruction {
                 value: self.imm[i],
                 width: DataWidth::Byte,
             },
+            ArgType::Imm8Sx => Operand::Imm {
+                value: self.imm[i],
+                width: DataWidth::Word,
+            },
             ArgType::Imm16 => {
                 if let Some(idx) = self.imm_seg[i] {
                     Operand::SegRef(idx)
@@ -678,6 +682,17 @@ impl DecodedInstruction {
                     w,
                     self.imm[i],
                     DataWidth::Byte,
+                    ctx.arg_fmts[i].unwrap_or_default(),
+                )?;
+            }
+            ArgType::Imm8Sx => {
+                if let Some(name) = ctx.lookup.lookup_offset(self.imm[i] as u16) {
+                    return write!(w, "{name}");
+                }
+                write_imm_fmt(
+                    w,
+                    self.imm[i],
+                    DataWidth::Word,
                     ctx.arg_fmts[i].unwrap_or_default(),
                 )?;
             }

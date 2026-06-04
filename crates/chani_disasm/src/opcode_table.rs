@@ -233,6 +233,7 @@ pub enum ArgType {
     Reg16,
     SReg,
     Imm8,
+    Imm8Sx,
     Imm16,
     Rel8,
     Rel16,
@@ -248,7 +249,7 @@ pub enum ArgType {
 
 impl ArgType {
     pub fn needs_width_specifier(&self) -> bool {
-        matches!(self, Self::None | Self::Imm8 | Self::Imm16)
+        matches!(self, Self::None | Self::Imm8 | Self::Imm8Sx | Self::Imm16)
     }
 }
 
@@ -469,7 +470,7 @@ pub static OPCODE_TABLE: [Option<Instruction>; 256] = [
     /* 80 */ group!(         RM8, Imm8, RW, RO),
     /* 81 */ group!(         RM16, Imm16, RW, RO),
     /* 82 */ group!(         RM8, Imm8, RW, RO),
-    /* 83 */ group!(         RM16, Imm8, RW, RO),
+    /* 83 */ group!(         RM16, Imm8Sx, RW, RO),
     /* 84 */ opcode!(Test, ModRM, Reg8, RM8, RO, RO),
     /* 85 */ opcode!(Test, ModRM, Reg16, RM16, RO, RO),
     /* 86 */ opcode!(Xchg, ModRM, Reg8, RM8, RW, RW),

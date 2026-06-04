@@ -492,7 +492,10 @@ impl<'a> LayoutBuilder<'a> {
                 x += 2;
             }
 
-            let is_imm = matches!(inst.arg_type[i], ArgType::Imm8 | ArgType::Imm16);
+            let is_imm = matches!(
+                inst.arg_type[i],
+                ArgType::Imm8 | ArgType::Imm8Sx | ArgType::Imm16
+            );
             let sub_label = if is_imm {
                 let lbl = sub_labels.get(sub_label_idx);
                 sub_label_idx += 1;
