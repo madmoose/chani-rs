@@ -107,6 +107,131 @@ impl OfsSegPicker {
     }
 }
 
+/// Char index of the start of the word at or before `col` in `text`: skip any
+/// whitespace immediately left of the cursor, then the word run before it.
+/// Drives Ctrl-W and word-left motion.
+fn prev_word(text: &str, col: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = col.min(chars.len());
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    while i > 0 && !chars[i - 1].is_whitespace() {
+        i -= 1;
+    }
+    i
+}
+
+/// Char index of the start of the next word after `col` in `text`: skip the word
+/// run under the cursor, then any whitespace after it. Drives word-right motion.
+fn next_word(text: &str, col: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut i = col.min(n);
+    while i < n && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    while i < n && chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Byte offset of character index `col` in `s` (clamped to `s.len()`).
+fn byte_at(s: &str, col: usize) -> usize {
+    s.char_indices().nth(col).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// A single-line text field with a char cursor and readline/emacs-style editing:
+/// arrows, Home/End, Ctrl-A/E/B/F/D/H, Ctrl-W/U/K, and word motions
+/// (Alt-B/F, Ctrl/Alt-←/→). Used by the goto/search/rename prompt.
+#[derive(Default)]
+struct LineInput {
+    text: String,
+    /// Cursor position as a character index into `text`.
+    col: usize,
+}
+
+impl LineInput {
+    fn new(text: String) -> Self {
+        let col = text.chars().count();
+        LineInput { text, col }
+    }
+
+    fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn insert(&mut self, c: char) {
+        self.text.insert(byte_at(&self.text, self.col), c);
+        self.col += 1;
+    }
+
+    fn backspace(&mut self) {
+        if self.col > 0 {
+            self.text.remove(byte_at(&self.text, self.col - 1));
+            self.col -= 1;
+        }
+    }
+
+    fn delete(&mut self) {
+        if self.col < self.len() {
+            self.text.remove(byte_at(&self.text, self.col));
+        }
+    }
+
+    /// Delete the range `[from, self.col)` (char indices), leaving the cursor at
+    /// `from`. Shared backing for Ctrl-W and Ctrl-U.
+    fn delete_back_to(&mut self, from: usize) {
+        let lo = byte_at(&self.text, from);
+        let hi = byte_at(&self.text, self.col);
+        self.text.replace_range(lo..hi, "");
+        self.col = from;
+    }
+
+    fn delete_word_back(&mut self) {
+        self.delete_back_to(prev_word(&self.text, self.col));
+    }
+
+    fn delete_to_start(&mut self) {
+        self.delete_back_to(0);
+    }
+
+    fn delete_to_end(&mut self) {
+        self.text.truncate(byte_at(&self.text, self.col));
+    }
+
+    /// Apply one editing key. Esc/Enter (submit/cancel) are handled by the caller.
+    fn on_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Left if ctrl || alt => self.col = prev_word(&self.text, self.col),
+            KeyCode::Right if ctrl || alt => self.col = next_word(&self.text, self.col),
+            KeyCode::Left => self.col = self.col.saturating_sub(1),
+            KeyCode::Right if self.col < self.len() => self.col += 1,
+            KeyCode::Right => {}
+            KeyCode::Home => self.col = 0,
+            KeyCode::End => self.col = self.len(),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Char('a') if ctrl => self.col = 0,
+            KeyCode::Char('e') if ctrl => self.col = self.len(),
+            KeyCode::Char('b') if ctrl => self.col = self.col.saturating_sub(1),
+            KeyCode::Char('f') if ctrl && self.col < self.len() => self.col += 1,
+            KeyCode::Char('b') if alt => self.col = prev_word(&self.text, self.col),
+            KeyCode::Char('f') if alt => self.col = next_word(&self.text, self.col),
+            KeyCode::Char('h') if ctrl => self.backspace(),
+            KeyCode::Char('d') if ctrl => self.delete(),
+            KeyCode::Char('w') if ctrl => self.delete_word_back(),
+            KeyCode::Char('u') if ctrl => self.delete_to_start(),
+            KeyCode::Char('k') if ctrl => self.delete_to_end(),
+            KeyCode::Char(c) if !ctrl && !alt => self.insert(c),
+            _ => {}
+        }
+    }
+}
+
 /// A minimal multi-line text buffer for the comment editor: lines plus a
 /// `(row, col)` cursor measured in characters.
 struct CommentEditor {
@@ -218,6 +343,52 @@ impl CommentEditor {
             self.col = self.col.min(self.line_len());
         }
     }
+
+    /// Word-left within the line; at the line start, fall through to `left`
+    /// (crossing into the previous line).
+    fn word_left(&mut self) {
+        if self.col > 0 {
+            self.col = prev_word(&self.lines[self.row], self.col);
+        } else {
+            self.left();
+        }
+    }
+
+    /// Word-right within the line; at the line end, fall through to `right`.
+    fn word_right(&mut self) {
+        if self.col < self.line_len() {
+            self.col = next_word(&self.lines[self.row], self.col);
+        } else {
+            self.right();
+        }
+    }
+
+    /// Delete the word before the cursor; at the line start, join with the
+    /// previous line (like `backspace`).
+    fn delete_word_back(&mut self) {
+        if self.col == 0 {
+            self.backspace();
+            return;
+        }
+        let from = prev_word(&self.lines[self.row], self.col);
+        let lo = self.byte_at(from);
+        let hi = self.byte_at(self.col);
+        self.lines[self.row].replace_range(lo..hi, "");
+        self.col = from;
+    }
+
+    /// Delete from the line start to the cursor (Ctrl-U).
+    fn delete_to_start(&mut self) {
+        let hi = self.byte_at(self.col);
+        self.lines[self.row].replace_range(..hi, "");
+        self.col = 0;
+    }
+
+    /// Delete from the cursor to the line end (Ctrl-K).
+    fn delete_to_end(&mut self) {
+        let lo = self.byte_at(self.col);
+        self.lines[self.row].truncate(lo);
+    }
 }
 
 /// Input mode: normal navigation, a single-line prompt, or the comment editor.
@@ -225,7 +396,7 @@ enum Mode {
     Normal,
     Prompt {
         kind: PromptKind,
-        input: String,
+        input: LineInput,
         /// The address an edit prompt (rename) targets, captured when it opened.
         addr: Option<Address>,
     },
@@ -592,6 +763,7 @@ impl App {
     // ── Prompt (goto / search / rename / comment) ─────────────────────────────
 
     fn begin_prompt(&mut self, kind: PromptKind, input: String, addr: Option<Address>) {
+        let input = LineInput::new(input);
         self.mode = Mode::Prompt { kind, input, addr };
     }
 
@@ -685,17 +857,32 @@ impl App {
             }
             _ => {
                 if let Mode::Comment(ed) = &mut self.mode {
+                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                    let alt = key.modifiers.contains(KeyModifiers::ALT);
                     match key.code {
                         KeyCode::Enter => ed.newline(),
-                        KeyCode::Backspace => ed.backspace(),
-                        KeyCode::Delete => ed.delete(),
+                        KeyCode::Left if ctrl || alt => ed.word_left(),
+                        KeyCode::Right if ctrl || alt => ed.word_right(),
                         KeyCode::Left => ed.left(),
                         KeyCode::Right => ed.right(),
                         KeyCode::Up => ed.up(),
                         KeyCode::Down => ed.down(),
                         KeyCode::Home => ed.col = 0,
                         KeyCode::End => ed.col = ed.line_len(),
-                        KeyCode::Char(c) => ed.insert(c),
+                        KeyCode::Backspace => ed.backspace(),
+                        KeyCode::Delete => ed.delete(),
+                        KeyCode::Char('a') if ctrl => ed.col = 0,
+                        KeyCode::Char('e') if ctrl => ed.col = ed.line_len(),
+                        KeyCode::Char('b') if ctrl => ed.left(),
+                        KeyCode::Char('f') if ctrl => ed.right(),
+                        KeyCode::Char('b') if alt => ed.word_left(),
+                        KeyCode::Char('f') if alt => ed.word_right(),
+                        KeyCode::Char('h') if ctrl => ed.backspace(),
+                        KeyCode::Char('d') if ctrl => ed.delete(),
+                        KeyCode::Char('w') if ctrl => ed.delete_word_back(),
+                        KeyCode::Char('u') if ctrl => ed.delete_to_start(),
+                        KeyCode::Char('k') if ctrl => ed.delete_to_end(),
+                        KeyCode::Char(c) if !ctrl && !alt => ed.insert(c),
                         _ => {}
                     }
                 }
@@ -707,17 +894,11 @@ impl App {
         match key.code {
             KeyCode::Esc => self.mode = Mode::Normal,
             KeyCode::Enter => self.submit_prompt(),
-            KeyCode::Backspace => {
+            _ => {
                 if let Mode::Prompt { input, .. } = &mut self.mode {
-                    input.pop();
+                    input.on_key(key);
                 }
             }
-            KeyCode::Char(c) => {
-                if let Mode::Prompt { input, .. } = &mut self.mode {
-                    input.push(c);
-                }
-            }
-            _ => {}
         }
     }
 
@@ -726,6 +907,7 @@ impl App {
         else {
             return;
         };
+        let input = input.text;
         match kind {
             // Goto/search ignore an empty query.
             PromptKind::Goto => {
@@ -1283,9 +1465,9 @@ impl App {
         frame.render_widget(listing, listing_area);
         frame.render_widget(self.footer(), footer_area);
 
-        // Place a real caret at the end of an active prompt line.
+        // Place a real caret at the cursor column of an active prompt line.
         if let Mode::Prompt { kind, input, .. } = &self.mode {
-            let caret = (kind.prefix().chars().count() + input.chars().count()) as u16;
+            let caret = (kind.prefix().chars().count() + input.col) as u16;
             frame.set_cursor_position((
                 footer_area.x + caret.min(footer_area.width.saturating_sub(1)),
                 footer_area.y,
@@ -1541,7 +1723,7 @@ impl App {
     fn footer(&self) -> Paragraph<'_> {
         let text = match &self.mode {
             // An open prompt owns the footer: prefix + typed text.
-            Mode::Prompt { kind, input, .. } => format!("{}{input}", kind.prefix()),
+            Mode::Prompt { kind, input, .. } => format!("{}{}", kind.prefix(), input.text),
             // The comment editor draws its own popup; keep a short footer hint.
             Mode::Comment(_) => {
                 " editing comment — Enter: newline   Tab: save   Esc: cancel ".to_string()
@@ -1717,6 +1899,14 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn key_ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn key_alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
     }
 
     fn click_at(column: u16, row: u16) -> MouseEvent {
@@ -2272,6 +2462,102 @@ mod tests {
             Some("line one\nline two"),
             "esc discards editor changes"
         );
+    }
+
+    #[test]
+    fn line_input_word_boundaries() {
+        assert_eq!(prev_word("foo bar baz", 11), 8);
+        assert_eq!(prev_word("foo bar baz", 8), 4); // skip the gap, then the word
+        assert_eq!(prev_word("foo   bar", 6), 0); // multiple spaces collapse
+        assert_eq!(prev_word("", 0), 0);
+        assert_eq!(next_word("foo bar baz", 0), 4);
+        assert_eq!(next_word("foo bar baz", 4), 8);
+        assert_eq!(next_word("foo bar", 4), 7); // last word → end
+    }
+
+    #[test]
+    fn line_input_readline_editing() {
+        let mut li = LineInput::new("hello world".to_string());
+        assert_eq!(li.col, 11, "new() lands the cursor at the end");
+
+        // Ctrl-A / Ctrl-E to line ends.
+        li.on_key(key_ctrl(KeyCode::Char('a')));
+        assert_eq!(li.col, 0);
+        li.on_key(key_ctrl(KeyCode::Char('e')));
+        assert_eq!(li.col, 11);
+
+        // Ctrl-W deletes the word before the cursor.
+        li.on_key(key_ctrl(KeyCode::Char('w')));
+        assert_eq!(li.text, "hello ");
+        assert_eq!(li.col, 6);
+
+        // Insert in the middle after moving left two chars.
+        li.on_key(key(KeyCode::Left));
+        li.on_key(key(KeyCode::Left));
+        li.insert('X');
+        assert_eq!(li.text, "hellXo ");
+
+        // Word motion (Alt-B / Ctrl-Left) and Ctrl-U (delete to start).
+        let mut li = LineInput::new("alpha beta gamma".to_string());
+        li.on_key(key_alt(KeyCode::Char('b')));
+        assert_eq!(li.col, 11, "alt-b to start of last word");
+        li.on_key(key_ctrl(KeyCode::Left));
+        assert_eq!(li.col, 6, "ctrl-left another word back");
+        li.on_key(key_ctrl(KeyCode::Char('u')));
+        assert_eq!(li.text, "beta gamma", "ctrl-u deletes to line start");
+        assert_eq!(li.col, 0);
+
+        // Ctrl-K deletes to end of line.
+        li.on_key(key_ctrl(KeyCode::Char('e')));
+        li.on_key(key(KeyCode::Left));
+        li.on_key(key(KeyCode::Left));
+        li.on_key(key(KeyCode::Left));
+        li.on_key(key(KeyCode::Left));
+        li.on_key(key_ctrl(KeyCode::Char('k')));
+        assert_eq!(li.text, "beta g");
+    }
+
+    #[test]
+    fn prompt_supports_midline_editing() {
+        let mut app = new_app();
+        app.on_key(key(KeyCode::Char('/')));
+        for c in "helo".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        // Move back two and fix the typo: hel|o → hell|o.
+        app.on_key(key(KeyCode::Left));
+        app.on_key(key(KeyCode::Char('l')));
+        match &app.mode {
+            Mode::Prompt { input, .. } => {
+                assert_eq!(input.text, "hello");
+                assert_eq!(input.col, 4, "caret stays before the final char");
+            }
+            _ => panic!("prompt not open"),
+        }
+    }
+
+    #[test]
+    fn comment_editor_ctrl_word_editing() {
+        let mut ed = CommentEditor::new((SegmentIdx::from(0usize), 0), "alpha beta gamma");
+        // Ctrl-W removes the last word; cursor starts at end.
+        ed.delete_word_back();
+        assert_eq!(ed.lines, vec!["alpha beta "]);
+        assert_eq!(ed.col, 11);
+        // Ctrl-A then Ctrl-K clears the line.
+        ed.col = 0;
+        ed.delete_to_end();
+        assert_eq!(ed.lines, vec![""]);
+
+        // Word motion within a line.
+        let mut ed = CommentEditor::new((SegmentIdx::from(0usize), 0), "one two three");
+        ed.word_left();
+        assert_eq!(ed.col, 8, "word-left to start of last word");
+        ed.word_left();
+        assert_eq!(ed.col, 4);
+        ed.col = 0;
+        // At line start, word-left does nothing on a single line.
+        ed.word_left();
+        assert_eq!((ed.row, ed.col), (0, 0));
     }
 
     /// Put the cursor on an instruction that takes an `ofs_seg` (has an
