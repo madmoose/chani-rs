@@ -95,9 +95,37 @@ fn multiline_value(i: &str) -> IResult<&str, &str> {
 }
 
 fn trim_multiline_lines(s: &str) -> String {
-    s.trim()
-        .lines()
-        .map(str::trim)
+    let lines: Vec<&str> = s.lines().collect();
+
+    let start = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+
+    let end = lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(start);
+
+    let lines = &lines[start..end];
+
+    let min_indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.bytes().take_while(|&b| b == b' ').count())
+        .min()
+        .unwrap_or(0);
+
+    lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                ""
+            } else {
+                &line[min_indent..]
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
