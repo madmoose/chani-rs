@@ -199,6 +199,50 @@ pub struct Attr {
     pub signature: Option<Vec<crate::binding::Binding>>,
 }
 
+impl Attr {
+    /// An attribute for `addr` with every annotation unset.
+    pub fn new(addr: Address) -> Self {
+        Attr {
+            addr,
+            r#type: None,
+            name: None,
+            is_auto_label: false,
+            ofs_seg: None,
+            comment: None,
+            assume: Assumes::default(),
+            arg_fmts: [None; 2],
+            targets: Vec::new(),
+            lets: Vec::new(),
+            signature: None,
+        }
+    }
+
+    /// Set (or, with `None`/empty, clear) the user label. Marks the attribute
+    /// user-authored, so it is no longer treated as an auto-label.
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.name = name.filter(|s| !s.is_empty());
+        self.is_auto_label = false;
+    }
+
+    /// Set (or, with `None`/empty, clear) the comment.
+    pub fn set_comment(&mut self, comment: Option<String>) {
+        self.comment = comment.filter(|s| !s.is_empty());
+    }
+
+    /// Whether the attribute carries no annotation and can be dropped.
+    pub fn is_empty(&self) -> bool {
+        self.r#type.is_none()
+            && self.name.is_none()
+            && self.ofs_seg.is_none()
+            && self.comment.is_none()
+            && self.assume.is_empty()
+            && self.arg_fmts == [None, None]
+            && self.targets.is_empty()
+            && self.lets.is_empty()
+            && self.signature.is_none()
+    }
+}
+
 // ── Project implementation ────────────────────────────────────────────────────
 
 #[allow(unused)]
@@ -1312,6 +1356,38 @@ impl Project {
         self.attr_at(seg_idx, ofs)?.name.as_deref()
     }
 
+    /// Set (or clear) the user label at `addr`, dropping the attribute if this
+    /// leaves it empty. The authoritative mutation behind a rename — shared with
+    /// `chaniq set --name`.
+    pub fn set_attr_name(&mut self, addr: Address, name: Option<String>) {
+        let attr = self.attrs.entry(addr).or_insert_with(|| Attr::new(addr));
+        attr.set_name(name);
+        if attr.is_empty() {
+            self.attrs.remove(&addr);
+        }
+    }
+
+    /// Set (or clear) the comment at `addr`, dropping the attribute if this
+    /// leaves it empty. Shared with `chaniq set --comment`.
+    pub fn set_attr_comment(&mut self, addr: Address, comment: Option<String>) {
+        let attr = self.attrs.entry(addr).or_insert_with(|| Attr::new(addr));
+        attr.set_comment(comment);
+        if attr.is_empty() {
+            self.attrs.remove(&addr);
+        }
+    }
+
+    /// Set (or clear) the assumed segment for an `ofs16` reference at `addr`,
+    /// dropping the attribute if this leaves it empty. Mirrors
+    /// `chaniq set --ofs-seg`.
+    pub fn set_attr_ofs_seg(&mut self, addr: Address, ofs_seg: Option<SegmentIdx>) {
+        let attr = self.attrs.entry(addr).or_insert_with(|| Attr::new(addr));
+        attr.ofs_seg = ofs_seg;
+        if attr.is_empty() {
+            self.attrs.remove(&addr);
+        }
+    }
+
     /// Resolve an address to a label, preferring structured paths over flat names.
     ///
     /// Priority:
@@ -1385,19 +1461,7 @@ impl Project {
         if existing.is_some_and(|a| a.name.is_some()) {
             return;
         }
-        let attr = attrs.entry(key).or_insert_with(|| Attr {
-            addr: key,
-            r#type: None,
-            name: None,
-            is_auto_label: false,
-            ofs_seg: None,
-            comment: None,
-            assume: Assumes::default(),
-            arg_fmts: [None; 2],
-            targets: Vec::new(),
-            lets: Vec::new(),
-            signature: None,
-        });
+        let attr = attrs.entry(key).or_insert_with(|| Attr::new(key));
         attr.name = Some(label);
         attr.is_auto_label = true;
     }
@@ -1554,6 +1618,10 @@ pub struct ProjectLookup<'a> {
     /// `type_prop` for binding-derived register/field names. `None` disables
     /// the type-driven rewrites (raw register/operand names are emitted).
     pub addr: Option<Address>,
+    /// When set, a binding-rewritten operand carries its underlying storage
+    /// inline: `al` → `id@al`, `[si+3]` → `troop@si->occupation`. Only operands
+    /// that were actually rewritten gain the suffix; raw labels are untouched.
+    pub annotate_storage: bool,
 }
 
 impl ProjectLookup<'_> {
@@ -1587,7 +1655,14 @@ impl ProjectLookup<'_> {
             let Some(pointee) = ty.as_ptr() else {
                 continue;
             };
-            let base_name = name.unwrap_or_else(|| loc_default_name(loc));
+            // A named binding renders as `troop` (and `troop@si` when storage
+            // annotation is on); an unnamed one falls back to the raw register
+            // spelling, where a `@si` suffix would be redundant.
+            let base_name = match name {
+                Some(n) if self.annotate_storage => format!("{n}@{}", loc_default_name(loc)),
+                Some(n) => n,
+                None => loc_default_name(loc),
+            };
             let path = self.project.field_path_in(pointee, disp as u32)?;
             return Some(if path.starts_with('[') {
                 format!("{base_name}{path}")
@@ -1610,7 +1685,7 @@ impl SymbolLookup for ProjectLookup<'_> {
         use crate::type_prop::{TypedVal, gp8_is_high, gp16_parent};
         let (seg_idx, ofs) = self.addr?;
         let tp = &self.project.type_prop;
-        match reg {
+        let name = match reg {
             crate::NamedReg::Gp16(r) => {
                 match tp.type_at(self.project, seg_idx, ofs, Location::Gp16(r)) {
                     Some(TypedVal::Typed {
@@ -1634,18 +1709,29 @@ impl SymbolLookup for ProjectLookup<'_> {
                     name: Some(name), ..
                 }) = tp.type_at(self.project, seg_idx, ofs, Location::Gp8(r))
                 {
-                    return Some(name);
-                }
-                if let Some(TypedVal::Typed {
+                    Some(name)
+                } else if let Some(TypedVal::Typed {
                     name: Some(name), ..
-                }) = tp.type_at(self.project, seg_idx, ofs, Location::Gp16(gp16_parent(r)))
+                }) =
+                    tp.type_at(self.project, seg_idx, ofs, Location::Gp16(gp16_parent(r)))
                 {
                     let half = if gp8_is_high(r) { "hi" } else { "lo" };
-                    return Some(format!("{name}.{half}"));
+                    Some(format!("{name}.{half}"))
+                } else {
+                    None
                 }
-                None
             }
-        }
+        };
+        // The storage suffix names the register actually written (`@al`, `@ax`,
+        // `@ds`) — `reg` itself, so an 8-bit access of a 16-bit binding reads
+        // `id.lo@al`.
+        name.map(|n| {
+            if self.annotate_storage {
+                format!("{n}@{reg}")
+            } else {
+                n
+            }
+        })
     }
 
     fn lookup_indirect(

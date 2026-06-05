@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 
 use std::path::Path;
 
 use crate::{
-    DataWidth, DecodedInstruction, DisplayContext, SmallString,
+    Address, DataWidth, DecodedInstruction, DisplayContext, SmallString,
     data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType},
     disassemble,
     opcode_table::{ArgType, Opcode},
@@ -17,6 +18,9 @@ pub struct LayoutOptions {
     /// Append an inline comment after each direct `call` summarizing every
     /// DS/ES/SS register the callee summary changed to a `Known(_)` value.
     pub show_call_state: bool,
+    /// Carry each binding-rewritten operand's storage inline (`id@al`,
+    /// `troop@si->occupation`). See [`crate::project::ProjectLookup`].
+    pub annotate_storage: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,7 +537,36 @@ impl<'a> LayoutBuilder<'a> {
 
         self.new_line();
 
+        self.layout_fall_through_out(inst);
         self.layout_manual_targets();
+    }
+
+    /// If this instruction falls through (does not stop flow) directly into the
+    /// entry of the *next* function — a routine that ends by dropping into the
+    /// following one with no terminating `ret`/`jmp` — emit a `; -> falls
+    /// through …` marker. Without it the body just stops at the last
+    /// instruction, visually identical to a `ret`-terminated function, and the
+    /// control flow into the next routine is silently lost (chani-rs bug 0002).
+    fn layout_fall_through_out(&mut self, inst: &DecodedInstruction) {
+        if self.project.segments[self.seg_idx]
+            .addr_attributes
+            .stops_flow(self.base_ofs)
+        {
+            return;
+        }
+        let end = self.base_ofs + inst.bytes.len() as u32;
+        let next = (self.seg_idx, end);
+        if !self.project.functions.is_entry(next) {
+            return;
+        }
+        let seg_name = &self.project.segments[self.seg_idx].name;
+        let text: SmallString = match self.project.name_at(self.seg_idx, end) {
+            Some(name) => format!("; -> falls through into {name} ({seg_name}:{end:04x})"),
+            None => format!("; -> falls through to {seg_name}:{end:04x}"),
+        };
+        self.add(self.label_x0, WidgetKind::XrefOut, text);
+        self.set_last_link(next);
+        self.new_line();
     }
 
     /// For a `call` at `self.base_ofs`, return a comment like
@@ -1244,6 +1277,7 @@ pub fn generate_widgets_with_options(
                 register_file: None,
                 default_seg: ofs_seg,
                 addr: Some((seg_idx, ofs)),
+                annotate_storage: options.annotate_storage,
             };
             let ctx = DisplayContext {
                 lookup: &lookup,
@@ -1269,4 +1303,231 @@ pub fn generate_widgets_with_options(
     }
 
     (all_widgets, global_y)
+}
+
+// ── Link resolution ───────────────────────────────────────────────────────────
+//
+// Shared by the HTML exporter (`disasm.rs`) and the TUI (`chani_tui`): both
+// listings need to know *what address a widget links to*, independent of how
+// the link is then drawn (an `<a href>` vs a focusable, followable cell). A
+// widget can carry more than one link (a memory-expression operand such as
+// `byte ptr [data_03810]` has one clickable identifier inside a longer string),
+// so resolution returns every clickable span, in column order.
+
+/// One clickable run inside a widget: the destination plus the columns the run
+/// occupies. `start`/`len` are absolute listing columns (i.e. include the
+/// widget's `x`), so a cursor or mouse column can be tested directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub target: Address,
+    pub start: u32,
+    pub len: u32,
+}
+
+impl LinkSpan {
+    /// Whether `col` falls within this span.
+    pub fn contains_col(&self, col: u32) -> bool {
+        col >= self.start && col < self.start + self.len
+    }
+}
+
+/// Build a label-name → address index from project attributes. This is the
+/// inverse of the label→anchor map the HTML exporter builds, and the lookup
+/// backing label-name link resolution. Built once per listing.
+pub fn build_label_index(project: &Project) -> HashMap<String, Address> {
+    let mut map = HashMap::new();
+    for (&addr, attr) in &project.attrs {
+        if let Some(name) = attr.name.as_deref() {
+            map.insert(name.to_string(), addr);
+        }
+    }
+    map
+}
+
+/// Parse a bare `seg:ofs` reference (e.g. `seg000:ca1b`) into an address.
+fn parse_seg_ofs(project: &Project, s: &str) -> Option<Address> {
+    let (seg, ofs) = s.split_once(':')?;
+    let seg_idx = project.segment_by_name(seg)?;
+    let ofs = u32::from_str_radix(ofs.trim_start_matches("0x"), 16).ok()?;
+    Some((seg_idx, ofs))
+}
+
+/// Resolve every link a widget carries. `labels` comes from
+/// [`build_label_index`]. The precedence mirrors the HTML exporter:
+///   * operands: an explicit `link_addr`, else a whole-text label match, else
+///     each identifier token that matches a known label;
+///   * data (`dw`/`dd <label>`): the `link_addr` referent, else the label;
+///   * xrefs: the `; <- src (kind)` source, the `; -> … (seg:ofs)` target, or a
+///     bare `; -> label` target.
+pub fn resolve_links(
+    project: &Project,
+    labels: &HashMap<String, Address>,
+    widget: &Widget,
+) -> Vec<LinkSpan> {
+    match &widget.kind {
+        WidgetKind::Operand { .. } => resolve_operand_links(labels, widget),
+        WidgetKind::Data => resolve_data_link(labels, widget).into_iter().collect(),
+        WidgetKind::XrefIn | WidgetKind::XrefOut => resolve_xref_link(project, labels, widget)
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Resolve the single link under `col` (preferred) or, failing that, the
+/// widget's first link. This is what link-following uses: the cursor or mouse
+/// names a column, but if it is not exactly over a clickable run we still follow
+/// the widget's primary link.
+pub fn resolve_link_at(
+    project: &Project,
+    labels: &HashMap<String, Address>,
+    widget: &Widget,
+    col: Option<u32>,
+) -> Option<LinkSpan> {
+    let spans = resolve_links(project, labels, widget);
+    if let Some(c) = col
+        && let Some(s) = spans.iter().find(|s| s.contains_col(c))
+    {
+        return Some(*s);
+    }
+    spans.into_iter().next()
+}
+
+fn resolve_operand_links(labels: &HashMap<String, Address>, widget: &Widget) -> Vec<LinkSpan> {
+    let text = widget.text.as_str();
+    // 1. Explicit branch / ofs16 target: the whole operand links.
+    if let Some(target) = widget.link_addr {
+        return vec![LinkSpan {
+            target,
+            start: widget.x,
+            len: text.len() as u32,
+        }];
+    }
+    // 2. The operand is exactly a label name (`mov ax, my_label`).
+    if let Some(&target) = labels.get(text) {
+        return vec![LinkSpan {
+            target,
+            start: widget.x,
+            len: text.len() as u32,
+        }];
+    }
+    // 3. Scan for identifier tokens that name a label, e.g. the `data_03810`
+    //    inside `byte ptr [data_03810]`. A storage annotation (`@al`, `@si`)
+    //    from `--annotate-storage` is skipped so its register is not mistaken
+    //    for a label.
+    let bytes = text.as_bytes();
+    let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+    let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut spans = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'@' && i + 1 < bytes.len() && is_id_start(bytes[i + 1]) {
+            i += 1;
+            while i < bytes.len() && is_id_cont(bytes[i]) {
+                i += 1;
+            }
+            continue;
+        }
+        if !is_id_start(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i + 1;
+        while end < bytes.len() && is_id_cont(bytes[end]) {
+            end += 1;
+        }
+        if let Some(&target) = labels.get(&text[start..end]) {
+            spans.push(LinkSpan {
+                target,
+                start: widget.x + start as u32,
+                len: (end - start) as u32,
+            });
+        }
+        i = end;
+    }
+    spans
+}
+
+fn resolve_data_link(labels: &HashMap<String, Address>, widget: &Widget) -> Option<LinkSpan> {
+    let text = widget.text.as_str();
+    for prefix in ["dw ", "dd "] {
+        if let Some(label) = text.strip_prefix(prefix) {
+            let span = |target| LinkSpan {
+                target,
+                start: widget.x + prefix.len() as u32,
+                len: label.len() as u32,
+            };
+            // `link_addr` is set by Ofs16 when a label was resolved; the
+            // label-map lookup covers the remaining unique-label cases.
+            if let Some(target) = widget.link_addr {
+                return Some(span(target));
+            }
+            if let Some(&target) = labels.get(label) {
+                return Some(span(target));
+            }
+        }
+    }
+    None
+}
+
+fn resolve_xref_link(
+    project: &Project,
+    labels: &HashMap<String, Address>,
+    widget: &Widget,
+) -> Option<LinkSpan> {
+    let text = widget.text.as_str();
+    // Resolve a source token to an address, preferring the widget's explicit
+    // `link_addr`, then a label name, then a bare `seg:ofs`.
+    let target_for = |src: &str| -> Option<Address> {
+        if let Some(addr) = widget.link_addr {
+            Some(addr)
+        } else if let Some(&a) = labels.get(src) {
+            Some(a)
+        } else if src.contains(':') {
+            parse_seg_ofs(project, src)
+        } else {
+            None
+        }
+    };
+
+    // Inbound: "; <- src (kind)" → link `src`.
+    if let Some(rest) = text.strip_prefix("; <- ") {
+        let src = match rest.rfind(" (") {
+            Some(p) => &rest[..p],
+            None => return None,
+        };
+        let target = target_for(src)?;
+        return Some(LinkSpan {
+            target,
+            start: widget.x + "; <- ".len() as u32,
+            len: src.len() as u32,
+        });
+    }
+
+    // Outbound: "; -> … (seg:ofs)" → link the parenthesized address;
+    //           "; -> label"       → link the bare target.
+    if let Some(rest) = text.strip_prefix("; -> ") {
+        if rest.ends_with(')')
+            && let Some(p) = rest.rfind(" (")
+        {
+            let inner = &rest[p + 2..rest.len() - 1];
+            if let Some(target) = target_for(inner) {
+                return Some(LinkSpan {
+                    target,
+                    start: widget.x + ("; -> ".len() + p + 2) as u32,
+                    len: inner.len() as u32,
+                });
+            }
+        }
+        if let Some(target) = target_for(rest) {
+            return Some(LinkSpan {
+                target,
+                start: widget.x + "; -> ".len() as u32,
+                len: rest.len() as u32,
+            });
+        }
+    }
+
+    None
 }

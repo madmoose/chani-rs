@@ -604,6 +604,7 @@ mod tests {
             register_file: None,
             default_seg: None,
             addr: Some((seg, ofs)),
+            annotate_storage: false,
         };
         let ctx = crate::DisplayContext {
             lookup: &lookup,
@@ -620,6 +621,7 @@ mod tests {
             register_file: None,
             default_seg: None,
             addr: Some((seg, ofs)),
+            annotate_storage: false,
         };
         let ctx = crate::DisplayContext {
             lookup: &lookup,

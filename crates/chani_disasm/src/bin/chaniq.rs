@@ -114,6 +114,10 @@ struct FuncArgs {
     /// callee summary establishes (when they differ from the pre-call state).
     #[arg(long = "show-call-state")]
     show_call_state: bool,
+    /// Carry each binding-rewritten operand's storage inline: `al` → `id@al`,
+    /// `[si+3]` → `troop@si->occupation`. Raw labels are left untouched.
+    #[arg(long = "annotate-storage")]
+    annotate_storage: bool,
 }
 
 #[derive(Args)]
@@ -248,6 +252,7 @@ fn render_addr(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> String {
         register_file: None,
         default_seg: ofs_seg,
         addr: Some((seg_idx, ofs)),
+        annotate_storage: false,
     };
     let ctx = DisplayContext {
         lookup: &lookup,
@@ -276,6 +281,7 @@ fn print_addr_block(
         register_file: None,
         default_seg: ofs_seg,
         addr: Some((seg_idx, ofs)),
+        annotate_storage: options.annotate_storage,
     };
     let ctx = DisplayContext {
         lookup: &lookup,
@@ -432,33 +438,20 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
             })
             .transpose()?;
 
-        let attr = project.attrs.entry((seg_idx, ofs)).or_insert_with(|| Attr {
-            addr: (seg_idx, ofs),
-            r#type: None,
-            name: None,
-            is_auto_label: false,
-            ofs_seg: None,
-            comment: None,
-            assume: Assumes::default(),
-            arg_fmts: [None; 2],
-            targets: Vec::new(),
-            lets: Vec::new(),
-            signature: None,
-        });
+        let attr = project
+            .attrs
+            .entry((seg_idx, ofs))
+            .or_insert_with(|| Attr::new((seg_idx, ofs)));
 
         if let Some(name) = args.name {
-            attr.name = if name.is_empty() { None } else { Some(name) };
-            attr.is_auto_label = false;
+            attr.set_name(Some(name));
         }
         if let Some(t) = parsed_type {
             attr.r#type = Some(t);
         }
         if let Some(comment) = args.comment {
-            attr.comment = if comment.is_empty() {
-                None
-            } else {
-                Some(unescape_comment(&comment))
-            };
+            let value = (!comment.is_empty()).then(|| unescape_comment(&comment));
+            attr.set_comment(value);
         }
         if parsed_ofs_seg.is_some() {
             attr.ofs_seg = parsed_ofs_seg;
@@ -704,6 +697,7 @@ fn collect_rendered_lines(project: &Project, seg_idx: SegmentIdx, ofs: u32) -> V
         register_file: None,
         default_seg: ofs_seg,
         addr: Some((seg_idx, ofs)),
+        annotate_storage: false,
     };
     let ctx = DisplayContext {
         lookup: &lookup,
@@ -911,6 +905,7 @@ fn cmd_func(path: &Path, args: &FuncArgs) -> Result<()> {
     let (seg_idx, ofs) = parse_addr(&project, addr_str)?;
     let options = chani_disasm::layout::LayoutOptions {
         show_call_state: args.show_call_state,
+        annotate_storage: args.annotate_storage,
     };
 
     // Snap to the basic block containing the address.
@@ -1006,6 +1001,8 @@ fn cmd_func(path: &Path, args: &FuncArgs) -> Result<()> {
         // Always render the last instruction (the one at or just before block.end)
         // addr_attributes.next() may skip past it; render block.end - op_len separately
         // But the loop above already handles it via the `next < block.end` condition.
+        // A fall-through into the next function is rendered by the layout pass
+        // (LayoutBuilder::layout_fall_through_out), so it appears here too.
     }
 
     Ok(())

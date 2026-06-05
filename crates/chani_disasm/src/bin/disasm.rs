@@ -1,12 +1,15 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     io::{self, Write},
     path::Path,
 };
 
 use chani_disasm::{
     Address,
-    layout::{LayoutOptions, WidgetKind, generate_widgets_with_options},
+    layout::{
+        LayoutOptions, LinkSpan, WidgetKind, build_label_index, generate_widgets_with_options,
+        resolve_links,
+    },
     project::Project,
     seg_dataflow::SegVal,
 };
@@ -16,12 +19,15 @@ fn main() {
     let show_dataflow = args.iter().any(|a| a == "--dataflow");
     let show_html = args.iter().any(|a| a == "--html");
     let show_call_state = args.iter().any(|a| a == "--show-call-state");
+    let annotate_storage = args.iter().any(|a| a == "--annotate-storage");
     let path = args.into_iter().skip(1).find(|a| !a.starts_with('-'));
 
     let path = match path {
         Some(p) => p,
         None => {
-            eprintln!("Usage: disasm [--dataflow] [--html] [--show-call-state] <file>");
+            eprintln!(
+                "Usage: disasm [--dataflow] [--html] [--show-call-state] [--annotate-storage] <file>"
+            );
             std::process::exit(1);
         }
     };
@@ -52,7 +58,10 @@ fn main() {
 
     let mut stdout = io::BufWriter::new(io::stdout().lock());
 
-    let options = LayoutOptions { show_call_state };
+    let options = LayoutOptions {
+        show_call_state,
+        annotate_storage,
+    };
 
     if show_dataflow {
         if let Err(e) = print_dataflow(&project, &mut stdout)
@@ -185,12 +194,14 @@ pre.listing {{ margin: 0; line-height: 1.4; }}
 .data {{ color: #b5cea8; }}
 .array-idx {{ color: #ce9178; }}
 .struct-field {{ color: #9cdcfe; }}
+.loc-annot {{ color: #969696; }}
 .file-hdr {{ color: #6a9955; }}
 .seg-hdr {{ color: #6a9955; }}
 .seg-decl {{ color: #dcdcaa; }}
 .assume {{ color: #c586c0; }}
 .comment {{ color: #6a9955; font-style: italic; }}
 .xref-in {{ color: #4ec9b0; }}
+.xref-out {{ color: #4ec9b0; }}
 a {{ color: inherit; text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
 </style>
@@ -201,13 +212,7 @@ a:hover {{ text-decoration: underline; }}
 "#
     )?;
 
-    let mut label_to_anchor: HashMap<&str, String> = HashMap::new();
-    for (&(seg_idx, ofs), attr) in &project.attrs {
-        if let Some(name) = attr.name.as_deref() {
-            let seg_name = &project.segments[seg_idx].name;
-            label_to_anchor.insert(name, format!("{}-{:04x}", seg_name, ofs));
-        }
-    }
+    let labels = build_label_index(project);
 
     let t0 = std::time::Instant::now();
     let (widgets, total_rows) = generate_widgets_with_options(project, options);
@@ -251,34 +256,21 @@ a:hover {{ text-decoration: underline; }}
                     buf.push_str("</span>");
                 }
                 WidgetKind::Operand { .. } => {
-                    render_operand_html(
-                        &widget.text,
-                        widget.link_addr,
-                        project,
-                        &label_to_anchor,
-                        &mut buf,
-                    );
+                    let links = resolve_links(project, &labels, widget);
+                    render_operand_html(&widget.text, widget.x, &links, project, &mut buf);
                 }
-                WidgetKind::XrefIn => {
-                    buf.push_str("<span class=\"xref-in\">");
-                    render_xref_html(
-                        &widget.text,
-                        widget.link_addr,
-                        project,
-                        &label_to_anchor,
-                        &mut buf,
-                    );
+                WidgetKind::XrefIn | WidgetKind::XrefOut => {
+                    let links = resolve_links(project, &labels, widget);
+                    buf.push_str("<span class=\"");
+                    buf.push_str(widget_class(&widget.kind));
+                    buf.push_str("\">");
+                    render_spans_html(&widget.text, widget.x, &links, project, &mut buf, None);
                     buf.push_str("</span>");
                 }
                 WidgetKind::Data => {
+                    let links = resolve_links(project, &labels, widget);
                     buf.push_str("<span class=\"data\">");
-                    render_data_html(
-                        &widget.text,
-                        widget.link_addr,
-                        project,
-                        &label_to_anchor,
-                        &mut buf,
-                    );
+                    render_spans_html(&widget.text, widget.x, &links, project, &mut buf, None);
                     buf.push_str("</span>");
                 }
                 _ => {
@@ -312,78 +304,56 @@ fn addr_to_anchor(project: &Project, (seg_idx, ofs): Address) -> String {
     format!("{}-{:04x}", project.segments[seg_idx].name, ofs)
 }
 
-fn render_xref_html(
+/// Emit `text` (which starts at listing column `x_base`) into `buf`,
+/// HTML-escaping it and wrapping each [`LinkSpan`] in an `<a href="#anchor">`.
+/// `link_class` adds a `class="…"` to the anchors (operands use `"operand"`;
+/// data/xrefs pass `None` because their wrapping `<span>` already carries the
+/// colour). Spans are in column order and never overlap.
+fn render_spans_html(
     text: &str,
-    link_addr: Option<Address>,
+    x_base: u32,
+    spans: &[LinkSpan],
     project: &Project,
-    label_map: &HashMap<&str, String>,
     buf: &mut String,
+    link_class: Option<&str>,
 ) {
-    // text format: "; ← src (kind)"
-    let prefix = "; <- ";
-    let Some(rest) = text.strip_prefix(prefix) else {
-        html_escape(text, buf);
-        return;
-    };
-    let Some(paren_pos) = rest.rfind(" (") else {
-        html_escape(text, buf);
-        return;
-    };
-    let src = &rest[..paren_pos];
-    let suffix = &rest[paren_pos..]; // " (call)" / " (jmp)" / " (data)"
-
-    let anchor = if let Some(addr) = link_addr {
-        addr_to_anchor(project, addr)
-    } else if let Some(a) = label_map.get(src) {
-        a.clone()
-    } else if src.contains(':') {
-        src.replace(':', "-")
-    } else {
-        html_escape(text, buf);
-        return;
-    };
-
-    buf.push_str(prefix);
-    buf.push_str("<a href=\"#");
-    buf.push_str(&anchor);
-    buf.push_str("\">");
-    html_escape(src, buf);
-    buf.push_str("</a>");
-    html_escape(suffix, buf);
+    let mut last = 0usize;
+    for span in spans {
+        let start = (span.start - x_base) as usize;
+        let end = start + span.len as usize;
+        html_escape(&text[last..start], buf);
+        buf.push_str("<a href=\"#");
+        buf.push_str(&addr_to_anchor(project, span.target));
+        if let Some(cls) = link_class {
+            buf.push_str("\" class=\"");
+            buf.push_str(cls);
+        }
+        buf.push_str("\">");
+        html_escape(&text[start..end], buf);
+        buf.push_str("</a>");
+        last = end;
+    }
+    html_escape(&text[last..], buf);
 }
 
-/// Render an operand widget's HTML. Handles three cases, in order:
-///   1. `link_addr` is set (e.g. branch target on a `call`/`jmp`): wrap the
-///      whole text in an `<a>` pointing at that address.
-///   2. The whole text exactly matches a known label name: wrap the whole
-///      text. (Bare-name operands like `mov ax, my_label`.)
-///   3. Otherwise scan the text for identifier-shaped tokens and wrap any
-///      that match a known label. This is what makes data references inside
-///      a memory-expression operand clickable — e.g. `byte ptr [data_03810]`
-///      gets rendered as `byte ptr [<a>data_03810</a>]`.
+/// Render an operand widget's HTML. When the operand's single link covers the
+/// whole text (a branch target or a bare-name operand like `mov ax, my_label`)
+/// the anchor itself carries `class="operand"`. Otherwise the text is wrapped in
+/// a `<span class="operand">` and the links — identifier tokens inside a memory
+/// expression such as `byte ptr [<a>data_03810</a>]` — are nested anchors, with
+/// any `@al`/`@si` storage annotation grayed out as `loc-annot`.
 fn render_operand_html(
     text: &str,
-    link_addr: Option<Address>,
+    x_base: u32,
+    spans: &[LinkSpan],
     project: &Project,
-    label_map: &HashMap<&str, String>,
     buf: &mut String,
 ) {
-    if let Some(addr) = link_addr {
-        let anchor = addr_to_anchor(project, addr);
-        buf.push_str("<a href=\"#");
-        buf.push_str(&anchor);
-        buf.push_str("\" class=\"operand\">");
-        html_escape(text, buf);
-        buf.push_str("</a>");
-        return;
-    }
-
-    if let Some(anchor) = label_map.get(text) {
-        buf.push_str("<a href=\"#");
-        buf.push_str(anchor);
-        buf.push_str("\" class=\"operand\">");
-        html_escape(text, buf);
-        buf.push_str("</a>");
+    if let [span] = spans
+        && span.start == x_base
+        && span.len as usize == text.len()
+    {
+        render_spans_html(text, x_base, spans, project, buf, Some("operand"));
         return;
     }
 
@@ -391,71 +361,46 @@ fn render_operand_html(
     let bytes = text.as_bytes();
     let is_id_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
     let is_id_cont = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut span_iter = spans.iter().peekable();
     let mut i = 0usize;
     let mut last = 0usize;
     while i < bytes.len() {
-        if !is_id_start(bytes[i]) {
-            i += 1;
+        // A storage annotation (`@al`, `@si`) from `--annotate-storage`: gray it
+        // out so the binding name stays the focus.
+        if bytes[i] == b'@' && i + 1 < bytes.len() && is_id_start(bytes[i + 1]) {
+            let start = i;
+            let mut end = i + 1;
+            while end < bytes.len() && is_id_cont(bytes[end]) {
+                end += 1;
+            }
+            html_escape(&text[last..start], buf);
+            buf.push_str("<span class=\"loc-annot\">");
+            html_escape(&text[start..end], buf);
+            buf.push_str("</span>");
+            last = end;
+            i = end;
             continue;
         }
-        let start = i;
-        let mut end = i + 1;
-        while end < bytes.len() && is_id_cont(bytes[end]) {
-            end += 1;
-        }
-        let ident = &text[start..end];
-        if let Some(anchor) = label_map.get(ident) {
-            html_escape(&text[last..start], buf);
+        // A resolved link starts here: emit it as a nested anchor.
+        if let Some(span) = span_iter.peek()
+            && (span.start - x_base) as usize == i
+        {
+            let end = i + span.len as usize;
+            html_escape(&text[last..i], buf);
             buf.push_str("<a href=\"#");
-            buf.push_str(anchor);
+            buf.push_str(&addr_to_anchor(project, span.target));
             buf.push_str("\">");
-            html_escape(ident, buf);
+            html_escape(&text[i..end], buf);
             buf.push_str("</a>");
             last = end;
+            i = end;
+            span_iter.next();
+            continue;
         }
-        i = end;
+        i += 1;
     }
     html_escape(&text[last..], buf);
     buf.push_str("</span>");
-}
-
-fn render_data_html(
-    text: &str,
-    link_addr: Option<Address>,
-    project: &Project,
-    label_map: &HashMap<&str, String>,
-    buf: &mut String,
-) {
-    // link_addr is set by Ofs16 when a label was resolved.
-    if let Some(addr) = link_addr {
-        for prefix in ["dw ", "dd "] {
-            if let Some(label) = text.strip_prefix(prefix) {
-                let anchor = addr_to_anchor(project, addr);
-                buf.push_str(prefix);
-                buf.push_str("<a href=\"#");
-                buf.push_str(&anchor);
-                buf.push_str("\">");
-                html_escape(label, buf);
-                buf.push_str("</a>");
-                return;
-            }
-        }
-    }
-    // Fallback: label-map lookup for unique labels (covers edge cases).
-    for prefix in ["dw ", "dd "] {
-        if let Some(label) = text.strip_prefix(prefix)
-            && let Some(anchor) = label_map.get(label)
-        {
-            buf.push_str(prefix);
-            buf.push_str("<a href=\"#");
-            buf.push_str(anchor);
-            buf.push_str("\">");
-            html_escape(label, buf);
-            buf.push_str("</a>");
-            return;
-        }
-    }
-    html_escape(text, buf);
 }
 
 // ── Dataflow summary ──────────────────────────────────────────────────────────
