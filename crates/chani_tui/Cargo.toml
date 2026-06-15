@@ -13,6 +13,9 @@ anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
 ratatui.workspace = true
 crossterm.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

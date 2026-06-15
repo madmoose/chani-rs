@@ -17,7 +17,9 @@ use chani_datafile::{SmallString, parser};
 
 use crate::basic_block::{BasicBlock, BasicBlockMap};
 use crate::branch_map::BranchMap;
-use crate::data_type::{CompositeDataType, DataType, DisplayFmt, ScalarDataType, StructDef};
+use crate::data_type::{
+    CompositeDataType, DataType, DisplayFmt, ScalarDataType, StructDef, StructField,
+};
 use crate::function_map::FunctionMap;
 use crate::function_summary::FunctionSummaryMap;
 use crate::int_descriptions::IntDescriptions;
@@ -1388,6 +1390,225 @@ impl Project {
         }
     }
 
+    /// Set (or, with `None`, clear) the code/data classification at `addr`,
+    /// dropping the attribute if this leaves it empty. Mirrors
+    /// `chaniq set --type`.
+    pub fn set_attr_type(&mut self, addr: Address, ty: Option<AttrType>) {
+        let attr = self.attrs.entry(addr).or_insert_with(|| Attr::new(addr));
+        attr.r#type = ty;
+        if attr.is_empty() {
+            self.attrs.remove(&addr);
+        }
+    }
+
+    /// Replace the direction-less `let` assertions at `addr` (an empty list
+    /// clears them), dropping the attribute if this leaves it empty. Mirrors
+    /// `chaniq set --let`.
+    pub fn set_attr_lets(&mut self, addr: Address, lets: Vec<crate::binding::Binding>) {
+        let attr = self.attrs.entry(addr).or_insert_with(|| Attr::new(addr));
+        attr.lets = lets;
+        if attr.is_empty() {
+            self.attrs.remove(&addr);
+        }
+    }
+
+    /// Set (or, with `None`, clear) the display format of operand `index`
+    /// (0 or 1) at `addr`, dropping the attribute if this leaves it empty.
+    /// Mirrors `chaniq set --arg`.
+    pub fn set_attr_arg_fmt(&mut self, addr: Address, index: usize, fmt: Option<DisplayFmt>) {
+        let attr = self.attrs.entry(addr).or_insert_with(|| Attr::new(addr));
+        attr.arg_fmts[index] = fmt;
+        if attr.is_empty() {
+            self.attrs.remove(&addr);
+        }
+    }
+
+    /// Set (or, with `None`/empty, clear) the `fn` signature at `addr`, dropping
+    /// the attribute if this leaves it empty. Mirrors `chaniq set --fn`.
+    pub fn set_attr_signature(
+        &mut self,
+        addr: Address,
+        signature: Option<Vec<crate::binding::Binding>>,
+    ) {
+        let attr = self.attrs.entry(addr).or_insert_with(|| Attr::new(addr));
+        attr.signature = signature.filter(|s| !s.is_empty());
+        if attr.is_empty() {
+            self.attrs.remove(&addr);
+        }
+    }
+
+    /// Parse a data-type string (any `DataType`; `code` is rejected) against
+    /// this project's segments and structs. Used for struct-field type editing.
+    pub fn parse_data_type(&self, s: &str) -> Result<DataType, String> {
+        let struct_names: Vec<SmallString> = self.structs.iter().map(|s| s.name.clone()).collect();
+        parse_data_type_str(s, &self.segments, &struct_names)
+    }
+
+    // ── Struct-table mutation ─────────────────────────────────────────────────
+    //
+    // Structs are project-level, not per-attr. `DataType::Composite(Struct(idx))`
+    // stores an *index* into `self.structs`, so adds (push at the end) keep
+    // existing indices stable, while a remove shifts later indices and must
+    // re-point every reference. Serialization renders struct refs by *name*
+    // (`type_str`), so in-memory indices need only be internally consistent.
+
+    /// Add an empty struct named `name`, returning its index. Errors on an empty
+    /// or duplicate name.
+    pub fn add_struct(&mut self, name: &str) -> Result<usize, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("struct name must not be empty".to_owned());
+        }
+        if self.structs.iter().any(|s| s.name == name) {
+            return Err(format!("a struct named '{name}' already exists"));
+        }
+        self.structs.push(StructDef {
+            name: name.to_owned(),
+            fields: Vec::new(),
+        });
+        Ok(self.structs.len() - 1)
+    }
+
+    /// Rename the struct at `idx`. Errors on an empty or duplicate name.
+    pub fn rename_struct(&mut self, idx: usize, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("struct name must not be empty".to_owned());
+        }
+        if self
+            .structs
+            .iter()
+            .enumerate()
+            .any(|(i, s)| i != idx && s.name == name)
+        {
+            return Err(format!("a struct named '{name}' already exists"));
+        }
+        self.structs[idx].name = name.to_owned();
+        Ok(())
+    }
+
+    /// Remove the struct at `idx`. Errors while any attr type, `let`/`fn`
+    /// binding, or other struct field still references it. On success, every
+    /// struct index greater than `idx` shifts down by one across the project.
+    pub fn remove_struct(&mut self, idx: usize) -> Result<(), String> {
+        if idx >= self.structs.len() {
+            return Err("no such struct".to_owned());
+        }
+        if self.any_data_type(|dt| data_type_references_struct(dt, idx)) {
+            return Err(format!(
+                "struct '{}' is still referenced",
+                self.structs[idx].name
+            ));
+        }
+        self.structs.remove(idx);
+        self.for_each_data_type_mut(|dt| reindex_data_type_after_remove(dt, idx));
+        Ok(())
+    }
+
+    /// Set field `field_idx` (or append, when `None`) of struct `idx` to
+    /// `name: ty`. Errors on an empty/duplicate field name or if the change
+    /// introduces a by-value reference cycle.
+    pub fn set_struct_field(
+        &mut self,
+        idx: usize,
+        field_idx: Option<usize>,
+        name: &str,
+        ty: DataType,
+    ) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("field name must not be empty".to_owned());
+        }
+        if self.structs[idx]
+            .fields
+            .iter()
+            .enumerate()
+            .any(|(i, f)| Some(i) != field_idx && f.name == name)
+        {
+            return Err(format!("a field named '{name}' already exists"));
+        }
+        let field = StructField {
+            name: name.to_owned(),
+            r#type: ty,
+        };
+        let old = match field_idx {
+            Some(i) => Some(std::mem::replace(&mut self.structs[idx].fields[i], field)),
+            None => {
+                self.structs[idx].fields.push(field);
+                None
+            }
+        };
+        if struct_has_cycle(&self.structs) {
+            match (field_idx, old) {
+                (Some(i), Some(prev)) => self.structs[idx].fields[i] = prev,
+                (None, _) => {
+                    self.structs[idx].fields.pop();
+                }
+                _ => {}
+            }
+            return Err("that field would create a struct reference cycle".to_owned());
+        }
+        Ok(())
+    }
+
+    /// Remove field `field_idx` of struct `idx`.
+    pub fn remove_struct_field(&mut self, idx: usize, field_idx: usize) -> Result<(), String> {
+        if field_idx >= self.structs[idx].fields.len() {
+            return Err("no such field".to_owned());
+        }
+        self.structs[idx].fields.remove(field_idx);
+        Ok(())
+    }
+
+    /// Whether any `DataType` in the project satisfies `f`. Walks attr types,
+    /// `let`/`fn` binding types, and struct field types.
+    fn any_data_type(&self, mut f: impl FnMut(&DataType) -> bool) -> bool {
+        for def in &self.structs {
+            if def.fields.iter().any(|field| f(&field.r#type)) {
+                return true;
+            }
+        }
+        for attr in self.attrs.values() {
+            if let Some(AttrType::Data(d)) = &attr.r#type
+                && f(d)
+            {
+                return true;
+            }
+            if attr.lets.iter().any(|b| f(&b.ty)) {
+                return true;
+            }
+            if let Some(sig) = &attr.signature
+                && sig.iter().any(|b| f(&b.ty))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Apply `f` to every `DataType` stored in the project (attr types,
+    /// `let`/`fn` binding types, and struct field types).
+    fn for_each_data_type_mut(&mut self, mut f: impl FnMut(&mut DataType)) {
+        for def in &mut self.structs {
+            for field in &mut def.fields {
+                f(&mut field.r#type);
+            }
+        }
+        for attr in self.attrs.values_mut() {
+            if let Some(AttrType::Data(d)) = &mut attr.r#type {
+                f(d);
+            }
+            for b in &mut attr.lets {
+                f(&mut b.ty);
+            }
+            if let Some(sig) = &mut attr.signature {
+                for b in sig {
+                    f(&mut b.ty);
+                }
+            }
+        }
+    }
+
     /// Resolve an address to a label, preferring structured paths over flat names.
     ///
     /// Priority:
@@ -1504,6 +1725,92 @@ impl Project {
         }
         None
     }
+}
+
+// ── Struct-table helpers ──────────────────────────────────────────────────────
+
+/// True if `dt` references struct index `k` anywhere within it.
+fn data_type_references_struct(dt: &DataType, k: usize) -> bool {
+    match dt {
+        DataType::Composite(CompositeDataType::Struct(idx)) => *idx == k,
+        DataType::Composite(CompositeDataType::Array { elem, .. }) => {
+            data_type_references_struct(elem, k)
+        }
+        DataType::Formatted(_, inner) | DataType::Ptr(inner) => {
+            data_type_references_struct(inner, k)
+        }
+        DataType::Tuple(members) => members.iter().any(|m| data_type_references_struct(m, k)),
+        DataType::Scalar(_) => false,
+    }
+}
+
+/// Decrement every struct index greater than `removed` within `dt`, after the
+/// struct at index `removed` is deleted from the table.
+fn reindex_data_type_after_remove(dt: &mut DataType, removed: usize) {
+    match dt {
+        DataType::Composite(CompositeDataType::Struct(idx)) => {
+            if *idx > removed {
+                *idx -= 1;
+            }
+        }
+        DataType::Composite(CompositeDataType::Array { elem, .. }) => {
+            reindex_data_type_after_remove(elem, removed)
+        }
+        DataType::Formatted(_, inner) | DataType::Ptr(inner) => {
+            reindex_data_type_after_remove(inner, removed)
+        }
+        DataType::Tuple(members) => members
+            .iter_mut()
+            .for_each(|m| reindex_data_type_after_remove(m, removed)),
+        DataType::Scalar(_) => {}
+    }
+}
+
+/// Whether the struct table contains a by-value reference cycle. A near pointer
+/// (`*T`) breaks the cycle — only `struct`/array/tuple/format containment counts,
+/// matching the loader's `validate_no_struct_cycles` and `fixed_size` recursion.
+fn struct_has_cycle(structs: &Structs) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+
+    /// Struct indices `dt` contains by value (pointers excluded).
+    fn deps(dt: &DataType, out: &mut Vec<usize>) {
+        match dt {
+            DataType::Composite(CompositeDataType::Struct(i)) => out.push(*i),
+            DataType::Composite(CompositeDataType::Array { elem, .. }) => deps(elem, out),
+            DataType::Formatted(_, inner) => deps(inner, out),
+            DataType::Tuple(members) => members.iter().for_each(|m| deps(m, out)),
+            DataType::Ptr(_) | DataType::Scalar(_) => {}
+        }
+    }
+
+    fn visit(i: usize, structs: &Structs, color: &mut [Color]) -> bool {
+        color[i] = Color::Gray;
+        let mut neighbors = Vec::new();
+        for f in &structs[i].fields {
+            deps(&f.r#type, &mut neighbors);
+        }
+        for d in neighbors {
+            match color[d] {
+                Color::Gray => return true,
+                Color::White => {
+                    if visit(d, structs, color) {
+                        return true;
+                    }
+                }
+                Color::Black => {}
+            }
+        }
+        color[i] = Color::Black;
+        false
+    }
+
+    let mut color = vec![Color::White; structs.len()];
+    (0..structs.len()).any(|i| color[i] == Color::White && visit(i, structs, &mut color))
 }
 
 // ── Structured label resolution helpers ──────────────────────────────────────
@@ -1925,5 +2232,126 @@ mod field_path_tests {
             count: 4,
         });
         assert_eq!(p.field_path_in(&arr, 4).as_deref(), Some("[2]"));
+    }
+}
+
+#[cfg(test)]
+mod mutator_tests {
+    use super::*;
+
+    fn project() -> Project {
+        let chani = "project[t]:\n\
+                     arch = 8086\n\
+                     segment[seg000]: type = code; start = 0; end = 0x100\n\
+                     end\n";
+        Project::from_str(chani).unwrap()
+    }
+
+    #[test]
+    fn add_rename_and_field_round_trip() {
+        let mut p = project();
+        let idx = p.add_struct("Troop").unwrap();
+        assert!(p.add_struct("Troop").is_err(), "duplicate name rejected");
+        assert!(p.add_struct("  ").is_err(), "empty name rejected");
+
+        p.set_struct_field(
+            idx,
+            None,
+            "occupation",
+            DataType::Scalar(ScalarDataType::U8),
+        )
+        .unwrap();
+        p.set_struct_field(idx, None, "skill", DataType::Scalar(ScalarDataType::U16))
+            .unwrap();
+        assert!(
+            p.set_struct_field(
+                idx,
+                None,
+                "occupation",
+                DataType::Scalar(ScalarDataType::U8)
+            )
+            .is_err(),
+            "duplicate field name rejected"
+        );
+        p.rename_struct(idx, "Soldier").unwrap();
+
+        // Serialize and re-parse: the struct survives a round trip.
+        let mut buf = Vec::new();
+        p.write_to(&mut buf).unwrap();
+        let p2 = Project::from_str(std::str::from_utf8(&buf).unwrap()).unwrap();
+        let def = p2.structs.iter().find(|s| s.name == "Soldier").unwrap();
+        assert_eq!(def.fields.len(), 2);
+        assert_eq!(def.fields[0].name, "occupation");
+    }
+
+    #[test]
+    fn remove_struct_is_guarded_and_reindexes() {
+        let mut p = project();
+        let a = p.add_struct("A").unwrap();
+        let b = p.add_struct("B").unwrap();
+        let addr = (p.segment_by_name("seg000").unwrap(), 0x10);
+
+        // Point an attr at B, then removing A must re-point B's reference.
+        let bt = p.parse_type_str("B").unwrap();
+        p.set_attr_type(addr, Some(bt));
+        // A is unreferenced — removal succeeds and shifts B from index 1 to 0.
+        assert_eq!((a, b), (0, 1));
+        p.remove_struct(a).unwrap();
+        assert_eq!(
+            p.attrs[&addr]
+                .r#type
+                .as_ref()
+                .unwrap()
+                .type_str(&p.segments, &p.structs),
+            "B"
+        );
+
+        // Now B is referenced — removal is refused.
+        assert!(p.remove_struct(0).is_err());
+    }
+
+    #[test]
+    fn field_cycle_rejected_pointer_allowed() {
+        let mut p = project();
+        let a = p.add_struct("A").unwrap();
+        let b = p.add_struct("B").unwrap();
+        p.set_struct_field(a, None, "b", p.parse_data_type("B").unwrap())
+            .unwrap();
+        assert!(
+            p.set_struct_field(b, None, "a", p.parse_data_type("A").unwrap())
+                .is_err(),
+            "by-value cycle rejected"
+        );
+        assert!(
+            p.set_struct_field(b, None, "a", p.parse_data_type("*A").unwrap())
+                .is_ok(),
+            "pointer breaks the cycle"
+        );
+    }
+
+    #[test]
+    fn attr_type_let_signature_setters_drop_empty() {
+        let mut p = project();
+        let addr = (p.segment_by_name("seg000").unwrap(), 0x20);
+
+        p.set_attr_type(addr, Some(AttrType::Code));
+        assert!(p.attrs.contains_key(&addr));
+        p.set_attr_type(addr, None);
+        assert!(
+            !p.attrs.contains_key(&addr),
+            "clearing the only field drops the attr"
+        );
+
+        let lets = crate::binding::parse_binding_list("tmp: u16 @ -2", &p.segments, &[]).unwrap();
+        p.set_attr_lets(addr, lets);
+        assert_eq!(p.attrs[&addr].lets.len(), 1);
+        p.set_attr_lets(addr, Vec::new());
+        assert!(!p.attrs.contains_key(&addr));
+
+        let sig = crate::binding::parse_binding_list("in p: u8 @al", &p.segments, &[]).unwrap();
+        p.set_attr_signature(addr, Some(sig));
+        assert!(p.attrs[&addr].signature.is_some());
+        p.set_attr_signature(addr, Some(Vec::new()));
+        assert!(!p.attrs.contains_key(&addr), "an empty signature clears");
     }
 }

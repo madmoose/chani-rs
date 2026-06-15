@@ -446,9 +446,6 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
         if let Some(name) = args.name {
             attr.set_name(Some(name));
         }
-        if let Some(t) = parsed_type {
-            attr.r#type = Some(t);
-        }
         if let Some(comment) = args.comment {
             let value = (!comment.is_empty()).then(|| unescape_comment(&comment));
             attr.set_comment(value);
@@ -459,22 +456,24 @@ fn cmd_set(path: &Path, args: SetArgs) -> Result<()> {
         if !parsed_assumes.is_empty() {
             attr.assume = parsed_assumes;
         }
-        for (idx, fmt) in parsed_arg_fmts {
-            attr.arg_fmts[idx] = Some(fmt);
-        }
         if !args.target.is_empty() {
             attr.targets = parsed_targets;
         }
-        // An empty --let string clears; a non-empty one replaces.
+
+        // Type / arg / let / fn go through the shared mutators (the TUI uses the
+        // same ones). An empty --let string clears; --fn collapses an empty list
+        // to None.
+        for (idx, fmt) in parsed_arg_fmts {
+            project.set_attr_arg_fmt((seg_idx, ofs), idx, Some(fmt));
+        }
+        if let Some(t) = parsed_type {
+            project.set_attr_type((seg_idx, ofs), Some(t));
+        }
         if let Some(lets) = parsed_lets {
-            attr.lets = lets;
+            project.set_attr_lets((seg_idx, ofs), lets);
         }
         if let Some(signature) = parsed_signature {
-            attr.signature = if signature.is_empty() {
-                None
-            } else {
-                Some(signature)
-            };
+            project.set_attr_signature((seg_idx, ofs), Some(signature));
         }
     }
 

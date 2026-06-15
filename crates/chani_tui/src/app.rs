@@ -6,9 +6,9 @@
 //! palette, a cursor that hops between *navigable* widgets, link-following via
 //! [`chani_disasm::layout::resolve_link_at`], and an address-keyed back stack.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Frame;
@@ -17,11 +17,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use chani_disasm::binding::Binding;
+use chani_disasm::data_type::{DataType, DisplayFmt, ScalarDataType};
 use chani_disasm::layout::{
     LayoutOptions, Widget, WidgetKind, build_label_index, generate_widgets_with_options,
     resolve_link_at, resolve_links,
 };
-use chani_disasm::project::{Attr, Project, SegmentIdx};
+use chani_disasm::project::{Attr, AttrType, Project, SegmentIdx, Structs};
 use chani_disasm::{Address, MemRef, Operand, decode};
 
 /// An RGB triple from the HTML palette. Rendered either as truecolor or, on
@@ -67,6 +69,10 @@ enum PromptKind {
     Search,
     /// Rename the label at the prompt's address.
     Rename,
+    /// Set a freeform data type at the prompt's address.
+    DataType,
+    /// Export the authoritative document to a different file path.
+    SaveAs,
 }
 
 impl PromptKind {
@@ -76,6 +82,8 @@ impl PromptKind {
             PromptKind::Goto => ":",
             PromptKind::Search => "/",
             PromptKind::Rename => "name ",
+            PromptKind::DataType => "type ",
+            PromptKind::SaveAs => "save as: ",
         }
     }
 }
@@ -104,6 +112,301 @@ impl OfsSegPicker {
 
     fn choice(&self) -> Option<SegmentIdx> {
         self.items[self.selected]
+    }
+}
+
+/// What a [`TypeItem`] does when chosen.
+enum TypeAction {
+    /// Apply this classification directly (`None` clears it).
+    Set(Option<AttrType>),
+    /// Open the freeform data-type prompt, prefilled with this template.
+    Prompt(String),
+}
+
+/// One row of the code/data type picker.
+struct TypeItem {
+    label: String,
+    desc: &'static str,
+    action: TypeAction,
+}
+
+/// Modal picker for the code/data classification at an address: the common
+/// fixed types apply immediately, the parametric ones open a freeform prompt.
+struct TypePicker {
+    addr: Address,
+    items: Vec<TypeItem>,
+    selected: usize,
+}
+
+impl TypePicker {
+    fn up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    fn down(&mut self) {
+        if self.selected + 1 < self.items.len() {
+            self.selected += 1;
+        }
+    }
+}
+
+/// Which list the struct editor's cursor is in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StructPane {
+    List,
+    Fields,
+}
+
+/// What the struct editor's inline text input is collecting.
+enum StructInputKind {
+    /// A new struct's name.
+    AddStruct,
+    /// The current struct's new name.
+    RenameStruct,
+    /// A new field, as `name: type`.
+    AddField,
+    /// Field `usize`'s new `name: type`.
+    EditField(usize),
+}
+
+/// An active inline text input within the struct editor.
+struct StructInput {
+    kind: StructInputKind,
+    line: LineInput,
+}
+
+/// Project-level struct table editor: a list of structs on the left, the
+/// selected struct's fields on the right, with an inline line input for adding
+/// or renaming structs and fields. Mutations go through the `Edit::Structs`
+/// undo path.
+struct StructEditor {
+    struct_idx: usize,
+    field_idx: usize,
+    pane: StructPane,
+    input: Option<StructInput>,
+}
+
+/// One row of the xref panel: a non-selectable section header, or a reference
+/// to an address tagged with the referencing instruction's mnemonic (`call`,
+/// `jmp`, `mov`, …) or `data` for a data-pointer reference.
+enum XrefRow {
+    Header(String),
+    Ref { addr: Address, kind: String },
+}
+
+/// Read-only popup listing the inbound and outbound references for an address:
+/// who branches to it / reads it as a pointer, and where it branches to. `⏎`
+/// jumps to the selected reference (pushing the back stack); movement skips the
+/// header rows.
+struct XrefPanel {
+    /// The subject address whose references are listed.
+    addr: Address,
+    rows: Vec<XrefRow>,
+    /// Index into `rows`; kept on a `Ref` row (movement skips `Header`s).
+    selected: usize,
+}
+
+impl XrefPanel {
+    fn up(&mut self) {
+        for i in (0..self.selected).rev() {
+            if matches!(self.rows[i], XrefRow::Ref { .. }) {
+                self.selected = i;
+                return;
+            }
+        }
+    }
+
+    fn down(&mut self) {
+        for i in self.selected + 1..self.rows.len() {
+            if matches!(self.rows[i], XrefRow::Ref { .. }) {
+                self.selected = i;
+                return;
+            }
+        }
+    }
+
+    /// The address of the selected reference (always a `Ref` row in practice).
+    fn choice(&self) -> Option<Address> {
+        match self.rows.get(self.selected)? {
+            XrefRow::Ref { addr, .. } => Some(*addr),
+            XrefRow::Header(_) => None,
+        }
+    }
+}
+
+/// Which symbol-table bucket a label belongs to in the go-to-symbol picker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LabelKind {
+    Function,
+    Code,
+    Data,
+}
+
+/// One row of the go-to-symbol picker: a named address and its classification.
+struct LabelEntry {
+    addr: Address,
+    name: String,
+    kind: LabelKind,
+    /// Auto-generated (`loc_*` / `data_*` / …) rather than user-named.
+    is_auto: bool,
+}
+
+/// The go-to-symbol picker's kind switches, persisted across runs so the list
+/// opens with the same filter the user last left it on. Serialized as JSON under
+/// `$XDG_CONFIG_HOME` (or `~/.config`) `/chani_tui/picker.json`.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct LabelPrefs {
+    show_fn: bool,
+    show_code: bool,
+    show_data: bool,
+    show_auto: bool,
+}
+
+impl Default for LabelPrefs {
+    fn default() -> Self {
+        LabelPrefs {
+            show_fn: true,
+            show_code: true,
+            show_data: true,
+            show_auto: false,
+        }
+    }
+}
+
+impl LabelPrefs {
+    /// The on-disk preferences path, or `None` if no home/config dir is known.
+    fn path() -> Option<PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        Some(base.join("chani").join("tui.json"))
+    }
+
+    /// Load the saved switches, falling back to defaults on any error (missing
+    /// file, bad JSON, no home dir).
+    fn load() -> Self {
+        Self::path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Persist the switches (best-effort: failures are silently ignored, since a
+    /// UI preference is never worth interrupting the session for).
+    fn save(&self) {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(json) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+}
+
+/// Modal symbol browser: a filterable list of every named address with per-kind
+/// toggles, selectable to jump there. The search field reuses [`LineInput`].
+struct LabelPicker {
+    /// All named addresses, built once on open (already address-sorted, since
+    /// `Project::attrs` is a `BTreeMap` keyed by address).
+    entries: Vec<LabelEntry>,
+    /// Name filter (case-insensitive substring).
+    search: LineInput,
+    show_fn: bool,
+    show_code: bool,
+    show_data: bool,
+    /// Include auto-generated labels (off → only user-named).
+    show_auto: bool,
+    /// Indices into `entries` passing the toggles and search.
+    filtered: Vec<usize>,
+    /// Index into `filtered`.
+    selected: usize,
+}
+
+impl LabelPicker {
+    fn new(entries: Vec<LabelEntry>, cursor: Option<Address>, prefs: LabelPrefs) -> Self {
+        let mut p = LabelPicker {
+            entries,
+            search: LineInput::default(),
+            show_fn: prefs.show_fn,
+            show_code: prefs.show_code,
+            show_data: prefs.show_data,
+            show_auto: prefs.show_auto,
+            filtered: Vec::new(),
+            selected: 0,
+        };
+        p.recompute();
+        // Preselect the cursor's address if it survived the default filter.
+        if let Some(addr) = cursor
+            && let Some(pos) = p.filtered.iter().position(|&i| p.entries[i].addr == addr)
+        {
+            p.selected = pos;
+        }
+        p
+    }
+
+    /// Whether `e` passes the current toggles and name search.
+    fn passes(&self, e: &LabelEntry) -> bool {
+        let kind_ok = match e.kind {
+            LabelKind::Function => self.show_fn,
+            LabelKind::Code => self.show_code,
+            LabelKind::Data => self.show_data,
+        };
+        if !kind_ok || (e.is_auto && !self.show_auto) {
+            return false;
+        }
+        let q = self.search.text.to_lowercase();
+        q.is_empty() || e.name.to_lowercase().contains(&q)
+    }
+
+    /// Rebuild `filtered`, keeping the selection on the same address when it
+    /// survives, else clamping into range.
+    fn recompute(&mut self) {
+        let keep = self
+            .filtered
+            .get(self.selected)
+            .map(|&i| self.entries[i].addr);
+        self.filtered = (0..self.entries.len())
+            .filter(|&i| self.passes(&self.entries[i]))
+            .collect();
+        self.selected = keep
+            .and_then(|addr| {
+                self.filtered
+                    .iter()
+                    .position(|&i| self.entries[i].addr == addr)
+            })
+            .unwrap_or(0)
+            .min(self.filtered.len().saturating_sub(1));
+    }
+
+    fn up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    fn down(&mut self) {
+        if self.selected + 1 < self.filtered.len() {
+            self.selected += 1;
+        }
+    }
+
+    /// The address of the selected row, if any.
+    fn choice(&self) -> Option<Address> {
+        self.filtered
+            .get(self.selected)
+            .map(|&i| self.entries[i].addr)
+    }
+
+    /// The current switch state, for persisting across runs.
+    fn prefs(&self) -> LabelPrefs {
+        LabelPrefs {
+            show_fn: self.show_fn,
+            show_code: self.show_code,
+            show_data: self.show_data,
+            show_auto: self.show_auto,
+        }
     }
 }
 
@@ -404,16 +707,114 @@ enum Mode {
     Comment(CommentEditor),
     /// Segment picker popup for setting `ofs_seg`.
     OfsSeg(OfsSegPicker),
+    /// Code/data type picker popup.
+    Type(TypePicker),
+    /// Project-level struct table editor popup.
+    Struct(StructEditor),
+    /// Unified `fn`/`let` binding editor popup (a multi-line text buffer).
+    Bindings(CommentEditor),
+    /// Read-only inbound/outbound xref panel for the cursor's address.
+    Xref(XrefPanel),
+    /// Filterable go-to-symbol list over every named address.
+    Labels(LabelPicker),
+    /// Full keybinding help overlay.
+    Help,
 }
 
-/// One reversible edit: the authoritative attribute at `addr` before and after
-/// the change (`None` = no attribute there). Undo restores `before`, redo
+/// The reversible payload of one edit. Most edits touch a single authoritative
+/// `Attr` (`None` = no attribute there); struct edits mutate the project-level
+/// struct table, captured as a whole-vec snapshot.
+enum Edit {
+    Attr {
+        addr: Address,
+        // Boxed: an `Attr` is large, so keep the enum's footprint small.
+        before: Option<Box<Attr>>,
+        after: Option<Box<Attr>>,
+    },
+    Structs {
+        before: Structs,
+        after: Structs,
+    },
+}
+
+/// One reversible edit and its undo/redo label. Undo restores `before`, redo
 /// applies `after`.
 struct UndoEntry {
-    addr: Address,
-    before: Option<Attr>,
-    after: Option<Attr>,
+    edit: Edit,
     label: String,
+}
+
+/// Which snapshot of an [`Edit`] to restore — `before` for undo, `after` for redo.
+#[derive(Clone, Copy)]
+enum Side {
+    Before,
+    After,
+}
+
+/// Which axis of a constant's display format a keypress toggles.
+#[derive(Clone, Copy)]
+enum FmtAxis {
+    /// `h` — flip between hexadecimal and (unsigned) decimal.
+    Radix,
+    /// `-` — flip between unsigned and signed decimal.
+    Sign,
+}
+
+impl FmtAxis {
+    /// The format that results from toggling `cur` along this axis. There is no
+    /// signed-hex, so flipping the radix away from decimal collapses to hex.
+    fn apply(self, cur: DisplayFmt) -> DisplayFmt {
+        match self {
+            FmtAxis::Radix => {
+                if is_hex(cur) {
+                    DisplayFmt::Dec
+                } else {
+                    DisplayFmt::Hex
+                }
+            }
+            FmtAxis::Sign => match cur {
+                DisplayFmt::SignedDec => DisplayFmt::Dec,
+                _ => DisplayFmt::SignedDec,
+            },
+        }
+    }
+}
+
+/// Whether `fmt` renders as hexadecimal (the disassembler default).
+fn is_hex(fmt: DisplayFmt) -> bool {
+    matches!(fmt, DisplayFmt::Default | DisplayFmt::Hex)
+}
+
+/// A short label for a display format, for status messages.
+fn fmt_label(fmt: DisplayFmt) -> &'static str {
+    match fmt {
+        DisplayFmt::Default | DisplayFmt::Hex => "hex",
+        DisplayFmt::Dec => "dec",
+        DisplayFmt::SignedDec => "signed",
+        DisplayFmt::Bin => "bin",
+        DisplayFmt::Char => "char",
+    }
+}
+
+/// The outermost display format of a data type (`Default` when unwrapped).
+fn data_outer_fmt(dt: &DataType) -> DisplayFmt {
+    match dt {
+        DataType::Formatted(fmt, _) => *fmt,
+        _ => DisplayFmt::Default,
+    }
+}
+
+/// Rewrap `dt` with `fmt`, dropping the wrapper entirely for hex (the default).
+fn set_data_outer_fmt(dt: DataType, fmt: DisplayFmt) -> DataType {
+    let inner = match dt {
+        DataType::Formatted(_, inner) => *inner,
+        other => other,
+    };
+    if is_hex(fmt) {
+        inner
+    } else {
+        DataType::Formatted(fmt, Box::new(inner))
+    }
 }
 
 pub struct App {
@@ -425,6 +826,14 @@ pub struct App {
     project: Project,
     /// Path the document loads from and saves to.
     path: PathBuf,
+    /// The exact bytes on disk as of the last load or save. Compared against a
+    /// fresh read to ignore our own writes (and no-op touches) when the file
+    /// changes, so only genuine external edits trigger a reload or warning.
+    disk_bytes: Vec<u8>,
+    /// An external change is pending while the document has unsaved edits: the
+    /// file changed on disk and we kept the local edits rather than clobbering
+    /// them. Drives the footer warning and the `R`/`W` resolution keys.
+    external_changed: bool,
     labels: HashMap<String, Address>,
 
     widgets: Vec<Widget>,
@@ -474,6 +883,8 @@ pub struct App {
     last_ofs_seg: Option<SegmentIdx>,
     /// A guarded quit is pending: a second `q` confirms discarding edits.
     confirm_quit: bool,
+    /// Go-to-symbol kind switches, loaded at startup and saved when toggled.
+    label_prefs: LabelPrefs,
 
     /// Whether the terminal supports 24-bit colour; otherwise colours are
     /// quantized to xterm-256 so they render correctly on e.g. Terminal.app.
@@ -485,10 +896,16 @@ impl App {
     /// Build the app from the authoritative (un-analyzed) project and its path.
     pub fn new(base: Project, path: PathBuf) -> Self {
         let project = analyzed(&base);
+        // Snapshot the on-disk bytes so a later external change can be told apart
+        // from our own writes. A read failure leaves it empty, which simply means
+        // the first external change is treated as a real one.
+        let disk_bytes = std::fs::read(&path).unwrap_or_default();
         let mut app = App {
             base,
             project,
             path,
+            disk_bytes,
+            external_changed: false,
             labels: HashMap::new(),
             widgets: Vec::new(),
             total_rows: 0,
@@ -513,6 +930,7 @@ impl App {
             saved_at: 0,
             last_ofs_seg: None,
             confirm_quit: false,
+            label_prefs: LabelPrefs::load(),
             truecolor: supports_truecolor(),
             quit: false,
         };
@@ -575,7 +993,8 @@ impl App {
     /// on the same address and screen line.
     fn rederive(&mut self) {
         let anchor = self.cursor_address();
-        let screen_row = self.cursor_yx().0.saturating_sub(self.top_row);
+        let (cur_y, cur_x) = self.cursor_yx();
+        let screen_row = cur_y.saturating_sub(self.top_row);
 
         self.project = analyzed(&self.base);
         self.rebuild_listing();
@@ -584,8 +1003,14 @@ impl App {
             && let Some(row) = self.row_for_address(addr)
             && let Some(nav) = self.jump_target_nav(row)
         {
-            self.cursor = nav;
-            let y = self.widgets[self.navigable[nav]].y;
+            // Land on the resolved line, keeping the cursor on the same column's
+            // token where one exists (so e.g. reformatting an operand keeps the
+            // operand focused rather than snapping back to the opcode).
+            let target_row = self.widgets[self.navigable[nav]].y;
+            if !self.cursor_to_row_col(target_row, cur_x) {
+                self.cursor = nav;
+            }
+            let y = self.widgets[self.navigable[self.cursor]].y;
             self.top_row = y.saturating_sub(screen_row).min(self.max_top());
         }
         self.goal_col = self.cursor_yx().1;
@@ -723,6 +1148,36 @@ impl App {
             self.on_ofs_seg_key(key);
             return;
         }
+        // While the type picker is open, all keys go to it.
+        if matches!(self.mode, Mode::Type(_)) {
+            self.on_type_key(key);
+            return;
+        }
+        // While the struct editor is open, all keys go to it.
+        if matches!(self.mode, Mode::Struct(_)) {
+            self.on_struct_key(key);
+            return;
+        }
+        // While the binding editor is open, all keys go to it.
+        if matches!(self.mode, Mode::Bindings(_)) {
+            self.on_bindings_key(key);
+            return;
+        }
+        // While the xref panel is open, all keys go to it.
+        if matches!(self.mode, Mode::Xref(_)) {
+            self.on_xref_key(key);
+            return;
+        }
+        // While the go-to-symbol picker is open, all keys go to it.
+        if matches!(self.mode, Mode::Labels(_)) {
+            self.on_labels_key(key);
+            return;
+        }
+        // While the help overlay is open, any key dismisses it.
+        if matches!(self.mode, Mode::Help) {
+            self.mode = Mode::Normal;
+            return;
+        }
 
         // Any normal-mode key clears a stale status message; handlers set a new
         // one as needed. A pending quit-confirmation is cleared by any key other
@@ -753,9 +1208,20 @@ impl App {
             KeyCode::Char('l') => self.begin_rename(),
             KeyCode::Char(';') => self.begin_comment(),
             KeyCode::Char('o') => self.begin_ofs_seg(),
+            KeyCode::Char('c') => self.mark_code(),
+            KeyCode::Char('d') => self.begin_type_picker(),
+            KeyCode::Char('t') => self.begin_bindings(),
+            KeyCode::Char('h') => self.reformat_constant(FmtAxis::Radix),
+            KeyCode::Char('-') => self.reformat_constant(FmtAxis::Sign),
+            KeyCode::Char('S') => self.begin_struct_editor(),
+            KeyCode::Char('x') => self.begin_xref(),
+            KeyCode::Char('b') => self.begin_labels(),
             KeyCode::Char('s') => self.save(),
+            KeyCode::Char('R') => self.reload(),
+            KeyCode::Char('W') => self.begin_prompt(PromptKind::SaveAs, String::new(), None),
             KeyCode::Char('u') => self.undo(),
             KeyCode::Char('U') => self.redo(),
+            KeyCode::Char('?') => self.mode = Mode::Help,
             _ => {}
         }
     }
@@ -846,6 +1312,666 @@ impl App {
         }
     }
 
+    /// The mnemonic of the instruction at `addr` (`call`, `jmp`, `mov`, …), or
+    /// `data` when `addr` is a data definition rather than code — used to tag
+    /// the referencing instruction in the xref panel.
+    fn ref_kind(&self, addr: Address) -> String {
+        if !self.project.segments[addr.0].addr_attributes.is_op(addr.1) {
+            return "data".to_string();
+        }
+        let seg_val = (self.project.segments[addr.0].start.unwrap_or(0) / 16) as u16;
+        let bytes = self.project.bytes_at_seg(addr.0, addr.1);
+        match decode(seg_val, addr.1 as u16, bytes.iter().copied()) {
+            Some(inst) => {
+                let mut s = String::new();
+                let _ = inst.format_opcode(&mut s);
+                s
+            }
+            None => "data".to_string(),
+        }
+    }
+
+    /// The address the xref panel describes: the link target under the cursor
+    /// (so `x` on the `intro_script_load_word` operand of `call
+    /// intro_script_load_word` inspects the callee, matching what `Enter` would
+    /// follow), else the cursor's own line address.
+    fn xref_subject(&self) -> Option<Address> {
+        if let Some(&wi) = self.navigable.get(self.cursor) {
+            let widget = &self.widgets[wi];
+            let col = self.cursor_yx().1;
+            if let Some(span) = resolve_link_at(&self.project, &self.labels, widget, Some(col)) {
+                return Some(span.target);
+            }
+        }
+        self.cursor_address()
+    }
+
+    /// Open the xref panel for the cursor's subject — inbound references (what
+    /// points at it) and outbound references (what it points at).
+    ///
+    /// References are read from the same resolved widget links the listing
+    /// renders, so they cover not only code branches but also immediate and
+    /// memory-direct operands (e.g. `mov si, intro_script`). That set is unioned
+    /// with the `ofs16` data-pointer graph (`data_xrefs`), which additionally
+    /// catches array / struct table entries that carry no clickable widget link.
+    /// A no-op (with a status note) when nothing references it either way.
+    fn begin_xref(&mut self) {
+        let Some(addr) = self.xref_subject() else {
+            return;
+        };
+
+        let mut inbound: BTreeSet<Address> = BTreeSet::new();
+        let mut outbound: BTreeSet<Address> = BTreeSet::new();
+
+        // Operand / scalar-data widget links (branch targets, immediates,
+        // `[label]`, `dw label`).
+        for w in &self.widgets {
+            if !matches!(w.kind, WidgetKind::Operand { .. } | WidgetKind::Data) {
+                continue;
+            }
+            let owner = (w.seg_idx, w.ofs);
+            for span in resolve_links(&self.project, &self.labels, w) {
+                if span.target == addr {
+                    inbound.insert(owner);
+                }
+                if owner == addr {
+                    outbound.insert(span.target);
+                }
+            }
+        }
+
+        // Data-pointer (`ofs16`) graph, covering array / struct table entries.
+        if let Some(srcs) = self.project.data_xrefs.get(&addr) {
+            inbound.extend(srcs.iter().copied());
+        }
+        for (&target, srcs) in &self.project.data_xrefs {
+            if srcs.contains(&addr) {
+                outbound.insert(target);
+            }
+        }
+
+        // The subject never lists itself.
+        inbound.remove(&addr);
+        outbound.remove(&addr);
+
+        let mut rows: Vec<XrefRow> = Vec::new();
+        if !inbound.is_empty() {
+            rows.push(XrefRow::Header(format!("inbound ({})", inbound.len())));
+            for &src in &inbound {
+                rows.push(XrefRow::Ref {
+                    addr: src,
+                    kind: self.ref_kind(src),
+                });
+            }
+        }
+        if !outbound.is_empty() {
+            let kind = self.ref_kind(addr);
+            rows.push(XrefRow::Header(format!("outbound ({})", outbound.len())));
+            for &tgt in &outbound {
+                rows.push(XrefRow::Ref {
+                    addr: tgt,
+                    kind: kind.clone(),
+                });
+            }
+        }
+
+        let Some(selected) = rows.iter().position(|r| matches!(r, XrefRow::Ref { .. })) else {
+            self.status = Some(format!(
+                "xref: no references to or from {}:{:04x}",
+                self.project.segments[addr.0].name, addr.1
+            ));
+            return;
+        };
+
+        self.mode = Mode::Xref(XrefPanel {
+            addr,
+            rows,
+            selected,
+        });
+    }
+
+    fn on_xref_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Up => {
+                if let Mode::Xref(p) = &mut self.mode {
+                    p.up();
+                }
+            }
+            KeyCode::Down => {
+                if let Mode::Xref(p) = &mut self.mode {
+                    p.down();
+                }
+            }
+            KeyCode::Enter => {
+                if let Mode::Xref(p) = std::mem::replace(&mut self.mode, Mode::Normal)
+                    && let Some(target) = p.choice()
+                {
+                    self.jump_following(target);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Open the go-to-symbol picker over every named address in the analyzed
+    /// view. `Project::attrs` already holds user labels and the auto-generated
+    /// `loc_*` / `data_*` names, so a single pass over it is the full symbol set.
+    fn begin_labels(&mut self) {
+        let entries: Vec<LabelEntry> = self
+            .project
+            .attrs
+            .iter()
+            .filter_map(|(&addr, attr)| {
+                let name = attr.name.as_deref()?;
+                let kind = match &attr.r#type {
+                    Some(AttrType::Data(_)) => LabelKind::Data,
+                    Some(AttrType::Code) if self.project.functions.is_entry(addr) => {
+                        LabelKind::Function
+                    }
+                    _ => LabelKind::Code,
+                };
+                Some(LabelEntry {
+                    addr,
+                    name: name.to_string(),
+                    kind,
+                    is_auto: attr.is_auto_label,
+                })
+            })
+            .collect();
+        let cursor = self.cursor_address();
+        self.mode = Mode::Labels(LabelPicker::new(entries, cursor, self.label_prefs));
+    }
+
+    fn on_labels_key(&mut self, key: KeyEvent) {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Up => {
+                if let Mode::Labels(p) = &mut self.mode {
+                    p.up();
+                }
+            }
+            KeyCode::Down => {
+                if let Mode::Labels(p) = &mut self.mode {
+                    p.down();
+                }
+            }
+            KeyCode::PageUp => {
+                if let Mode::Labels(p) = &mut self.mode {
+                    for _ in 0..10 {
+                        p.up();
+                    }
+                }
+            }
+            KeyCode::PageDown => {
+                if let Mode::Labels(p) = &mut self.mode {
+                    for _ in 0..10 {
+                        p.down();
+                    }
+                }
+            }
+            // Alt-modified letters toggle the kind switches, so plain letters
+            // still type into the search field.
+            KeyCode::Char('f') if alt => self.toggle_label_switch(|p| &mut p.show_fn),
+            KeyCode::Char('c') if alt => self.toggle_label_switch(|p| &mut p.show_code),
+            KeyCode::Char('d') if alt => self.toggle_label_switch(|p| &mut p.show_data),
+            KeyCode::Char('a') if alt => self.toggle_label_switch(|p| &mut p.show_auto),
+            KeyCode::Enter => {
+                if let Mode::Labels(p) = std::mem::replace(&mut self.mode, Mode::Normal)
+                    && let Some(addr) = p.choice()
+                {
+                    self.jump_following(addr);
+                }
+            }
+            _ => {
+                if let Mode::Labels(p) = &mut self.mode {
+                    p.search.on_key(key);
+                    p.recompute();
+                }
+            }
+        }
+    }
+
+    /// Flip one of the picker's kind switches, re-filter, and persist the new
+    /// switch state so the next run opens with the same filter.
+    fn toggle_label_switch(&mut self, sel: impl FnOnce(&mut LabelPicker) -> &mut bool) {
+        if let Mode::Labels(p) = &mut self.mode {
+            let flag = sel(p);
+            *flag = !*flag;
+            p.recompute();
+            self.label_prefs = p.prefs();
+            self.label_prefs.save();
+        }
+    }
+
+    /// Mark the cursor's address as code (a re-disassembly seed).
+    fn mark_code(&mut self) {
+        if let Some(addr) = self.cursor_address() {
+            self.set_type(addr, Some(AttrType::Code), "mark code".to_string());
+        }
+    }
+
+    /// Open the code/data type picker for the cursor's address.
+    fn begin_type_picker(&mut self) {
+        let Some(addr) = self.cursor_address() else {
+            return;
+        };
+        let current = self
+            .base
+            .attrs
+            .get(&addr)
+            .and_then(|a| a.r#type.as_ref())
+            .map(|t| t.type_str(&self.base.segments, &self.base.structs))
+            .unwrap_or_default();
+        let struct_template = self
+            .base
+            .structs
+            .first()
+            .map(|s| s.name.to_string())
+            .unwrap_or_default();
+
+        let scalar = |s: ScalarDataType| TypeAction::Set(Some(AttrType::Data(DataType::Scalar(s))));
+        let items = vec![
+            TypeItem {
+                label: "code".to_string(),
+                desc: "classify as code — a re-disassembly seed",
+                action: TypeAction::Set(Some(AttrType::Code)),
+            },
+            TypeItem {
+                label: "— unmark —".to_string(),
+                desc: "clear the classification; revert to auto-detection",
+                action: TypeAction::Set(None),
+            },
+            TypeItem {
+                label: "db   (u8)".to_string(),
+                desc: "one unsigned byte",
+                action: scalar(ScalarDataType::U8),
+            },
+            TypeItem {
+                label: "dw   (u16)".to_string(),
+                desc: "one unsigned 16-bit word",
+                action: scalar(ScalarDataType::U16),
+            },
+            TypeItem {
+                label: "dd   (u32)".to_string(),
+                desc: "one unsigned 32-bit dword",
+                action: scalar(ScalarDataType::U32),
+            },
+            TypeItem {
+                label: "ofs16".to_string(),
+                desc: "a 16-bit near offset — set its segment with o",
+                action: scalar(ScalarDataType::Ofs16(None)),
+            },
+            TypeItem {
+                label: "cstr".to_string(),
+                desc: "a NUL-terminated string",
+                action: scalar(ScalarDataType::CStr),
+            },
+            TypeItem {
+                label: "bool".to_string(),
+                desc: "a boolean byte",
+                action: scalar(ScalarDataType::Bool),
+            },
+            TypeItem {
+                label: "str(N) …".to_string(),
+                desc: "a fixed-length N-byte string",
+                action: TypeAction::Prompt("str(16)".to_string()),
+            },
+            TypeItem {
+                label: "[T; N] …".to_string(),
+                desc: "an array of N elements of type T",
+                action: TypeAction::Prompt("[u8; 16]".to_string()),
+            },
+            TypeItem {
+                label: "struct …".to_string(),
+                desc: "a project struct by name",
+                action: TypeAction::Prompt(struct_template),
+            },
+            TypeItem {
+                label: "custom …".to_string(),
+                desc: "type any data-type expression",
+                action: TypeAction::Prompt(current.clone()),
+            },
+        ];
+
+        // Preselect the fixed row matching the current type, else the first row.
+        let cur_ty = self.base.attrs.get(&addr).and_then(|a| a.r#type.clone());
+        let selected = items
+            .iter()
+            .position(|it| matches!(&it.action, TypeAction::Set(t) if *t == cur_ty))
+            .unwrap_or(0);
+
+        self.mode = Mode::Type(TypePicker {
+            addr,
+            items,
+            selected,
+        });
+    }
+
+    fn on_type_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Up => {
+                if let Mode::Type(p) = &mut self.mode {
+                    p.up();
+                }
+            }
+            KeyCode::Down => {
+                if let Mode::Type(p) = &mut self.mode {
+                    p.down();
+                }
+            }
+            KeyCode::Enter => {
+                let Mode::Type(mut p) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+                    return;
+                };
+                let addr = p.addr;
+                let item = p.items.swap_remove(p.selected);
+                match item.action {
+                    TypeAction::Set(ty) => {
+                        let label = match &ty {
+                            Some(AttrType::Code) => "mark code".to_string(),
+                            Some(t) => format!(
+                                "type → {}",
+                                t.type_str(&self.base.segments, &self.base.structs)
+                            ),
+                            None => "unmark type".to_string(),
+                        };
+                        self.set_type(addr, ty, label);
+                    }
+                    TypeAction::Prompt(prefill) => {
+                        self.begin_prompt(PromptKind::DataType, prefill, Some(addr));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ── Struct editor ─────────────────────────────────────────────────────────
+
+    /// Open the struct-table editor, preselecting the struct referenced by the
+    /// cursor's attribute type when there is one.
+    fn begin_struct_editor(&mut self) {
+        let struct_idx = self
+            .cursor_address()
+            .and_then(|addr| self.base.attrs.get(&addr))
+            .and_then(|a| a.r#type.as_ref())
+            .and_then(|t| t.as_data())
+            .and_then(struct_idx_in_type)
+            .unwrap_or(0);
+        self.mode = Mode::Struct(StructEditor {
+            struct_idx,
+            field_idx: 0,
+            pane: StructPane::List,
+            input: None,
+        });
+    }
+
+    /// Number of fields in the editor's current struct (0 when none).
+    fn struct_field_count(&self, ed: &StructEditor) -> usize {
+        self.base
+            .structs
+            .get(ed.struct_idx)
+            .map(|s| s.fields.len())
+            .unwrap_or(0)
+    }
+
+    fn on_struct_key(&mut self, key: KeyEvent) {
+        // Route to the inline input when one is open.
+        if matches!(&self.mode, Mode::Struct(ed) if ed.input.is_some()) {
+            match key.code {
+                KeyCode::Esc => {
+                    if let Mode::Struct(ed) = &mut self.mode {
+                        ed.input = None;
+                    }
+                }
+                KeyCode::Enter => self.commit_struct_input(),
+                _ => {
+                    if let Mode::Struct(ed) = &mut self.mode
+                        && let Some(inp) = &mut ed.input
+                    {
+                        inp.line.on_key(key);
+                    }
+                }
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Tab => {
+                if let Mode::Struct(ed) = &mut self.mode {
+                    ed.pane = match ed.pane {
+                        StructPane::List => StructPane::Fields,
+                        StructPane::Fields => StructPane::List,
+                    };
+                }
+            }
+            KeyCode::Left => {
+                if let Mode::Struct(ed) = &mut self.mode {
+                    ed.pane = StructPane::List;
+                }
+            }
+            KeyCode::Right => {
+                if let Mode::Struct(ed) = &mut self.mode {
+                    ed.pane = StructPane::Fields;
+                }
+            }
+            KeyCode::Up => self.struct_move(-1),
+            KeyCode::Down => self.struct_move(1),
+            KeyCode::Char('a') => self.struct_begin_add(),
+            KeyCode::Char('r') | KeyCode::Enter => self.struct_begin_rename(),
+            KeyCode::Char('x') | KeyCode::Delete => self.struct_delete(),
+            _ => {}
+        }
+    }
+
+    /// Move the selection within the focused pane, clamped to its length.
+    fn struct_move(&mut self, dir: i64) {
+        let count = match &self.mode {
+            Mode::Struct(ed) => match ed.pane {
+                StructPane::List => self.base.structs.len(),
+                StructPane::Fields => self.struct_field_count(ed),
+            },
+            _ => return,
+        };
+        if count == 0 {
+            return;
+        }
+        let Mode::Struct(ed) = &mut self.mode else {
+            return;
+        };
+        let sel = match ed.pane {
+            StructPane::List => &mut ed.struct_idx,
+            StructPane::Fields => &mut ed.field_idx,
+        };
+        let next = (*sel as i64 + dir).clamp(0, count as i64 - 1) as usize;
+        *sel = next;
+        if matches!(ed.pane, StructPane::List) {
+            ed.field_idx = 0;
+        }
+    }
+
+    /// Start adding a struct (List pane) or a field (Fields pane).
+    fn struct_begin_add(&mut self) {
+        let Mode::Struct(ed) = &mut self.mode else {
+            return;
+        };
+        let (kind, prefill) = match ed.pane {
+            StructPane::List => (StructInputKind::AddStruct, String::new()),
+            StructPane::Fields => {
+                if self.base.structs.is_empty() {
+                    self.status = Some("add a struct first".to_string());
+                    return;
+                }
+                (StructInputKind::AddField, "field: u8".to_string())
+            }
+        };
+        ed.input = Some(StructInput {
+            kind,
+            line: LineInput::new(prefill),
+        });
+    }
+
+    /// Start renaming the current struct (List pane) or editing the current
+    /// field (Fields pane).
+    fn struct_begin_rename(&mut self) {
+        let Mode::Struct(ed) = &self.mode else {
+            return;
+        };
+        let (kind, prefill) = match ed.pane {
+            StructPane::List => {
+                let Some(def) = self.base.structs.get(ed.struct_idx) else {
+                    return;
+                };
+                (StructInputKind::RenameStruct, def.name.to_string())
+            }
+            StructPane::Fields => {
+                let Some(def) = self.base.structs.get(ed.struct_idx) else {
+                    return;
+                };
+                let Some(field) = def.fields.get(ed.field_idx) else {
+                    return;
+                };
+                let spec = format!(
+                    "{}: {}",
+                    field.name,
+                    field
+                        .r#type
+                        .type_str(&self.base.segments, &self.base.structs)
+                );
+                (StructInputKind::EditField(ed.field_idx), spec)
+            }
+        };
+        if let Mode::Struct(ed) = &mut self.mode {
+            ed.input = Some(StructInput {
+                kind,
+                line: LineInput::new(prefill),
+            });
+        }
+    }
+
+    /// Delete the current struct (List pane) or field (Fields pane).
+    fn struct_delete(&mut self) {
+        let Mode::Struct(mut ed) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            return;
+        };
+        match ed.pane {
+            StructPane::List => {
+                if ed.struct_idx >= self.base.structs.len() {
+                    self.mode = Mode::Struct(ed);
+                    return;
+                }
+                let name = self.base.structs[ed.struct_idx].name.to_string();
+                let before = self.base.structs.clone();
+                match self.base.remove_struct(ed.struct_idx) {
+                    Ok(()) => {
+                        let after = self.base.structs.clone();
+                        if ed.struct_idx >= self.base.structs.len() {
+                            ed.struct_idx = self.base.structs.len().saturating_sub(1);
+                        }
+                        ed.field_idx = 0;
+                        self.commit(
+                            Edit::Structs { before, after },
+                            format!("delete struct {name}"),
+                        );
+                    }
+                    Err(e) => self.status = Some(e),
+                }
+            }
+            StructPane::Fields => {
+                if self.struct_field_count(&ed) == 0 {
+                    self.mode = Mode::Struct(ed);
+                    return;
+                }
+                let before = self.base.structs.clone();
+                match self.base.remove_struct_field(ed.struct_idx, ed.field_idx) {
+                    Ok(()) => {
+                        let after = self.base.structs.clone();
+                        let n = self.struct_field_count(&ed);
+                        if ed.field_idx >= n {
+                            ed.field_idx = n.saturating_sub(1);
+                        }
+                        self.commit(Edit::Structs { before, after }, "delete field".to_string());
+                    }
+                    Err(e) => self.status = Some(e),
+                }
+            }
+        }
+        self.mode = Mode::Struct(ed);
+    }
+
+    /// Apply the struct editor's inline input. On error, the input stays open
+    /// with a status note; on success it commits and closes the input.
+    fn commit_struct_input(&mut self) {
+        let Mode::Struct(mut ed) = std::mem::replace(&mut self.mode, Mode::Normal) else {
+            return;
+        };
+        let Some(input) = ed.input.take() else {
+            self.mode = Mode::Struct(ed);
+            return;
+        };
+        let text = input.line.text.trim().to_string();
+
+        // Returns Ok((Edit, label)) to commit, or Err(message) to keep editing.
+        let before = self.base.structs.clone();
+        let outcome: Result<String, String> = match &input.kind {
+            StructInputKind::AddStruct => self.base.add_struct(&text).map(|idx| {
+                ed.struct_idx = idx;
+                ed.field_idx = 0;
+                ed.pane = StructPane::Fields;
+                format!("add struct {text}")
+            }),
+            StructInputKind::RenameStruct => self
+                .base
+                .rename_struct(ed.struct_idx, &text)
+                .map(|()| format!("rename struct → {text}")),
+            StructInputKind::AddField => self.parse_field_spec(&text).and_then(|(name, ty)| {
+                self.base
+                    .set_struct_field(ed.struct_idx, None, &name, ty)
+                    .map(|()| {
+                        ed.field_idx = self.base.structs[ed.struct_idx].fields.len() - 1;
+                        format!("add field {name}")
+                    })
+            }),
+            StructInputKind::EditField(i) => {
+                let i = *i;
+                self.parse_field_spec(&text).and_then(|(name, ty)| {
+                    self.base
+                        .set_struct_field(ed.struct_idx, Some(i), &name, ty)
+                        .map(|()| format!("edit field {name}"))
+                })
+            }
+        };
+
+        match outcome {
+            Ok(label) => {
+                let after = self.base.structs.clone();
+                self.commit(Edit::Structs { before, after }, label);
+            }
+            Err(e) => {
+                self.status = Some(e);
+                ed.input = Some(input);
+            }
+        }
+        self.mode = Mode::Struct(ed);
+    }
+
+    /// Parse a `name: type` field spec into a name and resolved `DataType`.
+    fn parse_field_spec(&self, s: &str) -> Result<(String, DataType), String> {
+        let (name, ty) = s
+            .split_once(':')
+            .ok_or_else(|| "expected 'name: type'".to_string())?;
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("field name must not be empty".to_string());
+        }
+        let ty = self.base.parse_data_type(ty.trim())?;
+        Ok((name.to_string(), ty))
+    }
+
     fn on_comment_key(&mut self, key: KeyEvent) {
         match key.code {
             // Esc discards; Tab saves; Enter inserts a newline.
@@ -857,37 +1983,99 @@ impl App {
             }
             _ => {
                 if let Mode::Comment(ed) = &mut self.mode {
-                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                    let alt = key.modifiers.contains(KeyModifiers::ALT);
-                    match key.code {
-                        KeyCode::Enter => ed.newline(),
-                        KeyCode::Left if ctrl || alt => ed.word_left(),
-                        KeyCode::Right if ctrl || alt => ed.word_right(),
-                        KeyCode::Left => ed.left(),
-                        KeyCode::Right => ed.right(),
-                        KeyCode::Up => ed.up(),
-                        KeyCode::Down => ed.down(),
-                        KeyCode::Home => ed.col = 0,
-                        KeyCode::End => ed.col = ed.line_len(),
-                        KeyCode::Backspace => ed.backspace(),
-                        KeyCode::Delete => ed.delete(),
-                        KeyCode::Char('a') if ctrl => ed.col = 0,
-                        KeyCode::Char('e') if ctrl => ed.col = ed.line_len(),
-                        KeyCode::Char('b') if ctrl => ed.left(),
-                        KeyCode::Char('f') if ctrl => ed.right(),
-                        KeyCode::Char('b') if alt => ed.word_left(),
-                        KeyCode::Char('f') if alt => ed.word_right(),
-                        KeyCode::Char('h') if ctrl => ed.backspace(),
-                        KeyCode::Char('d') if ctrl => ed.delete(),
-                        KeyCode::Char('w') if ctrl => ed.delete_word_back(),
-                        KeyCode::Char('u') if ctrl => ed.delete_to_start(),
-                        KeyCode::Char('k') if ctrl => ed.delete_to_end(),
-                        KeyCode::Char(c) if !ctrl && !alt => ed.insert(c),
-                        _ => {}
-                    }
+                    editor_key(ed, key);
                 }
             }
         }
+    }
+
+    // ── Binding editor (`fn` + `let`) ─────────────────────────────────────────
+
+    /// Open the unified binding editor for the cursor's address, prefilled with
+    /// its `fn` signature (directed) followed by its `let` assertions, one
+    /// binding per line.
+    fn begin_bindings(&mut self) {
+        let Some(addr) = self.cursor_address() else {
+            return;
+        };
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(attr) = self.base.attrs.get(&addr) {
+            if let Some(sig) = &attr.signature {
+                lines.extend(
+                    sig.iter()
+                        .map(|b| b.to_string(&self.base.segments, &self.base.structs)),
+                );
+            }
+            lines.extend(
+                attr.lets
+                    .iter()
+                    .map(|b| b.to_string(&self.base.segments, &self.base.structs)),
+            );
+        }
+        self.mode = Mode::Bindings(CommentEditor::new(addr, &lines.join("\n")));
+    }
+
+    fn on_bindings_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Tab => {
+                let Mode::Bindings(ed) = &self.mode else {
+                    return;
+                };
+                let addr = ed.addr;
+                match self.parse_bindings(&ed.text()) {
+                    Ok(bindings) => {
+                        self.mode = Mode::Normal;
+                        self.apply_bindings(addr, bindings);
+                    }
+                    Err(e) => self.status = Some(format!("bindings: {e}")),
+                }
+            }
+            _ => {
+                if let Mode::Bindings(ed) = &mut self.mode {
+                    editor_key(ed, key);
+                }
+            }
+        }
+    }
+
+    /// Parse the editor text (one binding per line) into a flat binding list.
+    /// Lines are joined with commas so the grammar's tuple/array commas survive.
+    fn parse_bindings(&self, text: &str) -> Result<Vec<Binding>, String> {
+        let struct_names: Vec<String> = self.base.structs.iter().map(|s| s.name.clone()).collect();
+        let joined = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        chani_disasm::binding::parse_binding_list(&joined, &self.base.segments, &struct_names)
+    }
+
+    /// Partition the bindings on direction — directed → `fn` signature,
+    /// direction-less → `let` assertions — and commit both as one edit.
+    fn apply_bindings(&mut self, addr: Address, bindings: Vec<Binding>) {
+        let (signature, lets): (Vec<Binding>, Vec<Binding>) =
+            bindings.into_iter().partition(|b| b.dir.is_some());
+        let new_sig = (!signature.is_empty()).then_some(signature);
+
+        let old_sig = self.base.attrs.get(&addr).and_then(|a| a.signature.clone());
+        let old_lets = self
+            .base
+            .attrs
+            .get(&addr)
+            .map(|a| a.lets.clone())
+            .unwrap_or_default();
+        if new_sig == old_sig && lets == old_lets {
+            self.status = Some("bindings unchanged".to_string());
+            return;
+        }
+
+        let before = self.base.attrs.get(&addr).cloned();
+        self.base.set_attr_signature(addr, new_sig);
+        self.base.set_attr_lets(addr, lets);
+        let after = self.base.attrs.get(&addr).cloned();
+        self.commit_edit(addr, before, after, "edit bindings".to_string());
     }
 
     fn on_prompt_key(&mut self, key: KeyEvent) {
@@ -926,6 +2114,19 @@ impl App {
             PromptKind::Rename => {
                 if let Some(addr) = addr {
                     self.apply_rename(addr, input);
+                }
+            }
+            // An empty data-type clears the classification.
+            PromptKind::DataType => {
+                if let Some(addr) = addr {
+                    self.apply_data_type(addr, input);
+                }
+            }
+            // An empty save-as path is a no-op.
+            PromptKind::SaveAs => {
+                let p = input.trim();
+                if !p.is_empty() {
+                    self.save_as(Path::new(p));
                 }
             }
         }
@@ -991,7 +2192,120 @@ impl App {
         self.commit_edit(addr, before, after, label);
     }
 
-    /// Record an applied edit (truncating any redo tail), then re-derive.
+    /// Set (or, with `None`, clear) the code/data classification at `addr`.
+    fn set_type(&mut self, addr: Address, ty: Option<AttrType>, label: String) {
+        let old = self.base.attrs.get(&addr).and_then(|a| a.r#type.clone());
+        if old == ty {
+            self.status = Some("type unchanged".to_string());
+            return;
+        }
+        let before = self.base.attrs.get(&addr).cloned();
+        self.base.set_attr_type(addr, ty);
+        let after = self.base.attrs.get(&addr).cloned();
+        self.commit_edit(addr, before, after, label);
+    }
+
+    /// Apply a freeform data-type string at `addr` (empty input clears the type).
+    fn apply_data_type(&mut self, addr: Address, input: String) {
+        let s = input.trim();
+        if s.is_empty() {
+            self.set_type(addr, None, "unmark type".to_string());
+            return;
+        }
+        match self.base.parse_type_str(s) {
+            Ok(t) => {
+                let label = format!(
+                    "type → {}",
+                    t.type_str(&self.base.segments, &self.base.structs)
+                );
+                self.set_type(addr, Some(t), label);
+            }
+            Err(e) => self.status = Some(format!("type: {e}")),
+        }
+    }
+
+    // ── Constant display format (`h` radix, `-` sign) ─────────────────────────
+
+    /// Toggle the display format of the constant under the cursor along `axis`:
+    /// `h` flips hex↔dec, `-` flips unsigned↔signed. Works on an immediate
+    /// operand (per `arg_fmts`) or on explicitly-typed scalar/array data (via the
+    /// `Formatted` wrapper).
+    fn reformat_constant(&mut self, axis: FmtAxis) {
+        // Code immediate operand.
+        if let Some((addr, index)) = self.cursor_imm_operand() {
+            let cur = self
+                .base
+                .attrs
+                .get(&addr)
+                .and_then(|a| a.arg_fmts[index])
+                .unwrap_or_default();
+            let new = axis.apply(cur);
+            // Hex == the disassembler default, so store it as a cleared override.
+            let store = (!is_hex(new)).then_some(new);
+            let old = self.base.attrs.get(&addr).and_then(|a| a.arg_fmts[index]);
+            if store == old {
+                self.status = Some("format unchanged".to_string());
+                return;
+            }
+            let before = self.base.attrs.get(&addr).cloned();
+            self.base.set_attr_arg_fmt(addr, index, store);
+            let after = self.base.attrs.get(&addr).cloned();
+            self.commit_edit(addr, before, after, format!("format → {}", fmt_label(new)));
+            return;
+        }
+
+        // Explicitly-typed scalar / array data.
+        if let Some(addr) = self.cursor_data_addr() {
+            let Some(AttrType::Data(dt)) =
+                self.base.attrs.get(&addr).and_then(|a| a.r#type.clone())
+            else {
+                self.status = Some("set a data type first (d)".to_string());
+                return;
+            };
+            if !(dt.is_scalar() || dt.is_array()) {
+                self.status = Some("cannot reformat this data".to_string());
+                return;
+            }
+            let new = axis.apply(data_outer_fmt(&dt));
+            let new_dt = set_data_outer_fmt(dt.clone(), new);
+            if new_dt == dt {
+                self.status = Some("format unchanged".to_string());
+                return;
+            }
+            let before = self.base.attrs.get(&addr).cloned();
+            self.base.set_attr_type(addr, Some(AttrType::Data(new_dt)));
+            let after = self.base.attrs.get(&addr).cloned();
+            self.commit_edit(addr, before, after, format!("format → {}", fmt_label(new)));
+            return;
+        }
+
+        self.status = Some("no constant to reformat here".to_string());
+    }
+
+    /// The address + operand index of the cursor, when it sits on an immediate
+    /// operand (the only operand kind `arg_fmts` reformats).
+    fn cursor_imm_operand(&self) -> Option<(Address, usize)> {
+        let w = self.focused_widget()?;
+        let WidgetKind::Operand { index } = w.kind else {
+            return None;
+        };
+        let seg_val = (self.project.segments[w.seg_idx].start.unwrap_or(0) / 16) as u16;
+        let bytes = self.project.bytes_at_seg(w.seg_idx, w.ofs);
+        let inst = decode(seg_val, w.ofs as u16, bytes.iter().copied())?;
+        matches!(inst.operand(index), Operand::Imm { .. }).then_some(((w.seg_idx, w.ofs), index))
+    }
+
+    /// The owning data address of the cursor, when it sits on a data element.
+    fn cursor_data_addr(&self) -> Option<Address> {
+        let w = self.focused_widget()?;
+        match w.kind {
+            WidgetKind::Data => Some((w.seg_idx, w.ofs)),
+            WidgetKind::ArrayIndex { base_ofs, .. } => Some((w.seg_idx, base_ofs)),
+            _ => None,
+        }
+    }
+
+    /// Record a single-attr edit (truncating any redo tail), then re-derive.
     fn commit_edit(
         &mut self,
         addr: Address,
@@ -999,15 +2313,26 @@ impl App {
         after: Option<Attr>,
         label: String,
     ) {
+        self.commit(
+            Edit::Attr {
+                addr,
+                before: before.map(Box::new),
+                after: after.map(Box::new),
+            },
+            label,
+        );
+    }
+
+    /// Record an applied edit of any kind (truncating any redo tail), then
+    /// re-derive.
+    fn commit(&mut self, edit: Edit, label: String) {
         self.history.truncate(self.head);
         // A save point in the just-discarded redo tail is now unreachable.
         if self.saved_at > self.head {
             self.saved_at = usize::MAX;
         }
         self.history.push(UndoEntry {
-            addr,
-            before,
-            after,
+            edit,
             label: label.clone(),
         });
         self.head += 1;
@@ -1021,11 +2346,7 @@ impl App {
             return;
         }
         self.head -= 1;
-        let (addr, attr) = {
-            let e = &self.history[self.head];
-            (e.addr, e.before.clone())
-        };
-        self.set_attr(addr, attr);
+        self.apply_side(self.head, Side::Before);
         self.rederive();
         self.status = Some(format!("undo: {}", self.history[self.head].label));
     }
@@ -1035,14 +2356,34 @@ impl App {
             self.status = Some("nothing to redo".to_string());
             return;
         }
-        let (addr, attr) = {
-            let e = &self.history[self.head];
-            (e.addr, e.after.clone())
-        };
-        self.set_attr(addr, attr);
+        self.apply_side(self.head, Side::After);
         self.rederive();
         self.status = Some(format!("redo: {}", self.history[self.head].label));
         self.head += 1;
+    }
+
+    /// Restore the `before` or `after` snapshot of history entry `i` into `base`.
+    fn apply_side(&mut self, i: usize, side: Side) {
+        match &self.history[i].edit {
+            Edit::Attr {
+                addr,
+                before,
+                after,
+            } => {
+                let addr = *addr;
+                let attr = match side {
+                    Side::Before => before.clone(),
+                    Side::After => after.clone(),
+                };
+                self.set_attr(addr, attr.map(|b| *b));
+            }
+            Edit::Structs { before, after } => {
+                self.base.structs = match side {
+                    Side::Before => before.clone(),
+                    Side::After => after.clone(),
+                };
+            }
+        }
     }
 
     /// Write or remove the authoritative attribute at `addr`.
@@ -1072,9 +2413,82 @@ impl App {
             Ok(()) => {
                 self.saved_at = self.head;
                 self.confirm_quit = false;
+                // Disk now equals our document: record the bytes so the watcher
+                // ignores this write, and clear any pending external-change
+                // warning (this is the "overwrite, I win" resolution).
+                self.disk_bytes = buf;
+                self.external_changed = false;
                 self.status = Some("saved".to_string());
             }
             Err(e) => self.status = Some(format!("save failed: {e}")),
+        }
+    }
+
+    /// Export the authoritative document to `path` without changing the file the
+    /// app loads from or saves to. Used to rescue local edits when the file has
+    /// changed externally; leaves `saved_at`/`disk_bytes`/`external_changed`
+    /// untouched so `R` can still take the external version afterwards.
+    fn save_as(&mut self, path: &Path) {
+        let mut buf = Vec::new();
+        if let Err(e) = self.base.write_to(&mut buf) {
+            self.status = Some(format!("save failed: {e}"));
+            return;
+        }
+        match std::fs::write(path, &buf) {
+            Ok(()) => self.status = Some(format!("saved to {}", path.display())),
+            Err(e) => self.status = Some(format!("save failed: {e}")),
+        }
+    }
+
+    /// React to a notification that the project file may have changed on disk.
+    /// Compares the current file contents against the bytes we last loaded or
+    /// saved: identical bytes are our own write (or a no-op touch) and ignored;
+    /// a genuine change reloads when the document is clean, or raises a warning
+    /// when there are unsaved local edits (which are kept intact).
+    pub fn handle_external_change(&mut self) {
+        let Ok(bytes) = std::fs::read(&self.path) else {
+            // A failed read (e.g. a mid-write partial) leaves all state intact;
+            // the next watcher event retries once the writer finishes.
+            self.status = Some("file changed on disk — read failed, will retry".to_string());
+            return;
+        };
+        if bytes == self.disk_bytes {
+            return;
+        }
+        if self.dirty() {
+            self.external_changed = true;
+            self.status = Some(
+                "file changed on disk — R reload (discard)  W save-as  s overwrite".to_string(),
+            );
+        } else {
+            self.reload();
+        }
+    }
+
+    /// Reload the authoritative document from disk, discarding any local edits
+    /// and undo history, and re-derive the view keeping the cursor on the same
+    /// address. On a parse failure the current state is preserved.
+    fn reload(&mut self) {
+        let path = match self.path.to_str() {
+            Some(p) => p,
+            None => {
+                self.status = Some("reload failed: path is not UTF-8".to_string());
+                return;
+            }
+        };
+        match Project::from_project_file(path) {
+            Ok(base) => {
+                self.base = base;
+                self.history.clear();
+                self.head = 0;
+                self.saved_at = 0;
+                self.confirm_quit = false;
+                self.disk_bytes = std::fs::read(&self.path).unwrap_or_default();
+                self.external_changed = false;
+                self.rederive();
+                self.status = Some("reloaded from disk".to_string());
+            }
+            Err(e) => self.status = Some(format!("reload failed: {e}")),
         }
     }
 
@@ -1475,11 +2889,342 @@ impl App {
         }
 
         if let Mode::Comment(ed) = &self.mode {
-            self.render_comment_editor(frame, ed, listing_area);
+            self.render_text_editor(frame, ed, listing_area, "comment");
+        }
+        if let Mode::Bindings(ed) = &self.mode {
+            self.render_text_editor(frame, ed, listing_area, "bindings");
         }
         if let Mode::OfsSeg(p) = &self.mode {
             self.render_ofs_seg_picker(frame, p, listing_area);
         }
+        if let Mode::Type(p) = &self.mode {
+            self.render_type_picker(frame, p, listing_area);
+        }
+        if let Mode::Struct(ed) = &self.mode {
+            self.render_struct_editor(frame, ed, listing_area);
+        }
+        if let Mode::Xref(p) = &self.mode {
+            self.render_xref_panel(frame, p, listing_area);
+        }
+        if let Mode::Labels(p) = &self.mode {
+            self.render_labels_picker(frame, p, listing_area);
+        }
+        if matches!(self.mode, Mode::Help) {
+            self.render_help(frame, listing_area);
+        }
+    }
+
+    /// Draw the keybinding help overlay: a centred popup grouping every key by
+    /// category.
+    fn render_help(&self, frame: &mut Frame, area: Rect) {
+        // (heading, [(keys, description)]). A `None` heading line is a blank gap.
+        let sections: &[(&str, &[(&str, &str)])] = &[
+            (
+                "Navigate",
+                &[
+                    ("↑ ↓ ← →", "move the cursor between tokens"),
+                    ("PgUp PgDn", "move a page; Home / End first / last"),
+                    ("⏎", "follow the reference under the cursor"),
+                    ("esc", "back (pop the follow stack)"),
+                    (": / g", "go to address, label, or offset"),
+                    ("/", "search the listing; n / N next / prev"),
+                    ("b", "browse / go to a symbol (label list)"),
+                    ("x", "list xrefs to / from the cursor"),
+                    ("click / wheel", "move cursor / scroll"),
+                ],
+            ),
+            (
+                "Annotate",
+                &[
+                    ("l", "rename the label at the cursor"),
+                    (";", "edit the comment (multi-line)"),
+                    ("o", "set the ofs16 segment assumption"),
+                ],
+            ),
+            (
+                "Type & layout",
+                &[
+                    ("c", "mark as code (a disassembly seed)"),
+                    ("d", "set a data type (picker)"),
+                    ("t", "edit fn / let type bindings"),
+                    ("S", "edit the struct table"),
+                    ("h", "constant: hex ↔ decimal"),
+                    ("-", "constant: unsigned ↔ signed"),
+                ],
+            ),
+            (
+                "File",
+                &[
+                    ("s", "save"),
+                    ("W", "save as (export to another file)"),
+                    ("R", "reload from disk (discard local edits)"),
+                    ("u / U", "undo / redo"),
+                    ("q", "quit (guarded when unsaved)"),
+                    ("?", "this help"),
+                ],
+            ),
+        ];
+
+        let panel = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color(FG));
+        let dim = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color(FOOTER_FG));
+        let heading_style = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color((0xdc, 0xdc, 0xaa)))
+            .add_modifier(Modifier::BOLD);
+
+        // The key column is as wide as the widest key spelling.
+        let key_w = sections
+            .iter()
+            .flat_map(|(_, rows)| rows.iter())
+            .map(|(k, _)| k.chars().count())
+            .max()
+            .unwrap_or(8);
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, (heading, rows)) in sections.iter().enumerate() {
+            if i > 0 {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(heading.to_string(), heading_style)));
+            for (keys, desc) in rows.iter() {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  {keys:<key_w$}  "), panel),
+                    Span::styled((*desc).to_string(), dim),
+                ]));
+            }
+        }
+
+        let content_w = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>()
+            })
+            .max()
+            .unwrap_or(20);
+        let title = " keybindings — any key to close ";
+        let inner_w = content_w.max(title.chars().count()) as u16;
+        let w = (inner_w + 4).min(area.width.max(4));
+        let h = (lines.len() as u16 + 2).min(area.height.max(3));
+        let rect = Rect::new(
+            area.x + (area.width.saturating_sub(w)) / 2,
+            area.y + (area.height.saturating_sub(h)) / 2,
+            w,
+            h,
+        );
+
+        let block = Block::bordered().title(title).style(panel);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(Paragraph::new(lines).block(block), rect);
+    }
+
+    /// Draw the struct-table editor: a list of structs on the left, the selected
+    /// struct's fields (with packed offsets) on the right, and an inline input
+    /// line when adding or renaming.
+    fn render_struct_editor(&self, frame: &mut Frame, ed: &StructEditor, area: Rect) {
+        let panel = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color(FG));
+        let sel_style = panel.bg(self.color(SEL)).add_modifier(Modifier::BOLD);
+
+        let w = (area.width * 4 / 5).max(50).min(area.width);
+        let h = (area.height * 3 / 4).max(10).min(area.height.max(1));
+        let rect = Rect::new(
+            area.x + (area.width.saturating_sub(w)) / 2,
+            area.y + (area.height.saturating_sub(h)) / 2,
+            w,
+            h,
+        );
+
+        let block = Block::bordered().title(" structs ").style(panel);
+        let inner = block.inner(rect);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(block, rect);
+
+        // Body / inline-input / hint rows.
+        let input_h = if ed.input.is_some() { 1 } else { 0 };
+        let [body, input_area, hint] = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(input_h),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+        let list_w = self
+            .base
+            .structs
+            .iter()
+            .map(|s| s.name.chars().count())
+            .max()
+            .unwrap_or(8)
+            .clamp(8, 24) as u16
+            + 3;
+        let [list_area, fields_area] =
+            Layout::horizontal([Constraint::Length(list_w), Constraint::Min(0)]).areas(body);
+
+        // Struct list (left).
+        let list_block = Block::new().borders(Borders::RIGHT).style(panel);
+        let list_inner = list_block.inner(list_area);
+        frame.render_widget(list_block, list_area);
+        let active_list = ed.pane == StructPane::List;
+        let list: Vec<Line> = if self.base.structs.is_empty() {
+            vec![Line::from(Span::styled(
+                " (no structs — a to add)",
+                Style::default().fg(self.color(FOOTER_FG)),
+            ))]
+        } else {
+            self.base
+                .structs
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    if i == ed.struct_idx && active_list {
+                        Line::from(Span::styled(format!("▌{}", s.name), sel_style))
+                    } else if i == ed.struct_idx {
+                        Line::from(Span::styled(
+                            format!(" {}", s.name),
+                            panel.fg(self.color(FG)),
+                        ))
+                    } else {
+                        Line::from(Span::styled(
+                            format!(" {}", s.name),
+                            Style::default().fg(self.color(FOOTER_FG)),
+                        ))
+                    }
+                })
+                .collect()
+        };
+        frame.render_widget(Paragraph::new(list).style(panel), list_inner);
+
+        // Field list (right) with packed offsets.
+        let active_fields = ed.pane == StructPane::Fields;
+        let fields: Vec<Line> = match self.base.structs.get(ed.struct_idx) {
+            Some(def) if !def.fields.is_empty() => {
+                let mut cursor = 0usize;
+                def.fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        let ofs = cursor;
+                        cursor += f.r#type.byte_size(&[], &self.base.structs);
+                        let ty = f.r#type.type_str(&self.base.segments, &self.base.structs);
+                        let text = format!("+{ofs:#05x}  {}: {ty}", f.name);
+                        if i == ed.field_idx && active_fields {
+                            Line::from(Span::styled(format!("▌{text}"), sel_style))
+                        } else {
+                            Line::from(format!(" {text}"))
+                        }
+                    })
+                    .collect()
+            }
+            Some(_) => vec![Line::from(Span::styled(
+                " (no fields — a to add)",
+                Style::default().fg(self.color(FOOTER_FG)),
+            ))],
+            None => Vec::new(),
+        };
+        frame.render_widget(Paragraph::new(fields).style(panel), fields_area);
+
+        // Inline input line.
+        if let Some(inp) = &ed.input {
+            let prefix = match inp.kind {
+                StructInputKind::AddStruct => "new struct ",
+                StructInputKind::RenameStruct => "rename ",
+                StructInputKind::AddField => "new field ",
+                StructInputKind::EditField(_) => "field ",
+            };
+            frame.render_widget(
+                Paragraph::new(format!("{prefix}{}", inp.line.text)).style(sel_style),
+                input_area,
+            );
+            let caret = (prefix.chars().count() + inp.line.col) as u16;
+            frame.set_cursor_position((
+                input_area.x + caret.min(input_area.width.saturating_sub(1)),
+                input_area.y,
+            ));
+        }
+
+        let hint_text = if ed.input.is_some() {
+            " ⏎ apply    esc cancel"
+        } else {
+            " ↑↓ select   ⇥/←→ pane   a add   r/⏎ edit   x delete   esc close"
+        };
+        frame.render_widget(Paragraph::new(hint_text).style(panel), hint);
+    }
+
+    /// Draw the code/data type picker: a list of types on the left, a short
+    /// description of the selected one on the right.
+    fn render_type_picker(&self, frame: &mut Frame, p: &TypePicker, area: Rect) {
+        let (seg, ofs) = p.addr;
+        let title = format!(" type   {}:{:04x} ", self.project.segments[seg].name, ofs);
+
+        let name_w = p
+            .items
+            .iter()
+            .map(|it| it.label.chars().count())
+            .max()
+            .unwrap_or(10) as u16;
+        let list_w = (name_w + 4).clamp(12, 24);
+        let rows = p.items.len().max(8) as u16;
+        let h = (rows + 3).min(area.height.max(1));
+        let w = (area.width * 4 / 5).max(48).min(area.width);
+        let rect = Rect::new(
+            area.x + (area.width.saturating_sub(w)) / 2,
+            area.y + (area.height.saturating_sub(h)) / 2,
+            w,
+            h,
+        );
+
+        let panel = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color(FG));
+        let block = Block::bordered().title(title).style(panel);
+        let inner = block.inner(rect);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(block, rect);
+
+        let [content, hint] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        let [list_area, desc_area] =
+            Layout::horizontal([Constraint::Length(list_w), Constraint::Min(0)]).areas(content);
+
+        let list_block = Block::new().borders(Borders::RIGHT).style(panel);
+        let list_inner = list_block.inner(list_area);
+        frame.render_widget(list_block, list_area);
+        let list: Vec<Line> = p
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                if i == p.selected {
+                    Line::from(Span::styled(
+                        format!("▌{}", it.label),
+                        panel.bg(self.color(SEL)).add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(format!(" {}", it.label))
+                }
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(list).style(panel), list_inner);
+
+        let desc = p.items[p.selected].desc;
+        frame.render_widget(
+            Paragraph::new(desc)
+                .style(Style::default().fg(self.color(FOOTER_FG)))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+            desc_area,
+        );
+        frame.render_widget(
+            Paragraph::new(" ↑↓ choose type    ⏎ apply    esc cancel").style(panel),
+            hint,
+        );
     }
 
     /// Draw the segment picker: a list on the left, a preview of the offset in
@@ -1594,16 +3339,287 @@ impl App {
             .collect()
     }
 
-    /// Draw the multi-line comment editor as a centred popup over the listing.
-    fn render_comment_editor(
+    /// One xref row as plain text — a section header, or `kind  seg:ofs  label`
+    /// (the label omitted when the address has none).
+    fn xref_row_text(&self, row: &XrefRow) -> String {
+        match row {
+            XrefRow::Header(h) => h.clone(),
+            XrefRow::Ref { addr, kind } => {
+                let a = format!("{}:{:04x}", self.project.segments[addr.0].name, addr.1);
+                match self.project.resolve_label(addr.0, addr.1) {
+                    Some(label) if !label.is_empty() => format!("{kind:<4}  {a}  {label}"),
+                    _ => format!("{kind:<4}  {a}"),
+                }
+            }
+        }
+    }
+
+    /// Draw the go-to-symbol picker: a switch bar, a search line, and the
+    /// filtered list of labels (each `seg:ofs` + name, colored by kind).
+    fn render_labels_picker(&self, frame: &mut Frame, p: &LabelPicker, area: Rect) {
+        let panel = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color(FG));
+        let dim = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color(FOOTER_FG));
+
+        let title = format!(
+            " go to symbol   {} / {} ",
+            p.filtered.len(),
+            p.entries.len()
+        );
+        let w = (area.width * 4 / 5).max(48).min(area.width);
+        let h = (area.height * 4 / 5).max(8).min(area.height.max(1));
+        let rect = Rect::new(
+            area.x + (area.width.saturating_sub(w)) / 2,
+            area.y + (area.height.saturating_sub(h)) / 2,
+            w,
+            h,
+        );
+
+        let block = Block::bordered().title(title).style(panel);
+        let inner = block.inner(rect);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(block, rect);
+
+        let [switch_area, search_area, list_area, hint] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+        // Switch bar: enabled switches bold, disabled dimmed.
+        let switch = |on: bool, label: &str| -> Span<'static> {
+            let text = format!("[{}] {}  ", if on { "x" } else { " " }, label);
+            let style = if on {
+                panel.add_modifier(Modifier::BOLD)
+            } else {
+                dim
+            };
+            Span::styled(text, style)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                switch(p.show_fn, "functions"),
+                switch(p.show_code, "code"),
+                switch(p.show_data, "data"),
+                switch(p.show_auto, "auto"),
+            ]))
+            .style(panel),
+            switch_area,
+        );
+
+        // Search line.
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("/", dim),
+                Span::styled(p.search.text.clone(), panel),
+            ]))
+            .style(panel),
+            search_area,
+        );
+
+        // Label list, scrolled to keep the selection on screen.
+        let visible = list_area.height as usize;
+        let total = p.filtered.len();
+        let top = if total <= visible {
+            0
+        } else {
+            p.selected.saturating_sub(visible / 2).min(total - visible)
+        };
+        let addr_color = self.color((0x56, 0x9c, 0xd6));
+        let seg_w = p
+            .filtered
+            .iter()
+            .map(|&i| {
+                self.project.segments[p.entries[i].addr.0]
+                    .name
+                    .chars()
+                    .count()
+            })
+            .max()
+            .unwrap_or(6);
+        let mut lines: Vec<Line> = Vec::new();
+        for row in top..(top + visible).min(total) {
+            let e = &p.entries[p.filtered[row]];
+            let seg = &self.project.segments[e.addr.0].name;
+            let sel = row == p.selected;
+            let bg = if sel {
+                self.color(SEL)
+            } else {
+                self.color(FOOTER_BG)
+            };
+            let base = Style::default().bg(bg);
+            let name_color = self.color(match e.kind {
+                LabelKind::Function => (0xdc, 0xdc, 0xaa),
+                LabelKind::Code => (0x9c, 0xdc, 0xfe),
+                LabelKind::Data => (0xb5, 0xce, 0xa8),
+            });
+            let mut name_style = base.fg(name_color);
+            if sel {
+                name_style = name_style.add_modifier(Modifier::BOLD);
+            }
+            let mut spans = vec![
+                Span::styled(if sel { "▌" } else { " " }, base.fg(addr_color)),
+                Span::styled(
+                    format!("{seg:<seg_w$}:{:04x}  ", e.addr.1),
+                    base.fg(addr_color),
+                ),
+                Span::styled(e.name.clone(), name_style),
+            ];
+            if e.is_auto {
+                spans.push(Span::styled("  (auto)", base.fg(self.color(FOOTER_FG))));
+            }
+            lines.push(Line::from(spans));
+        }
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled("  (no matching labels)", dim)));
+        }
+        frame.render_widget(Paragraph::new(lines).style(panel), list_area);
+
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                " ⌥f/c/d/a toggle   ↑↓ choose   ⏎ go   esc cancel",
+                dim,
+            ))
+            .style(panel),
+            hint,
+        );
+
+        // Real caret on the search line.
+        let caret = (1 + p.search.col) as u16;
+        frame.set_cursor_position((
+            search_area.x + caret.min(search_area.width.saturating_sub(1)),
+            search_area.y,
+        ));
+    }
+
+    /// Draw the xref panel: the inbound/outbound reference list on the left, a
+    /// preview of the selected reference's listing on the right.
+    fn render_xref_panel(&self, frame: &mut Frame, p: &XrefPanel, area: Rect) {
+        let (seg, ofs) = p.addr;
+        let label = self.project.name_at(seg, ofs).unwrap_or("");
+        let title = format!(
+            " xrefs   {}:{:04x}{}{} ",
+            self.project.segments[seg].name,
+            ofs,
+            if label.is_empty() { "" } else { "   " },
+            label,
+        );
+
+        let texts: Vec<String> = p.rows.iter().map(|r| self.xref_row_text(r)).collect();
+        let name_w = texts.iter().map(|t| t.chars().count()).max().unwrap_or(12) as u16;
+        let list_w = (name_w + 3).clamp(16, 48);
+        let rows = p.rows.len().max(8) as u16;
+        let h = (rows + 3).min(area.height.max(1));
+        let w = (area.width * 4 / 5).max(48).min(area.width);
+        let rect = Rect::new(
+            area.x + (area.width.saturating_sub(w)) / 2,
+            area.y + (area.height.saturating_sub(h)) / 2,
+            w,
+            h,
+        );
+
+        let panel = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color(FG));
+        let block = Block::bordered().title(title).style(panel);
+        let inner = block.inner(rect);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(block, rect);
+
+        let [content, hint] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        let [list_area, preview_area] =
+            Layout::horizontal([Constraint::Length(list_w), Constraint::Min(0)]).areas(content);
+
+        // Reference list with a right divider; headers dimmed, the selected
+        // reference highlighted.
+        let list_block = Block::new().borders(Borders::RIGHT).style(panel);
+        let list_inner = list_block.inner(list_area);
+        frame.render_widget(list_block, list_area);
+        let heading = Style::default()
+            .bg(self.color(FOOTER_BG))
+            .fg(self.color((0xdc, 0xdc, 0xaa)))
+            .add_modifier(Modifier::BOLD);
+        let list: Vec<Line> = p
+            .rows
+            .iter()
+            .zip(&texts)
+            .enumerate()
+            .map(|(i, (row, text))| match row {
+                XrefRow::Header(_) => Line::from(Span::styled(format!(" {text}"), heading)),
+                XrefRow::Ref { .. } if i == p.selected => Line::from(Span::styled(
+                    format!("▌{text}"),
+                    panel.bg(self.color(SEL)).add_modifier(Modifier::BOLD),
+                )),
+                XrefRow::Ref { .. } => Line::from(format!("  {text}")),
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(list).style(panel), list_inner);
+
+        // Preview of the selected reference's surrounding listing.
+        let preview = match p.choice() {
+            Some(addr) => self.xref_preview(addr, preview_area.height),
+            None => vec![Line::from(Span::styled(
+                "(no references)",
+                Style::default().fg(self.color(FOOTER_FG)),
+            ))],
+        };
+        frame.render_widget(Paragraph::new(preview).style(panel), preview_area);
+        frame.render_widget(
+            Paragraph::new(" ↑↓ choose    ⏎ go    esc cancel").style(panel),
+            hint,
+        );
+    }
+
+    /// The preview lines for an xref target — the colored listing around `addr`,
+    /// with the covering line marked.
+    fn xref_preview(&self, addr: Address, height: u16) -> Vec<Line<'_>> {
+        let dim = Style::default().fg(self.color(FOOTER_FG));
+        let Some(row) = self.row_for_address(addr) else {
+            let msg = format!(
+                "(nothing at {}:{:04x})",
+                self.project.segments[addr.0].name, addr.1
+            );
+            return vec![Line::from(Span::styled(msg, dim))];
+        };
+        let h = height.max(1) as u32;
+        let start = row.saturating_sub(1);
+        let end = (start + h).min(self.total_rows);
+        (start..end)
+            .map(|y| {
+                let mut line = self.render_row(y, None);
+                let marker = if y == row { "▶ " } else { "  " };
+                line.spans.insert(
+                    0,
+                    Span::styled(
+                        marker,
+                        Style::default()
+                            .fg(self.color((0xff, 0xd7, 0x00)))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                );
+                line
+            })
+            .collect()
+    }
+
+    /// Draw a multi-line text editor (comment or bindings) as a centred popup
+    /// over the listing.
+    fn render_text_editor(
         &self,
         frame: &mut Frame,
         ed: &CommentEditor,
         area: ratatui::layout::Rect,
+        label: &str,
     ) {
         let (seg, ofs) = ed.addr;
         let title = format!(
-            " comment @ {}:{:04x}  —  Enter: newline   Tab: save   Esc: cancel ",
+            " {label} @ {}:{:04x}  —  Enter: newline   Tab: save   Esc: cancel ",
             self.project.segments[seg].name, ofs
         );
 
@@ -1728,8 +3744,24 @@ impl App {
             Mode::Comment(_) => {
                 " editing comment — Enter: newline   Tab: save   Esc: cancel ".to_string()
             }
+            // The binding editor draws its own popup.
+            Mode::Bindings(_) => {
+                " editing bindings — Enter: newline   Tab: save   Esc: cancel ".to_string()
+            }
             // The ofs-seg picker draws its own popup.
             Mode::OfsSeg(_) => " choosing ofs-seg — ↑↓ select   ⏎ apply   esc cancel ".to_string(),
+            // The type picker draws its own popup.
+            Mode::Type(_) => " choosing type — ↑↓ select   ⏎ apply   esc cancel ".to_string(),
+            // The struct editor draws its own popup.
+            Mode::Struct(_) => " editing structs — esc close ".to_string(),
+            // The xref panel draws its own popup.
+            Mode::Xref(_) => " xrefs — ↑↓ select   ⏎ go   esc cancel ".to_string(),
+            // The go-to-symbol picker draws its own popup.
+            Mode::Labels(_) => {
+                " go to symbol — type to filter   ↑↓ select   ⏎ go   esc cancel ".to_string()
+            }
+            // The help overlay draws its own popup.
+            Mode::Help => " help — any key to close ".to_string(),
             // Otherwise: dirty marker, current address, then status or key hints.
             Mode::Normal => {
                 let dirty = if self.dirty() { "*" } else { " " };
@@ -1741,8 +3773,11 @@ impl App {
                     .unwrap_or_else(|| "—".to_string());
                 match &self.status {
                     Some(msg) => format!("{dirty}{addr}   {msg} "),
+                    None if self.external_changed => format!(
+                        "{dirty}{addr}   ! file changed on disk — R reload (discard)  W save-as  s overwrite "
+                    ),
                     None => format!(
-                        "{dirty}{addr}   ↑↓←→ move   ⏎ follow   esc back   l name   ; comment   o ofs-seg   s save   u undo   : goto   / search  n/N next/prev   q quit "
+                        "{dirty}{addr}   l name  ; cmt  o ofs  c code  d data  t type  h hex  - sign  S struct  ·  s save  u undo  : goto  / find  q quit  ? help"
                     ),
                 }
             }
@@ -1786,6 +3821,53 @@ fn rgb_for_kind(kind: &WidgetKind) -> Rgb {
         WidgetKind::Data => (0xb5, 0xce, 0xa8),
         WidgetKind::ArrayIndex { .. } => (0xce, 0x91, 0x78),
         WidgetKind::XrefIn | WidgetKind::XrefOut => (0x4e, 0xc9, 0xb0),
+    }
+}
+
+/// Apply one editing key to a multi-line text buffer (the comment and binding
+/// editors share this). Esc/Tab are handled by the caller; Enter inserts a
+/// newline. Mirrors the readline/word bindings of [`LineInput`].
+fn editor_key(ed: &mut CommentEditor, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Enter => ed.newline(),
+        KeyCode::Left if ctrl || alt => ed.word_left(),
+        KeyCode::Right if ctrl || alt => ed.word_right(),
+        KeyCode::Left => ed.left(),
+        KeyCode::Right => ed.right(),
+        KeyCode::Up => ed.up(),
+        KeyCode::Down => ed.down(),
+        KeyCode::Home => ed.col = 0,
+        KeyCode::End => ed.col = ed.line_len(),
+        KeyCode::Backspace => ed.backspace(),
+        KeyCode::Delete => ed.delete(),
+        KeyCode::Char('a') if ctrl => ed.col = 0,
+        KeyCode::Char('e') if ctrl => ed.col = ed.line_len(),
+        KeyCode::Char('b') if ctrl => ed.left(),
+        KeyCode::Char('f') if ctrl => ed.right(),
+        KeyCode::Char('b') if alt => ed.word_left(),
+        KeyCode::Char('f') if alt => ed.word_right(),
+        KeyCode::Char('h') if ctrl => ed.backspace(),
+        KeyCode::Char('d') if ctrl => ed.delete(),
+        KeyCode::Char('w') if ctrl => ed.delete_word_back(),
+        KeyCode::Char('u') if ctrl => ed.delete_to_start(),
+        KeyCode::Char('k') if ctrl => ed.delete_to_end(),
+        KeyCode::Char(c) if !ctrl && !alt => ed.insert(c),
+        _ => {}
+    }
+}
+
+/// The struct index a data type refers to, peering through pointers, arrays and
+/// format wrappers (the outermost one found). Used to preselect the struct
+/// editor from a typed attribute.
+fn struct_idx_in_type(dt: &DataType) -> Option<usize> {
+    use chani_disasm::data_type::CompositeDataType;
+    match dt {
+        DataType::Composite(CompositeDataType::Struct(idx)) => Some(*idx),
+        DataType::Composite(CompositeDataType::Array { elem, .. }) => struct_idx_in_type(elem),
+        DataType::Formatted(_, inner) | DataType::Ptr(inner) => struct_idx_in_type(inner),
+        _ => None,
     }
 }
 
@@ -2669,6 +4751,126 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
+    // ── auto-reload of the project file ─────────────────────────────────────────
+
+    /// Build an app over a fresh copy of the sample project. The copy lives next
+    /// to the original so its relative binary-file references still resolve. The
+    /// returned path is the file to mutate "externally"; the caller removes it.
+    fn temp_app() -> (App, PathBuf) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+
+        let src = PathBuf::from(PROJECT_PATH);
+        let dir = src.parent().unwrap();
+        let id = N.fetch_add(1, Ordering::Relaxed);
+        let dst = dir.join(format!("reload-test-{}-{}.chani", std::process::id(), id));
+        std::fs::copy(&src, &dst).unwrap();
+        let base = Project::from_project_file(dst.to_str().unwrap()).unwrap();
+        let app = App::new(base, dst.clone());
+        (app, dst)
+    }
+
+    /// Serialized project bytes with `name` set as the label at `addr` — the
+    /// "external edit" a tool like `chaniq set` would write.
+    fn project_bytes_with_label(path: &Path, addr: Address, name: &str) -> Vec<u8> {
+        let mut p = Project::from_project_file(path.to_str().unwrap()).unwrap();
+        p.attrs
+            .entry(addr)
+            .or_insert_with(|| Attr::new(addr))
+            .set_name(Some(name.to_string()));
+        let mut buf = Vec::new();
+        p.write_to(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn external_change_reloads_when_clean() {
+        let (mut app, path) = temp_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let addr = cursor_on_unlabeled_instruction(&mut app);
+        assert!(!app.dirty());
+
+        std::fs::write(&path, project_bytes_with_label(&path, addr, "ext_label")).unwrap();
+        app.handle_external_change();
+
+        assert!(!app.dirty(), "a clean document stays clean after reload");
+        assert_eq!(app.base.attrs[&addr].name.as_deref(), Some("ext_label"));
+        assert!(
+            app.labels.contains_key("ext_label"),
+            "reload re-derives the view"
+        );
+        assert_eq!(app.status.as_deref(), Some("reloaded from disk"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn external_change_from_own_save_is_ignored() {
+        let (mut app, path) = temp_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let addr = cursor_on_unlabeled_instruction(&mut app);
+
+        app.apply_rename(addr, "local".to_string());
+        app.save();
+        assert!(!app.dirty());
+
+        // The watcher fires for our own write; the byte snapshot matches, so it
+        // is a no-op — no warning and the edit survives.
+        app.handle_external_change();
+        assert!(!app.external_changed);
+        assert_eq!(app.base.attrs[&addr].name.as_deref(), Some("local"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn external_change_while_dirty_warns_then_reload_discards() {
+        let (mut app, path) = temp_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let addr = cursor_on_unlabeled_instruction(&mut app);
+
+        app.apply_rename(addr, "local_edit".to_string());
+        assert!(app.dirty());
+
+        std::fs::write(&path, project_bytes_with_label(&path, addr, "ext_edit")).unwrap();
+        app.handle_external_change();
+
+        // The local edit is kept; only a warning is raised.
+        assert!(app.external_changed);
+        assert_eq!(
+            app.base.attrs[&addr].name.as_deref(),
+            Some("local_edit"),
+            "unsaved local edit is not clobbered"
+        );
+
+        // `R` reloads, discarding the local edit and taking the disk version.
+        app.on_key(key(KeyCode::Char('R')));
+        assert!(!app.external_changed);
+        assert!(!app.dirty());
+        assert_eq!(app.base.attrs[&addr].name.as_deref(), Some("ext_edit"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn save_as_exports_without_changing_path() {
+        let (mut app, path) = temp_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let addr = cursor_on_unlabeled_instruction(&mut app);
+        app.apply_rename(addr, "exported".to_string());
+
+        let out = path.with_extension("exported.chani");
+        app.save_as(&out);
+
+        assert_eq!(app.path, path, "save_as does not repoint the document");
+        assert!(app.dirty(), "save_as does not mark the document saved");
+        let reparsed = Project::from_project_file(out.to_str().unwrap()).unwrap();
+        assert_eq!(reparsed.attrs[&addr].name.as_deref(), Some("exported"));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&out).ok();
+    }
+
     #[test]
     fn quit_is_guarded_while_dirty() {
         // Clean: q quits immediately.
@@ -2694,5 +4896,716 @@ mod tests {
         assert!(!app.should_quit());
         app.on_key(key(KeyCode::Char('q')));
         assert!(app.should_quit(), "two q in a row discards and quits");
+    }
+
+    // ── code / data classification ────────────────────────────────────────────
+
+    #[test]
+    fn mark_code_then_unmark_via_picker() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let addr = cursor_on_unlabeled_instruction(&mut app);
+
+        // `c` marks the address as a code seed.
+        app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(app.base.attrs[&addr].r#type, Some(AttrType::Code));
+        assert!(app.dirty());
+
+        // `d` opens the type picker, preselecting the current type (code).
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(matches!(app.mode, Mode::Type(_)), "d opens the type picker");
+        match &app.mode {
+            Mode::Type(p) => assert!(
+                matches!(
+                    &p.items[p.selected].action,
+                    TypeAction::Set(Some(AttrType::Code))
+                ),
+                "preselects the current code classification"
+            ),
+            _ => unreachable!(),
+        }
+
+        // Choosing `— unmark —` clears it and drops the now-empty attr.
+        if let Mode::Type(p) = &mut app.mode {
+            p.selected = p
+                .items
+                .iter()
+                .position(|it| matches!(it.action, TypeAction::Set(None)))
+                .unwrap();
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(!app.base.attrs.contains_key(&addr), "unmark drops the attr");
+    }
+
+    #[test]
+    fn type_picker_sets_data_and_custom_prompt() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let addr = cursor_on_unlabeled_instruction(&mut app);
+
+        // Pick the fixed `dw (u16)` row.
+        app.on_key(key(KeyCode::Char('d')));
+        terminal.draw(|f| app.render(f)).unwrap();
+        assert!(buffer_text(terminal.backend().buffer()).contains("dw"));
+        if let Mode::Type(p) = &mut app.mode {
+            p.selected = p
+                .items
+                .iter()
+                .position(|it| it.label.starts_with("dw"))
+                .unwrap();
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.base.attrs[&addr].r#type,
+            Some(AttrType::Data(DataType::Scalar(ScalarDataType::U16)))
+        );
+
+        // The parametric rows open the freeform data-type prompt.
+        app.on_key(key(KeyCode::Char('d')));
+        if let Mode::Type(p) = &mut app.mode {
+            p.selected = p
+                .items
+                .iter()
+                .position(|it| it.label.starts_with("custom"))
+                .unwrap();
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert!(
+            matches!(
+                app.mode,
+                Mode::Prompt {
+                    kind: PromptKind::DataType,
+                    ..
+                }
+            ),
+            "custom opens the data-type prompt"
+        );
+        // Replace the prefill and submit an array type.
+        app.on_key(key_ctrl(KeyCode::Char('u')));
+        type_and_submit(&mut app, "[u8; 4]");
+        match &app.base.attrs[&addr].r#type {
+            Some(AttrType::Data(d)) => {
+                assert_eq!(d.type_str(&app.base.segments, &app.base.structs), "[u8; 4]")
+            }
+            other => panic!("expected array data type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn data_type_prompt_reports_parse_errors() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let addr = cursor_on_unlabeled_instruction(&mut app);
+
+        app.apply_data_type(addr, "not a type!!".to_string());
+        assert!(
+            !app.base.attrs.contains_key(&addr),
+            "invalid type is not applied"
+        );
+        assert!(app.status.as_deref().unwrap().contains("type:"));
+    }
+
+    // ── struct editor ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn struct_editor_adds_struct_and_fields() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        app.on_key(key(KeyCode::Char('S')));
+        assert!(
+            matches!(app.mode, Mode::Struct(_)),
+            "S opens the struct editor"
+        );
+
+        // Add a struct named "Hero".
+        app.on_key(key(KeyCode::Char('a')));
+        for c in "Hero".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        let hero = app
+            .base
+            .structs
+            .iter()
+            .position(|s| s.name == "Hero")
+            .unwrap();
+        // After adding, focus moves to the Fields pane.
+        match &app.mode {
+            Mode::Struct(ed) => {
+                assert_eq!(ed.struct_idx, hero);
+                assert_eq!(ed.pane, StructPane::Fields);
+            }
+            _ => unreachable!(),
+        }
+
+        // Add two fields (the prefill is "field: u8" — clear it first).
+        let add_field = |app: &mut App, spec: &str| {
+            app.on_key(key(KeyCode::Char('a')));
+            app.on_key(key_ctrl(KeyCode::Char('u')));
+            for c in spec.chars() {
+                app.on_key(key(KeyCode::Char(c)));
+            }
+            app.on_key(key(KeyCode::Enter));
+        };
+        add_field(&mut app, "hp: u16");
+        add_field(&mut app, "name: cstr");
+        let fields = &app.base.structs[hero].fields;
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "hp");
+        assert_eq!(fields[1].name, "name");
+
+        // The fields render with packed offsets (hp at +0, name at +2).
+        terminal.draw(|f| app.render(f)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("+0x000"), "first field offset shown");
+        assert!(screen.contains("+0x002"), "second field offset shown");
+
+        // Editing a field replaces it.
+        app.on_key(key(KeyCode::Up)); // back to hp
+        app.on_key(key(KeyCode::Char('r')));
+        app.on_key(key_ctrl(KeyCode::Char('u')));
+        for c in "health: u32".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.base.structs[hero].fields[0].name, "health");
+
+        // Delete the current field.
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(app.base.structs[hero].fields.len(), 1);
+
+        // Each commit is its own undo step; undo peels them back.
+        let before = app.head;
+        assert!(before >= 4);
+        app.on_key(key(KeyCode::Esc)); // close the editor
+        app.undo();
+        assert_eq!(
+            app.base.structs[hero].fields.len(),
+            2,
+            "undo restores the field"
+        );
+    }
+
+    #[test]
+    fn struct_remove_is_guarded_and_reindexes() {
+        let mut app = new_app();
+        let addr = {
+            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+            terminal.draw(|f| app.render(f)).unwrap();
+            cursor_on_unlabeled_instruction(&mut app)
+        };
+
+        let foo = app.base.add_struct("Foo_z").unwrap();
+        app.base
+            .set_struct_field(foo, None, "x", DataType::Scalar(ScalarDataType::U8))
+            .unwrap();
+
+        // Reference the struct from an attribute type.
+        let ty = app.base.parse_type_str("Foo_z").unwrap();
+        app.base.set_attr_type(addr, Some(ty));
+        assert!(
+            app.base.remove_struct(foo).is_err(),
+            "cannot remove a referenced struct"
+        );
+
+        // Drop the reference; now removal succeeds.
+        app.base.set_attr_type(addr, None);
+        assert!(app.base.remove_struct(foo).is_ok());
+
+        // Removal reindexes references to later structs: add two, point at the
+        // second, remove the first, and the type still resolves by name.
+        let a = app.base.add_struct("Za").unwrap();
+        let _b = app.base.add_struct("Zb").unwrap();
+        let zb = app.base.parse_type_str("Zb").unwrap();
+        app.base.set_attr_type(addr, Some(zb));
+        app.base.remove_struct(a).unwrap();
+        assert_eq!(
+            app.base.attrs[&addr]
+                .r#type
+                .as_ref()
+                .unwrap()
+                .type_str(&app.base.segments, &app.base.structs),
+            "Zb",
+            "reference re-points after the earlier struct is removed"
+        );
+    }
+
+    #[test]
+    fn struct_field_cycle_is_rejected_but_pointer_is_ok() {
+        let mut app = new_app();
+        let a = app.base.add_struct("Cyc_a").unwrap();
+        let b = app.base.add_struct("Cyc_b").unwrap();
+
+        // a contains b by value — fine.
+        let bt = app.base.parse_data_type("Cyc_b").unwrap();
+        app.base.set_struct_field(a, None, "b", bt).unwrap();
+
+        // b containing a by value closes the cycle — rejected.
+        let at = app.base.parse_data_type("Cyc_a").unwrap();
+        assert!(app.base.set_struct_field(b, None, "a", at).is_err());
+        assert!(
+            app.base.structs[b].fields.is_empty(),
+            "rejected field is not added"
+        );
+
+        // A pointer to a breaks the cycle — accepted.
+        let apt = app.base.parse_data_type("*Cyc_a").unwrap();
+        assert!(app.base.set_struct_field(b, None, "a", apt).is_ok());
+    }
+
+    // ── fn / let binding editor ───────────────────────────────────────────────
+
+    #[test]
+    fn binding_editor_partitions_on_direction() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let addr = cursor_on_unlabeled_instruction(&mut app);
+
+        // `t` opens the unified binding editor.
+        app.on_key(key(KeyCode::Char('t')));
+        assert!(
+            matches!(app.mode, Mode::Bindings(_)),
+            "t opens the binding editor"
+        );
+
+        // A directed binding (→ signature) and a direction-less one (→ let),
+        // one per line; Tab saves.
+        for c in "in p: u8 @al".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        for c in "tmp: u16 @ -2".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Tab));
+        assert!(matches!(app.mode, Mode::Normal));
+
+        let attr = &app.base.attrs[&addr];
+        let sig = attr.signature.as_ref().expect("signature set");
+        assert_eq!(sig.len(), 1);
+        assert_eq!(sig[0].name.as_deref(), Some("p"));
+        assert!(sig[0].dir.is_some());
+        assert_eq!(attr.lets.len(), 1);
+        assert_eq!(attr.lets[0].name.as_deref(), Some("tmp"));
+        assert!(attr.lets[0].dir.is_none());
+
+        // Re-open: prefilled with the signature line first, then the let line.
+        app.on_key(key(KeyCode::Char('t')));
+        match &app.mode {
+            Mode::Bindings(ed) => {
+                assert_eq!(ed.lines.len(), 2);
+                assert!(ed.lines[0].starts_with("in p"), "signature first");
+                assert!(ed.lines[1].starts_with("tmp"), "let second");
+            }
+            _ => panic!("editor not open"),
+        }
+        app.on_key(key(KeyCode::Esc));
+
+        // Clearing both removes the attr.
+        app.apply_bindings(addr, Vec::new());
+        assert!(
+            !app.base.attrs.contains_key(&addr),
+            "empty bindings drop the attr"
+        );
+    }
+
+    #[test]
+    fn binding_editor_reports_parse_errors() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        cursor_on_unlabeled_instruction(&mut app);
+
+        app.on_key(key(KeyCode::Char('t')));
+        for c in "garbage without location".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Tab));
+        assert!(
+            matches!(app.mode, Mode::Bindings(_)),
+            "parse error keeps the editor open"
+        );
+        assert!(app.status.as_deref().unwrap().contains("bindings:"));
+    }
+
+    // ── constant display format ───────────────────────────────────────────────
+
+    #[test]
+    fn fmt_axis_and_data_wrapper_toggles() {
+        use DisplayFmt::*;
+        // `h` flips hex↔dec; there is no signed-hex, so it collapses to hex.
+        assert_eq!(FmtAxis::Radix.apply(Hex), Dec);
+        assert_eq!(FmtAxis::Radix.apply(Default), Dec);
+        assert_eq!(FmtAxis::Radix.apply(Dec), Hex);
+        assert_eq!(FmtAxis::Radix.apply(SignedDec), Hex);
+        // `-` flips the sign on decimal.
+        assert_eq!(FmtAxis::Sign.apply(Hex), SignedDec);
+        assert_eq!(FmtAxis::Sign.apply(Dec), SignedDec);
+        assert_eq!(FmtAxis::Sign.apply(SignedDec), Dec);
+
+        // The data wrapper appears for non-hex and collapses away for hex.
+        let u16t = DataType::Scalar(ScalarDataType::U16);
+        let signed = set_data_outer_fmt(u16t.clone(), SignedDec);
+        assert_eq!(
+            signed,
+            DataType::Formatted(SignedDec, Box::new(u16t.clone()))
+        );
+        assert_eq!(data_outer_fmt(&signed), SignedDec);
+        assert_eq!(
+            set_data_outer_fmt(signed, Hex),
+            u16t,
+            "hex drops the wrapper"
+        );
+    }
+
+    /// Put the cursor on an immediate operand and return its address + index.
+    fn cursor_on_imm_operand(app: &mut App) -> (Address, usize) {
+        for n in 0..app.navigable.len() {
+            app.cursor = n;
+            if let Some(target) = app.cursor_imm_operand() {
+                return target;
+            }
+        }
+        panic!("no immediate operand in project");
+    }
+
+    #[test]
+    fn reformat_immediate_operand_hex_dec_sign() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let (addr, index) = cursor_on_imm_operand(&mut app);
+
+        // h: hex → dec.
+        app.on_key(key(KeyCode::Char('h')));
+        assert_eq!(app.base.attrs[&addr].arg_fmts[index], Some(DisplayFmt::Dec));
+        // The cursor stays on the operand (not snapped to the opcode).
+        assert!(
+            app.cursor_imm_operand().is_some(),
+            "cursor stays on the operand"
+        );
+
+        // -: dec → signed.
+        app.on_key(key(KeyCode::Char('-')));
+        assert_eq!(
+            app.base.attrs[&addr].arg_fmts[index],
+            Some(DisplayFmt::SignedDec)
+        );
+
+        // h: signed → hex, which clears the override (no signed-hex).
+        app.on_key(key(KeyCode::Char('h')));
+        assert!(
+            app.base
+                .attrs
+                .get(&addr)
+                .and_then(|a| a.arg_fmts[index])
+                .is_none(),
+            "returning to hex clears the override"
+        );
+    }
+
+    #[test]
+    fn reformat_is_a_noop_off_a_constant() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        // An opcode is never an immediate operand.
+        let nav = app
+            .navigable
+            .iter()
+            .position(|&i| matches!(app.widgets[i].kind, WidgetKind::Opcode))
+            .unwrap();
+        app.cursor = nav;
+        let dirty_before = app.dirty();
+        app.on_key(key(KeyCode::Char('h')));
+        assert_eq!(app.dirty(), dirty_before, "no edit recorded");
+        assert!(app.status.as_deref().unwrap().contains("no constant"));
+    }
+
+    // ── help overlay ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn help_overlay_opens_and_dismisses() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        // `?` opens the overlay; it lists categories and keys.
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(matches!(app.mode, Mode::Help));
+        terminal.draw(|f| app.render(f)).unwrap();
+        let screen = buffer_text(terminal.backend().buffer());
+        assert!(screen.contains("keybindings"), "title shown");
+        assert!(screen.contains("Navigate"), "a section heading shown");
+        assert!(screen.contains("undo / redo"), "a binding shown");
+
+        // Any key dismisses it without performing that key's action.
+        let dirty_before = app.dirty();
+        app.on_key(key(KeyCode::Char('c')));
+        assert!(matches!(app.mode, Mode::Normal), "any key closes help");
+        assert_eq!(
+            app.dirty(),
+            dirty_before,
+            "the dismiss key does not also act"
+        );
+    }
+
+    // ── xref panel ─────────────────────────────────────────────────────────────
+
+    /// Find a navigable branch target with at least one inbound source, put the
+    /// cursor on it, and return `(target, first inbound source)`.
+    fn cursor_on_branch_target(app: &mut App) -> (Address, Address) {
+        let targets: Vec<Address> = app.project.branches.all_targets().collect();
+        for tgt in targets {
+            let mut srcs: Vec<Address> = app.project.branches.sources(tgt).collect();
+            if srcs.is_empty() {
+                continue;
+            }
+            srcs.sort();
+            if app.jump_to_address(tgt, false) && app.cursor_address() == Some(tgt) {
+                return (tgt, srcs[0]);
+            }
+        }
+        panic!("no inbound branch target in listing");
+    }
+
+    #[test]
+    fn xref_panel_lists_inbound_and_jumps() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+
+        let (tgt, src) = cursor_on_branch_target(&mut app);
+
+        // `x` opens the panel for the cursor's address, with the inbound source
+        // listed as a reference and the selection sitting on a `Ref` (not the
+        // header).
+        app.on_key(key(KeyCode::Char('x')));
+        let Mode::Xref(p) = &app.mode else {
+            panic!("x opens the xref panel");
+        };
+        assert_eq!(p.addr, tgt);
+        assert!(
+            p.rows
+                .iter()
+                .any(|r| matches!(r, XrefRow::Ref { addr, .. } if *addr == src)),
+            "the inbound source is listed"
+        );
+        assert!(
+            matches!(p.rows.get(p.selected), Some(XrefRow::Ref { .. })),
+            "selection starts on a reference, not a header"
+        );
+        let chosen = p.choice().expect("a selected reference");
+
+        terminal.draw(|f| app.render(f)).unwrap();
+        assert!(
+            buffer_text(terminal.backend().buffer()).contains("inbound"),
+            "the inbound header is drawn"
+        );
+
+        // `⏎` jumps to the selected reference, closing the panel and pushing the
+        // back stack so `esc` returns.
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Normal));
+        assert_eq!(app.nav_stack.len(), 1, "the jump pushed a back mark");
+        assert_eq!(
+            app.cursor_address(),
+            Some(chosen),
+            "landed on the reference"
+        );
+
+        app.on_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.cursor_address(),
+            Some(tgt),
+            "esc returned to the target"
+        );
+    }
+
+    /// The original gap: an operand that names an address without branching to
+    /// it — `mov si, label` — is an xref the branch map never records. It must
+    /// still show up inbound, because the panel reads the resolved widget links.
+    #[test]
+    fn xref_includes_non_branch_operand_references() {
+        let mut app = new_app();
+
+        // Find an operand link whose owning instruction is not a branch, landing
+        // on a target the cursor can sit on exactly.
+        let mut found: Option<(Address, Address)> = None;
+        for w in &app.widgets {
+            if !matches!(w.kind, WidgetKind::Operand { .. }) {
+                continue;
+            }
+            let owner = (w.seg_idx, w.ofs);
+            let seg_val = (app.project.segments[owner.0].start.unwrap_or(0) / 16) as u16;
+            let bytes = app.project.bytes_at_seg(owner.0, owner.1);
+            let is_branch = decode(seg_val, owner.1 as u16, bytes.iter().copied())
+                .map(|i| i.branches())
+                .unwrap_or(false);
+            if is_branch {
+                continue;
+            }
+            for span in resolve_links(&app.project, &app.labels, w) {
+                if span.target != owner && app.row_for_address(span.target).is_some() {
+                    found = Some((owner, span.target));
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let Some((owner, target)) = found else {
+            return; // no non-branch operand reference in this project — skip.
+        };
+        assert!(
+            !app.project.branches.sources(target).any(|s| s == owner),
+            "the reference is genuinely outside the branch map"
+        );
+
+        // Opening the panel on the target lists the non-branch source inbound.
+        app.jump_to_address(target, false);
+        if app.cursor_address() != Some(target) {
+            return; // target has no line of its own — not this test's concern.
+        }
+        app.on_key(key(KeyCode::Char('x')));
+        let Mode::Xref(p) = &app.mode else {
+            panic!("the target has at least one reference");
+        };
+        assert!(
+            p.rows
+                .iter()
+                .any(|r| matches!(r, XrefRow::Ref { addr, .. } if *addr == owner)),
+            "the non-branch operand source is listed inbound"
+        );
+    }
+
+    /// `x` on an operand that links elsewhere (e.g. the callee of `call foo`)
+    /// inspects that target's references, not the line it sits on — matching
+    /// what `Enter` would follow.
+    #[test]
+    fn xref_inspects_the_link_under_the_cursor() {
+        let mut app = new_app();
+
+        // A navigable operand whose link points at a different address.
+        let nav = app.navigable.iter().position(|&i| {
+            let w = &app.widgets[i];
+            matches!(w.kind, WidgetKind::Operand { .. })
+                && resolve_link_at(&app.project, &app.labels, w, Some(w.x))
+                    .is_some_and(|s| s.target != (w.seg_idx, w.ofs))
+        });
+        let Some(nav) = nav else {
+            return; // no linking operand in this project — skip.
+        };
+        app.cursor = nav;
+        let (line_addr, target) = {
+            let w = &app.widgets[app.navigable[nav]];
+            let target = resolve_link_at(&app.project, &app.labels, w, Some(w.x))
+                .unwrap()
+                .target;
+            ((w.seg_idx, w.ofs), target)
+        };
+        assert_ne!(target, line_addr);
+
+        app.on_key(key(KeyCode::Char('x')));
+        match &app.mode {
+            // The panel describes the link target, not the line address.
+            Mode::Xref(p) => assert_eq!(p.addr, target, "x inspects the link target"),
+            // A target with no references at all is an acceptable no-op.
+            Mode::Normal => assert!(
+                app.status
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains("no references")
+            ),
+            _ => panic!("unexpected mode after x"),
+        }
+    }
+
+    #[test]
+    fn xref_movement_skips_headers() {
+        let app = new_app();
+        let seg = app.project.segments.indexed_iter().next().unwrap().0;
+        let rows = vec![
+            XrefRow::Header("inbound (1)".to_string()),
+            XrefRow::Ref {
+                addr: (seg, 0x10),
+                kind: "call".to_string(),
+            },
+            XrefRow::Header("outbound (1)".to_string()),
+            XrefRow::Ref {
+                addr: (seg, 0x20),
+                kind: "jmp".to_string(),
+            },
+        ];
+        let mut p = XrefPanel {
+            addr: (seg, 0),
+            rows,
+            selected: 1,
+        };
+
+        p.down();
+        assert_eq!(p.selected, 3, "down skips the outbound header");
+        assert_eq!(p.choice(), Some((seg, 0x20)));
+        p.up();
+        assert_eq!(p.selected, 1, "up skips back over the header");
+
+        // The ends are no-ops.
+        p.up();
+        assert_eq!(p.selected, 1);
+        p.down();
+        p.down();
+        assert_eq!(p.selected, 3);
+    }
+
+    #[test]
+    fn xref_no_references_is_a_noop_with_status() {
+        let mut app = new_app();
+
+        // Every address that takes part in a reference, by the same rule
+        // `begin_xref` uses: operand / scalar-data link owners and targets, plus
+        // both sides of the data-pointer graph.
+        let mut referenced: BTreeSet<Address> = BTreeSet::new();
+        for w in &app.widgets {
+            if !matches!(w.kind, WidgetKind::Operand { .. } | WidgetKind::Data) {
+                continue;
+            }
+            for span in resolve_links(&app.project, &app.labels, w) {
+                referenced.insert((w.seg_idx, w.ofs));
+                referenced.insert(span.target);
+            }
+        }
+        for (&target, srcs) in &app.project.data_xrefs {
+            referenced.insert(target);
+            referenced.extend(srcs.iter().copied());
+        }
+
+        // An instruction absent from that set has no references in either
+        // direction (a typical register-only instruction mid-block).
+        let nav = app.navigable.iter().position(|&i| {
+            let w = &app.widgets[i];
+            matches!(w.kind, WidgetKind::Opcode) && !referenced.contains(&(w.seg_idx, w.ofs))
+        });
+        let Some(nav) = nav else {
+            return; // every instruction is referenced — nothing to assert.
+        };
+        app.cursor = nav;
+
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(matches!(app.mode, Mode::Normal), "no panel opens");
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap_or("")
+                .contains("no references"),
+            "reports there are no references"
+        );
     }
 }

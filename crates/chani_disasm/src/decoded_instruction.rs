@@ -226,14 +226,14 @@ impl DecodedInstruction {
         }
 
         let mem_ref = match arg_type {
-            ArgType::IMem8 | ArgType::IMem16 | ArgType::Mem16 => MemRef::Indirect {
+            ArgType::IMem8 | ArgType::IMem16 => MemRef::Indirect {
                 seg: self.seg_ovr.unwrap_or(SReg::DS),
                 base: None,
                 index: None,
                 disp: self.imm[i] as u16,
                 width: match arg_type {
                     ArgType::IMem8 => DataWidth::Byte,
-                    ArgType::IMem16 | ArgType::Mem16 => DataWidth::Word,
+                    ArgType::IMem16 => DataWidth::Word,
                     _ => unreachable!(),
                 },
             },
@@ -243,7 +243,10 @@ impl DecodedInstruction {
                 ofs: self.imm[i] as u16,
                 width: DataWidth::Dword,
             },
-            ArgType::RM8 | ArgType::RM16 => {
+            // `Mem16` is a ModRM memory operand (lea/les/lds), not a direct
+            // immediate offset like `IMem16`, so it decodes its base/index/disp
+            // from the modrm exactly like `RM16`.
+            ArgType::RM8 | ArgType::RM16 | ArgType::Mem16 => {
                 let modrm = self.modrm;
                 let mod_bits = (modrm >> 6) & 0b11;
                 let rm = modrm & 0b111;
@@ -293,7 +296,7 @@ impl DecodedInstruction {
                     disp,
                     width: match arg_type {
                         ArgType::RM8 => DataWidth::Byte,
-                        ArgType::RM16 => DataWidth::Word,
+                        ArgType::RM16 | ArgType::Mem16 => DataWidth::Word,
                         _ => unreachable!(),
                     },
                 }
@@ -1215,6 +1218,25 @@ mod tests {
                 assert_eq!(disp, 0);
             }
             other => panic!("expected Mem(Indirect), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn operand_lea_mem16_decodes_via_modrm() {
+        // lea si, [di+14h] = 8d 75 14 (modrm: mod=01 reg=110(SI) rm=101([DI+disp8])).
+        // `lea`'s source is a `Mem16` (ModRM memory) operand: its base/index/disp
+        // come from the modrm, not from a direct immediate offset.
+        let inst = dec(&[0x8d, 0x75, 0x14]);
+        assert_eq!(inst.operand(0), Operand::Gp16(GpReg16::SI));
+        match inst.operand(1) {
+            Operand::Mem(MemRef::Indirect {
+                base, index, disp, ..
+            }) => {
+                assert_eq!(base, None);
+                assert_eq!(index, Some(IndexReg::DI));
+                assert_eq!(disp, 0x14);
+            }
+            other => panic!("expected Mem(Indirect [di+14h]), got {other:?}"),
         }
     }
 
