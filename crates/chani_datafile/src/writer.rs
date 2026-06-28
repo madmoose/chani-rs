@@ -104,7 +104,10 @@ impl BlockDict {
                 BlockItem::Blank => writeln!(w)?,
                 BlockItem::Prop(k, v) => writeln!(w, "{padding}{k:<key_width$} = {v}")?,
                 BlockItem::Block(b) => b.write_to(w)?,
-                BlockItem::Inline(i) => i.write_to(w)?,
+                BlockItem::Inline(i) => {
+                    write!(w, "{padding}")?;
+                    i.write_to(w)?;
+                }
             }
         }
         writeln!(w, "end")

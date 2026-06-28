@@ -35,6 +35,7 @@ enum UnresolvedAttrType {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct UnresolvedStructDef {
+    comment: Option<String>,
     fields: Vec<UnresolvedStructField>,
 }
 
@@ -42,6 +43,7 @@ pub(super) struct UnresolvedStructDef {
 struct UnresolvedStructField {
     pub name: SmallString,
     pub r#type: UnresolvedAttrType,
+    pub comment: Option<String>,
 }
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -349,30 +351,89 @@ pub(super) fn parse_struct(dict: &Dict) -> Result<(SmallString, UnresolvedStruct
     if name.is_empty() {
         return Err(format!("line {}: struct name cannot be empty", dict.line));
     }
+    let mut comment = None;
     let mut fields = Vec::new();
 
     for item in &dict.items {
-        if let Item::Property { key, value, line } = item {
-            let field_type = parse_attr_type(value).map_err(|_| {
-                format!(
-                    "line {line}: invalid type '{}' for field '{}' in struct '{}'",
-                    value, key, name
-                )
-            })?;
-            if field_type == UnresolvedAttrType::Code {
-                return Err(format!(
-                    "line {line}: 'code' is not valid as a struct field type (field '{}' in struct '{}')",
-                    key, name
-                ));
+        match item {
+            // A struct-level `comment` property; any other top-level property is a
+            // legacy flat `field_name = type` declaration (no comment).
+            Item::Property { key, value, line } => {
+                if key.as_str() == "comment" {
+                    comment = Some(value.to_string());
+                    continue;
+                }
+                let field_type = parse_field_type(value, key, &name, *line)?;
+                fields.push(UnresolvedStructField {
+                    name: key.clone(),
+                    r#type: field_type,
+                    comment: None,
+                });
             }
-            fields.push(UnresolvedStructField {
-                name: key.clone(),
-                r#type: field_type,
-            });
+            // The current form: each field is a `field[name]:` sub-dict carrying a
+            // `type` and an optional `comment`.
+            Item::Dict(field_dict) => {
+                if field_dict.name.as_str() != "field" {
+                    return Err(format!(
+                        "line {}: unknown nested block '{}' in struct '{}'",
+                        field_dict.line, field_dict.name, name
+                    ));
+                }
+                let field_name = field_dict.key.clone();
+                let mut field_type = None;
+                let mut field_comment = None;
+                for prop in &field_dict.items {
+                    if let Item::Property { key, value, line } = prop {
+                        match key.as_str() {
+                            "type" => {
+                                field_type =
+                                    Some(parse_field_type(value, &field_name, &name, *line)?);
+                            }
+                            "comment" => field_comment = Some(value.to_string()),
+                            other => {
+                                return Err(format!(
+                                    "line {line}: unknown key '{other}' in field '{field_name}' of struct '{name}'"
+                                ));
+                            }
+                        }
+                    }
+                }
+                let field_type = field_type.ok_or_else(|| {
+                    format!(
+                        "line {}: field '{field_name}' in struct '{name}' is missing a 'type'",
+                        field_dict.line
+                    )
+                })?;
+                fields.push(UnresolvedStructField {
+                    name: field_name,
+                    r#type: field_type,
+                    comment: field_comment,
+                });
+            }
         }
     }
 
-    Ok((name, UnresolvedStructDef { fields }))
+    Ok((name, UnresolvedStructDef { comment, fields }))
+}
+
+/// Parse a struct field's type string, rejecting `code`.
+fn parse_field_type(
+    value: &str,
+    field_name: &str,
+    struct_name: &str,
+    line: u32,
+) -> Result<UnresolvedAttrType, String> {
+    let field_type = parse_attr_type(value).map_err(|_| {
+        format!(
+            "line {line}: invalid type '{value}' for field '{field_name}' in struct '{struct_name}'"
+        )
+    })?;
+    if field_type == UnresolvedAttrType::Code {
+        return Err(format!(
+            "line {line}: 'code' is not valid as a struct field type (field '{field_name}' in struct '{struct_name}')"
+        ));
+    }
+    Ok(field_type)
 }
 
 fn parse_display_fmt(s: &str) -> Option<DisplayFmt> {
@@ -638,11 +699,13 @@ pub(super) fn resolve_structs(
                     Ok(StructField {
                         name: f.name.as_str().into(),
                         r#type: resolve_data_type(&f.r#type, segments, &struct_names)?,
+                        comment: f.comment.clone(),
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             Ok(StructDef {
                 name: name.as_str().into(),
+                comment: udef.comment.clone(),
                 fields,
             })
         })

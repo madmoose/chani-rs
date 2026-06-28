@@ -654,11 +654,19 @@ impl Project {
         if !self.structs.is_empty() {
             for def in &self.structs {
                 let mut struct_dict = BlockDict::new("struct", def.name.as_str());
+                if let Some(comment) = &def.comment {
+                    struct_dict.prop_encoded("comment", comment.as_str());
+                }
                 for field in &def.fields {
-                    struct_dict.prop(
-                        field.name.as_str(),
+                    let mut field_dict = InlineDict::new("field", field.name.as_str());
+                    field_dict.prop(
+                        "type",
                         &field.r#type.type_str(&self.segments, &self.structs),
                     );
+                    if let Some(comment) = &field.comment {
+                        field_dict.prop_encoded("comment", comment.as_str());
+                    }
+                    struct_dict.add_inline(field_dict);
                 }
                 project.add_block(struct_dict);
                 project.blank();
@@ -1464,6 +1472,7 @@ impl Project {
         }
         self.structs.push(StructDef {
             name: name.to_owned(),
+            comment: None,
             fields: Vec::new(),
         });
         Ok(self.structs.len() - 1)
@@ -1527,9 +1536,15 @@ impl Project {
         {
             return Err(format!("a field named '{name}' already exists"));
         }
+        // Preserve any existing comment when overwriting a field in place, so a
+        // name/type edit doesn't discard its documentation.
+        let comment = field_idx
+            .and_then(|i| self.structs[idx].fields.get(i))
+            .and_then(|f| f.comment.clone());
         let field = StructField {
             name: name.to_owned(),
             r#type: ty,
+            comment,
         };
         let old = match field_idx {
             Some(i) => Some(std::mem::replace(&mut self.structs[idx].fields[i], field)),
@@ -1549,6 +1564,22 @@ impl Project {
             return Err("that field would create a struct reference cycle".to_owned());
         }
         Ok(())
+    }
+
+    /// Set (or, with `None`/empty, clear) the comment on struct `idx`.
+    pub fn set_struct_comment(&mut self, idx: usize, comment: Option<String>) {
+        self.structs[idx].comment = comment.filter(|s| !s.is_empty());
+    }
+
+    /// Set (or, with `None`/empty, clear) the comment on field `field_idx` of
+    /// struct `idx`.
+    pub fn set_struct_field_comment(
+        &mut self,
+        idx: usize,
+        field_idx: usize,
+        comment: Option<String>,
+    ) {
+        self.structs[idx].fields[field_idx].comment = comment.filter(|s| !s.is_empty());
     }
 
     /// Remove field `field_idx` of struct `idx`.
@@ -2282,6 +2313,91 @@ mod mutator_tests {
         let def = p2.structs.iter().find(|s| s.name == "Soldier").unwrap();
         assert_eq!(def.fields.len(), 2);
         assert_eq!(def.fields[0].name, "occupation");
+    }
+
+    #[test]
+    fn struct_and_field_comments_round_trip() {
+        let mut p = project();
+        let idx = p.add_struct("ModCarOffset").unwrap();
+        p.set_struct_field(idx, None, "mod_off", DataType::Scalar(ScalarDataType::U8))
+            .unwrap();
+        p.set_struct_field(idx, None, "car_off", DataType::Scalar(ScalarDataType::U8))
+            .unwrap();
+        p.set_struct_comment(idx, Some("Per-channel OPL operator offsets.".to_string()));
+        // A comment containing ';' and a newline exercises the `[[[ ]]]` encoding
+        // inside the inline `field[...]` dict.
+        p.set_struct_field_comment(
+            idx,
+            0,
+            Some("modulator base; line one\nline two".to_string()),
+        );
+
+        // Editing a field's name/type preserves its comment.
+        p.set_struct_field(
+            idx,
+            Some(0),
+            "mod_off",
+            DataType::Scalar(ScalarDataType::U8),
+        )
+        .unwrap();
+        assert_eq!(
+            p.structs[idx].fields[0].comment.as_deref(),
+            Some("modulator base; line one\nline two")
+        );
+
+        let mut buf = Vec::new();
+        p.write_to(&mut buf).unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(
+            text.contains("field[mod_off]:"),
+            "expected nested field form:\n{text}"
+        );
+
+        let p2 = Project::from_str(text).unwrap();
+        let def = p2
+            .structs
+            .iter()
+            .find(|s| s.name == "ModCarOffset")
+            .unwrap();
+        assert_eq!(
+            def.comment.as_deref(),
+            Some("Per-channel OPL operator offsets.")
+        );
+        assert_eq!(
+            def.fields[0].comment.as_deref(),
+            Some("modulator base; line one\nline two")
+        );
+        assert_eq!(def.fields[1].comment, None);
+    }
+
+    #[test]
+    fn legacy_flat_struct_parses_and_upgrades() {
+        // The old flat `field = type` form, plus a struct-level `comment`, still
+        // loads; re-serialization emits the nested `field[...]` form.
+        let chani = "project[t]:\n\
+                     arch = 8086\n\
+                     segment[seg000]: type = code; start = 0; end = 0x100\n\
+                     struct[Troop]:\n\
+                         comment = a troop record\n\
+                         occupation = u8\n\
+                         skill = u16\n\
+                     end\n\
+                     end\n";
+        let p = Project::from_str(chani).unwrap();
+        let def = &p.structs[0];
+        assert_eq!(def.name, "Troop");
+        assert_eq!(def.comment.as_deref(), Some("a troop record"));
+        assert_eq!(def.fields.len(), 2);
+        assert_eq!(def.fields[0].name, "occupation");
+        assert_eq!(def.fields[0].comment, None);
+
+        let mut buf = Vec::new();
+        p.write_to(&mut buf).unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(
+            text.contains("field[occupation]: type = u8"),
+            "expected upgraded nested form:\n{text}"
+        );
     }
 
     #[test]

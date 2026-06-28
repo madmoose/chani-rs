@@ -73,6 +73,10 @@ enum PromptKind {
     DataType,
     /// Export the authoritative document to a different file path.
     SaveAs,
+    /// Rename the struct definition at `struct_idx`.
+    StructName(usize),
+    /// Edit field `field_index` of struct `struct_idx` as a `name: type` spec.
+    StructField(usize, usize),
 }
 
 impl PromptKind {
@@ -81,11 +85,21 @@ impl PromptKind {
         match self {
             PromptKind::Goto => ":",
             PromptKind::Search => "/",
-            PromptKind::Rename => "name ",
+            PromptKind::Rename | PromptKind::StructName(_) => "name ",
             PromptKind::DataType => "type ",
             PromptKind::SaveAs => "save as: ",
+            PromptKind::StructField(..) => "field ",
         }
     }
+}
+
+/// What a struct-definition widget under the cursor refers to, for inline editing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StructTarget {
+    /// The struct name itself.
+    Name(usize),
+    /// Field `field_index` of struct `struct_idx`.
+    Field(usize, usize),
 }
 
 /// Modal segment picker for setting an instruction's `ofs_seg`. `items[0]` is
@@ -881,6 +895,9 @@ pub struct App {
     /// The segment of the most recent `ofs_seg` edit, used to preselect the
     /// picker when the target has no assumption yet.
     last_ofs_seg: Option<SegmentIdx>,
+    /// While the comment editor targets a struct/field (rather than an address),
+    /// the `(struct_idx, field_index)` it edits (`None` field = struct-level).
+    struct_comment: Option<(usize, Option<usize>)>,
     /// A guarded quit is pending: a second `q` confirms discarding edits.
     confirm_quit: bool,
     /// Go-to-symbol kind switches, loaded at startup and saved when toggled.
@@ -929,6 +946,7 @@ impl App {
             head: 0,
             saved_at: 0,
             last_ofs_seg: None,
+            struct_comment: None,
             confirm_quit: false,
             label_prefs: LabelPrefs::load(),
             truecolor: supports_truecolor(),
@@ -992,6 +1010,10 @@ impl App {
     /// Re-derive the analyzed view from `base` after an edit, keeping the cursor
     /// on the same address and screen line.
     fn rederive(&mut self) {
+        // Struct-definition widgets all share the dummy anchor address, so they
+        // can't be restored by address; remember the struct/field identity and
+        // restore by that instead.
+        let struct_target = self.cursor_struct_target();
         let anchor = self.cursor_address();
         let (cur_y, cur_x) = self.cursor_yx();
         let screen_row = cur_y.saturating_sub(self.top_row);
@@ -999,7 +1021,13 @@ impl App {
         self.project = analyzed(&self.base);
         self.rebuild_listing();
 
-        if let Some(addr) = anchor
+        if let Some(target) = struct_target {
+            if let Some(nav) = self.struct_target_nav(target) {
+                self.cursor = nav;
+                let y = self.widgets[self.navigable[self.cursor]].y;
+                self.top_row = y.saturating_sub(screen_row).min(self.max_top());
+            }
+        } else if let Some(addr) = anchor
             && let Some(row) = self.row_for_address(addr)
             && let Some(nav) = self.jump_target_nav(row)
         {
@@ -1020,6 +1048,40 @@ impl App {
     /// The `seg:ofs` of the line the cursor is on.
     fn cursor_address(&self) -> Option<Address> {
         self.focused_widget().map(|w| (w.seg_idx, w.ofs))
+    }
+
+    /// The struct or field the cursor sits on in the struct-definition section,
+    /// if any. Struct-def widgets carry no meaningful address, so editing routes
+    /// through this rather than [`Self::cursor_address`].
+    fn cursor_struct_target(&self) -> Option<StructTarget> {
+        match self.focused_widget()?.kind {
+            WidgetKind::StructDefName { struct_idx } => Some(StructTarget::Name(struct_idx)),
+            WidgetKind::StructDefField {
+                struct_idx,
+                field_index,
+            } => Some(StructTarget::Field(struct_idx, field_index)),
+            _ => None,
+        }
+    }
+
+    /// The navigable index of the struct-definition widget matching `target`,
+    /// for restoring the cursor after an edit rebuilds the listing.
+    fn struct_target_nav(&self, target: StructTarget) -> Option<usize> {
+        self.navigable
+            .iter()
+            .position(|&wi| match (&self.widgets[wi].kind, target) {
+                (WidgetKind::StructDefName { struct_idx }, StructTarget::Name(t)) => {
+                    *struct_idx == t
+                }
+                (
+                    WidgetKind::StructDefField {
+                        struct_idx,
+                        field_index,
+                    },
+                    StructTarget::Field(ti, tf),
+                ) => *struct_idx == ti && *field_index == tf,
+                _ => false,
+            })
     }
 
     /// The offset that `o` (set `ofs_seg`) would resolve at the cursor: `Some`
@@ -1186,6 +1248,24 @@ impl App {
         if key.code != KeyCode::Char('q') {
             self.confirm_quit = false;
         }
+        // On a struct-definition widget the only meaningful edits are rename
+        // (`l`) and comment (`;`), both handled below. The address-based editing
+        // keys would otherwise act on the dummy anchor address the struct
+        // section carries, so suppress them here.
+        if self.cursor_struct_target().is_some()
+            && matches!(
+                key.code,
+                KeyCode::Char('o')
+                    | KeyCode::Char('c')
+                    | KeyCode::Char('d')
+                    | KeyCode::Char('t')
+                    | KeyCode::Char('h')
+                    | KeyCode::Char('-')
+                    | KeyCode::Char('x')
+            )
+        {
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Left => self.move_horizontal(-1),
@@ -1236,6 +1316,26 @@ impl App {
     /// Open a rename prompt for the cursor's address, prefilled with its current
     /// user label (empty when the address only carries an auto-label).
     fn begin_rename(&mut self) {
+        match self.cursor_struct_target() {
+            Some(StructTarget::Name(idx)) => {
+                let prefill = self.base.structs[idx].name.to_string();
+                self.begin_prompt(PromptKind::StructName(idx), prefill, None);
+                return;
+            }
+            Some(StructTarget::Field(idx, fidx)) => {
+                let field = &self.base.structs[idx].fields[fidx];
+                let prefill = format!(
+                    "{}: {}",
+                    field.name,
+                    field
+                        .r#type
+                        .type_str(&self.base.segments, &self.base.structs)
+                );
+                self.begin_prompt(PromptKind::StructField(idx, fidx), prefill, None);
+                return;
+            }
+            None => {}
+        }
         if let Some(addr) = self.cursor_address() {
             let prefill = self.base.attrs.get(&addr).and_then(|a| a.name.clone());
             self.begin_prompt(PromptKind::Rename, prefill.unwrap_or_default(), Some(addr));
@@ -1245,6 +1345,22 @@ impl App {
     /// Open the multi-line comment editor for the cursor's address, prefilled
     /// with its current comment.
     fn begin_comment(&mut self) {
+        if let Some(target) = self.cursor_struct_target() {
+            let (text, ct) = match target {
+                StructTarget::Name(idx) => (self.base.structs[idx].comment.clone(), (idx, None)),
+                StructTarget::Field(idx, fidx) => (
+                    self.base.structs[idx].fields[fidx].comment.clone(),
+                    (idx, Some(fidx)),
+                ),
+            };
+            self.struct_comment = Some(ct);
+            self.mode = Mode::Comment(CommentEditor::new(
+                (SegmentIdx::from(0usize), 0),
+                &text.unwrap_or_default(),
+            ));
+            return;
+        }
+        self.struct_comment = None;
         if let Some(addr) = self.cursor_address() {
             let text = self
                 .base
@@ -1975,10 +2091,17 @@ impl App {
     fn on_comment_key(&mut self, key: KeyEvent) {
         match key.code {
             // Esc discards; Tab saves; Enter inserts a newline.
-            KeyCode::Esc => self.mode = Mode::Normal,
+            KeyCode::Esc => {
+                self.struct_comment = None;
+                self.mode = Mode::Normal;
+            }
             KeyCode::Tab => {
                 if let Mode::Comment(ed) = std::mem::replace(&mut self.mode, Mode::Normal) {
-                    self.apply_comment(ed.addr, ed.text());
+                    if let Some((idx, field_idx)) = self.struct_comment.take() {
+                        self.apply_struct_comment(idx, field_idx, ed.text());
+                    } else {
+                        self.apply_comment(ed.addr, ed.text());
+                    }
                 }
             }
             _ => {
@@ -2129,7 +2252,74 @@ impl App {
                     self.save_as(Path::new(p));
                 }
             }
+            PromptKind::StructName(idx) => self.apply_struct_rename(idx, input),
+            PromptKind::StructField(idx, fidx) => self.apply_struct_field_edit(idx, fidx, input),
         }
+    }
+
+    /// Rename struct `idx` inline, committing through the shared struct-edit
+    /// snapshot so undo/redo and dirty-tracking match the `S` modal.
+    fn apply_struct_rename(&mut self, idx: usize, input: String) {
+        let name = input.trim();
+        if name == self.base.structs[idx].name.as_str() {
+            self.status = Some("struct name unchanged".to_string());
+            return;
+        }
+        let before = self.base.structs.clone();
+        match self.base.rename_struct(idx, name) {
+            Ok(()) => {
+                let after = self.base.structs.clone();
+                self.commit(
+                    Edit::Structs { before, after },
+                    format!("rename struct → {name}"),
+                );
+            }
+            Err(e) => self.status = Some(e),
+        }
+    }
+
+    /// Edit field `fidx` of struct `idx` from a `name: type` spec.
+    fn apply_struct_field_edit(&mut self, idx: usize, fidx: usize, input: String) {
+        let before = self.base.structs.clone();
+        let outcome = self.parse_field_spec(&input).and_then(|(name, ty)| {
+            self.base
+                .set_struct_field(idx, Some(fidx), &name, ty)
+                .map(|()| format!("edit field {name}"))
+        });
+        match outcome {
+            Ok(label) => {
+                let after = self.base.structs.clone();
+                self.commit(Edit::Structs { before, after }, label);
+            }
+            Err(e) => self.status = Some(e),
+        }
+    }
+
+    /// Apply a struct/field comment edit (empty input clears it), committing
+    /// through the shared struct-edit snapshot. `field_idx` `None` is the
+    /// struct-level comment.
+    fn apply_struct_comment(&mut self, idx: usize, field_idx: Option<usize>, input: String) {
+        let new = trimmed_opt(&input);
+        let old = match field_idx {
+            None => self.base.structs[idx].comment.clone(),
+            Some(f) => self.base.structs[idx].fields[f].comment.clone(),
+        };
+        if new == old {
+            self.status = Some("comment unchanged".to_string());
+            return;
+        }
+        let label = if new.is_some() {
+            "edit comment".to_string()
+        } else {
+            "clear comment".to_string()
+        };
+        let before = self.base.structs.clone();
+        match field_idx {
+            None => self.base.set_struct_comment(idx, new),
+            Some(f) => self.base.set_struct_field_comment(idx, f, new),
+        }
+        let after = self.base.structs.clone();
+        self.commit(Edit::Structs { before, after }, label);
     }
 
     // ── Editing / undo / save ─────────────────────────────────────────────────
@@ -3802,6 +3992,8 @@ fn is_navigable(kind: &WidgetKind) -> bool {
             | WidgetKind::Comment
             | WidgetKind::XrefIn
             | WidgetKind::XrefOut
+            | WidgetKind::StructDefName { .. }
+            | WidgetKind::StructDefField { .. }
     )
 }
 
@@ -3810,13 +4002,17 @@ fn is_navigable(kind: &WidgetKind) -> bool {
 fn rgb_for_kind(kind: &WidgetKind) -> Rgb {
     match kind {
         WidgetKind::Address => (0x56, 0x9c, 0xd6),
-        WidgetKind::Label | WidgetKind::SegmentDecl => (0xdc, 0xdc, 0xaa),
+        WidgetKind::Label | WidgetKind::SegmentDecl | WidgetKind::StructDefName { .. } => {
+            (0xdc, 0xdc, 0xaa)
+        }
         WidgetKind::Separator
         | WidgetKind::FileHeader
         | WidgetKind::SegmentHeader
         | WidgetKind::Comment => (0x6a, 0x99, 0x55),
         WidgetKind::Opcode | WidgetKind::AssumeDir => (0xc5, 0x86, 0xc0),
-        WidgetKind::Operand { .. } | WidgetKind::StructField { .. } => (0x9c, 0xdc, 0xfe),
+        WidgetKind::Operand { .. }
+        | WidgetKind::StructField { .. }
+        | WidgetKind::StructDefField { .. } => (0x9c, 0xdc, 0xfe),
         WidgetKind::Punctuation => FG,
         WidgetKind::Data => (0xb5, 0xce, 0xa8),
         WidgetKind::ArrayIndex { .. } => (0xce, 0x91, 0x78),
@@ -5157,6 +5353,106 @@ mod tests {
         // A pointer to a breaks the cycle — accepted.
         let apt = app.base.parse_data_type("*Cyc_a").unwrap();
         assert!(app.base.set_struct_field(b, None, "a", apt).is_ok());
+    }
+
+    /// Point the cursor at the first navigable widget whose kind matches.
+    fn focus_kind(app: &mut App, pred: impl Fn(&WidgetKind) -> bool) {
+        let n = app
+            .navigable
+            .iter()
+            .position(|&wi| pred(&app.widgets[wi].kind))
+            .expect("a widget of the requested kind is navigable");
+        app.cursor = n;
+    }
+
+    #[test]
+    fn inline_struct_edit_renames_retypes_and_comments() {
+        let mut app = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+
+        // Seed a struct with one field, then refresh the derived listing.
+        let idx = app.base.add_struct("Hero").unwrap();
+        app.base
+            .set_struct_field(idx, None, "hp", DataType::Scalar(ScalarDataType::U16))
+            .unwrap();
+        app.rederive();
+        terminal.draw(|f| app.render(f)).unwrap();
+        assert!(
+            app.widgets.iter().any(|w| {
+                matches!(w.kind, WidgetKind::StructDefName { .. }) && w.text == "Hero"
+            }),
+            "struct section is rendered into the listing"
+        );
+
+        // Rename the struct inline: `l` opens a struct-name prompt.
+        focus_kind(&mut app, |k| matches!(k, WidgetKind::StructDefName { .. }));
+        app.on_key(key(KeyCode::Char('l')));
+        assert!(matches!(
+            app.mode,
+            Mode::Prompt {
+                kind: PromptKind::StructName(_),
+                ..
+            }
+        ));
+        app.on_key(key_ctrl(KeyCode::Char('u')));
+        type_and_submit(&mut app, "Champion");
+        assert_eq!(app.base.structs[idx].name, "Champion");
+        // The cursor stays on the struct name rather than snapping to code.
+        assert!(
+            matches!(
+                app.focused_widget().map(|w| &w.kind),
+                Some(WidgetKind::StructDefName { .. })
+            ),
+            "cursor remains on the struct name after rename"
+        );
+
+        // Comment the struct inline: `;` opens the comment editor, Tab commits.
+        focus_kind(&mut app, |k| matches!(k, WidgetKind::StructDefName { .. }));
+        app.on_key(key(KeyCode::Char(';')));
+        assert!(matches!(app.mode, Mode::Comment(_)));
+        for c in "the hero".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(app.base.structs[idx].comment.as_deref(), Some("the hero"));
+
+        // Edit the field as a `name: type` spec.
+        focus_kind(&mut app, |k| matches!(k, WidgetKind::StructDefField { .. }));
+        app.on_key(key(KeyCode::Char('l')));
+        assert!(matches!(
+            app.mode,
+            Mode::Prompt {
+                kind: PromptKind::StructField(..),
+                ..
+            }
+        ));
+        app.on_key(key_ctrl(KeyCode::Char('u')));
+        type_and_submit(&mut app, "health: u32");
+        assert_eq!(app.base.structs[idx].fields[0].name, "health");
+        assert_eq!(
+            app.base.structs[idx].fields[0].r#type,
+            DataType::Scalar(ScalarDataType::U32)
+        );
+
+        // Field comment, then undo restores the prior (absent) comment.
+        focus_kind(&mut app, |k| matches!(k, WidgetKind::StructDefField { .. }));
+        app.on_key(key(KeyCode::Char(';')));
+        for c in "hit points".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Tab));
+        assert_eq!(
+            app.base.structs[idx].fields[0].comment.as_deref(),
+            Some("hit points")
+        );
+        app.on_key(key(KeyCode::Char('u')));
+        assert_eq!(app.base.structs[idx].fields[0].comment, None);
+
+        // Address-based editing keys are suppressed on struct widgets: `d`
+        // (type picker) must not open a picker or touch the dummy anchor attr.
+        focus_kind(&mut app, |k| matches!(k, WidgetKind::StructDefName { .. }));
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(matches!(app.mode, Mode::Normal), "type picker suppressed");
     }
 
     // ── fn / let binding editor ───────────────────────────────────────────────

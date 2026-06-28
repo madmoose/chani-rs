@@ -141,6 +141,8 @@ fn widget_class(kind: &WidgetKind) -> &'static str {
         WidgetKind::Data => "data",
         WidgetKind::ArrayIndex { .. } => "array-idx",
         WidgetKind::StructField { .. } => "struct-field",
+        WidgetKind::StructDefName { .. } => "label",
+        WidgetKind::StructDefField { .. } => "struct-field",
         WidgetKind::FileHeader => "file-hdr",
         WidgetKind::SegmentHeader => "seg-hdr",
         WidgetKind::SegmentDecl => "seg-decl",

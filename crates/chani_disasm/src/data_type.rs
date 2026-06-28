@@ -66,6 +66,7 @@ pub enum DataType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructDef {
     pub name: SmallString,
+    pub comment: Option<String>,
     pub fields: Vec<StructField>,
 }
 
@@ -73,6 +74,7 @@ pub struct StructDef {
 pub struct StructField {
     pub name: SmallString,
     pub r#type: DataType,
+    pub comment: Option<String>,
 }
 
 impl DataType {

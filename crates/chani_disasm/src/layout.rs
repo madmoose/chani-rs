@@ -29,11 +29,28 @@ pub enum WidgetKind {
     Label,
     Separator,
     Opcode,
-    Operand { index: usize },
+    Operand {
+        index: usize,
+    },
     Punctuation,
     Data,
-    ArrayIndex { base_ofs: u32, index: usize },
-    StructField { base_ofs: u32, field_index: usize },
+    ArrayIndex {
+        base_ofs: u32,
+        index: usize,
+    },
+    StructField {
+        base_ofs: u32,
+        field_index: usize,
+    },
+    /// The name of a struct in the top-of-listing struct-definition section.
+    StructDefName {
+        struct_idx: usize,
+    },
+    /// A field name in the struct-definition section.
+    StructDefField {
+        struct_idx: usize,
+        field_index: usize,
+    },
     FileHeader,
     SegmentHeader,
     SegmentDecl,
@@ -1208,6 +1225,166 @@ fn generate_segment_header(
     sh(widgets, global_y, ";");
 }
 
+/// Render the project's struct definitions as a dedicated section: one block per
+/// struct with its name, fields (name + type), and any struct/field comments.
+/// The struct name and each field name are emitted as their own navigable
+/// widgets (`StructDefName`/`StructDefField`) so the TUI can edit them in place;
+/// everything else uses non-navigable kinds. The widgets carry the first
+/// segment's index with offset 0 purely so the listing machinery has an address
+/// to anchor to — struct identity lives in the widget kind, not the address.
+fn generate_struct_defs(
+    project: &Project,
+    seg_idx: SegmentIdx,
+    seg_name: &str,
+    widgets: &mut Vec<Widget>,
+    global_y: &mut u32,
+) {
+    if project.structs.is_empty() {
+        return;
+    }
+
+    let label_x0 = seg_name.len() as u32 + 6;
+    let field_x0 = label_x0 + 4;
+
+    // A full-width banner / comment line in the green, non-navigable
+    // `SegmentHeader` colour, prefixed with the virtual `seg:0000` gutter so the
+    // section lines up with the rest of the listing.
+    let banner = |widgets: &mut Vec<Widget>, global_y: &mut u32, x: u32, text: &str| {
+        push_addr_widget(widgets, seg_idx, seg_name, 0, *global_y);
+        widgets.push(Widget {
+            kind: WidgetKind::SegmentHeader,
+            seg_idx,
+            ofs: 0,
+            x,
+            y: *global_y,
+            text: text.into(),
+            link_addr: None,
+        });
+        *global_y += 1;
+    };
+
+    banner(
+        widgets,
+        global_y,
+        label_x0,
+        &format!("; {}", "-".repeat(75)),
+    );
+    banner(widgets, global_y, label_x0, "; Struct definitions");
+    banner(
+        widgets,
+        global_y,
+        label_x0,
+        &format!("; {}", "-".repeat(75)),
+    );
+    banner(widgets, global_y, label_x0, ";");
+
+    for (struct_idx, def) in project.structs.iter().enumerate() {
+        // Struct-level comment, one green line per source line.
+        if let Some(comment) = &def.comment {
+            for line in comment.lines() {
+                banner(widgets, global_y, label_x0, &format!("; {line}"));
+            }
+        }
+
+        // Header: `struct <name>` — keyword as plain punctuation, name navigable.
+        push_addr_widget(widgets, seg_idx, seg_name, 0, *global_y);
+        widgets.push(Widget {
+            kind: WidgetKind::Punctuation,
+            seg_idx,
+            ofs: 0,
+            x: label_x0,
+            y: *global_y,
+            text: "struct".into(),
+            link_addr: None,
+        });
+        widgets.push(Widget {
+            kind: WidgetKind::StructDefName { struct_idx },
+            seg_idx,
+            ofs: 0,
+            x: label_x0 + 7,
+            y: *global_y,
+            text: def.name.clone(),
+            link_addr: None,
+        });
+        *global_y += 1;
+
+        let type_x0 = field_x0
+            + def
+                .fields
+                .iter()
+                .map(|f| f.name.len() as u32)
+                .max()
+                .unwrap_or(0)
+            + 2;
+
+        for (field_index, field) in def.fields.iter().enumerate() {
+            // Multi-line field comments render as a green block above the field;
+            // a single line renders inline after the type.
+            let comment_lines: Vec<&str> = field
+                .comment
+                .as_deref()
+                .map(|c| c.lines().collect())
+                .unwrap_or_default();
+            if comment_lines.len() > 1 {
+                for line in &comment_lines {
+                    banner(widgets, global_y, field_x0, &format!("; {line}"));
+                }
+            }
+
+            push_addr_widget(widgets, seg_idx, seg_name, 0, *global_y);
+            widgets.push(Widget {
+                kind: WidgetKind::StructDefField {
+                    struct_idx,
+                    field_index,
+                },
+                seg_idx,
+                ofs: 0,
+                x: field_x0,
+                y: *global_y,
+                text: field.name.clone(),
+                link_addr: None,
+            });
+            widgets.push(Widget {
+                kind: WidgetKind::Punctuation,
+                seg_idx,
+                ofs: 0,
+                x: type_x0,
+                y: *global_y,
+                text: field.r#type.type_str(&project.segments, &project.structs),
+                link_addr: None,
+            });
+            if let [single] = comment_lines.as_slice() {
+                let comment_x0 = type_x0 + 24;
+                widgets.push(Widget {
+                    kind: WidgetKind::SegmentHeader,
+                    seg_idx,
+                    ofs: 0,
+                    x: comment_x0,
+                    y: *global_y,
+                    text: format!("; {single}"),
+                    link_addr: None,
+                });
+            }
+            *global_y += 1;
+        }
+
+        // Closing `end` keyword, mirroring the `.chani` `struct[..]: … end` form.
+        push_addr_widget(widgets, seg_idx, seg_name, 0, *global_y);
+        widgets.push(Widget {
+            kind: WidgetKind::Punctuation,
+            seg_idx,
+            ofs: 0,
+            x: label_x0,
+            y: *global_y,
+            text: "end".into(),
+            link_addr: None,
+        });
+        *global_y += 1;
+
+        banner(widgets, global_y, label_x0, ";");
+    }
+}
+
 /// Build a globally-y-positioned flat widget list for the entire project.
 /// Returns the widgets and the total number of rows.
 pub fn generate_widgets(project: &Project) -> (Vec<Widget>, u32) {
@@ -1231,6 +1408,13 @@ pub fn generate_widgets_with_options(
     for (i, (seg_idx, seg)) in project.segments.indexed_iter().enumerate() {
         if i == 0 {
             generate_file_header(
+                project,
+                first_seg_idx,
+                &first_seg_name,
+                &mut all_widgets,
+                &mut global_y,
+            );
+            generate_struct_defs(
                 project,
                 first_seg_idx,
                 &first_seg_name,
